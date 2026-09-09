@@ -134,3 +134,36 @@ jobs:
           scp -i ~/.ssh/ecs_key -P "$ECS_PORT" -o StrictHostKeyChecking=accept-new "$APK" "$ECS_USER@$ECS_HOST:$ECS_PATH/"
           scp -i ~/.ssh/ecs_key -P "$ECS_PORT" -o StrictHostKeyChecking=accept-new latest.json "$ECS_USER@$ECS_HOST:$ECS_PATH/"
           echo "ECS 同步完成"
+
+      # GitHub 更新通道：回写 update/latest.json（apk 为 Release 资产绝对链接）
+      # 海外/备份通道；国内手机建议走 ECS 通道（raw.githubusercontent 国内连通性不稳）
+      - name: 回写 GitHub 更新通道 update/latest.json
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          APK="hengya-${TAG}-release.apk"
+          APK_URL="https://github.com/long2004at/hengya/releases/download/${TAG}/${APK}"
+          VERSION=$(grep '^version:' app/pubspec.yaml | sed 's/version: *//; s/\r//')
+          CODE=${VERSION#*+}
+          SHA=$(sha256sum "app/${APK}" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "app/${APK}")
+          mkdir -p update
+          cat > update/latest.json <<EOF
+          {
+            "versionName": "${VERSION}",
+            "versionCode": ${CODE},
+            "apk": "${APK_URL}",
+            "sha256": "${SHA}",
+            "sizeBytes": ${SIZE},
+            "date": "$(date +%F)",
+            "notes": "恒牙 ${TAG}：更新说明见 GitHub Release https://github.com/long2004at/hengya/releases/tag/${TAG}"
+          }
+          EOF
+          cat update/latest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update/latest.json
+          git commit -m "chore: GitHub 更新通道 latest.json → ${TAG} [skip ci]" || echo "latest.json 无变更"
+          git push origin HEAD:main

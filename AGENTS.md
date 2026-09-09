@@ -17,9 +17,12 @@
 
 1. `app/pubspec.yaml` 版本递增——**versionCode 严格递增**（Android 不允许降级覆盖安装；应用内更新比较只认 versionCode）；
 2. commit → `git tag v<版本>` → push（含 tag）；
-3. CI 自动构建 APK 并创建**草稿** Release（构建日志含 sha256 / sizeBytes）；
-4. 人工润色中文发布说明 → 发布 Release；
-5. 自建更新通道（如 ECS nginx）的 `latest.json` 需手工同步新版本的 apk 名 / sha256 / sizeBytes / versionCode。
+3. CI 自动完成：构建 APK → 创建**草稿** Release → 同步 **ECS 通道**（latest.json 上传，连接信息在 Secrets）→ 回写 **GitHub 通道**（`update/latest.json`，apk 为 Release 资产绝对链接）；
+4. 人工润色中文发布说明 → 发布 Release。
+
+双更新通道（内容一致，CI 保证同步）：
+- **ECS 通道**（国内手机推荐）：URL 含私有 token，**绝不写入公开仓库**；国内用户从维护者处获取。CI 经受限专用密钥（sftp chroot）自动同步
+- **GitHub 通道**（海外/备份，国内连通性不稳）：`https://raw.githubusercontent.com/long2004at/hengya/main/update/latest.json`
 
 ## 依赖红线
 
