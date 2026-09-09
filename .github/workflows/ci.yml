@@ -102,11 +102,20 @@ jobs:
 
       - run: flutter build apk --release
 
-      - name: 计算哈希与签名证书（证书指纹须与历史版本一致）
+      - name: 计算哈希并核对签名证书（指纹不符即中止，杜绝坏包进通道）
         run: |
           sha256sum build/app/outputs/flutter-apk/app-release.apk
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs \
-            build/app/outputs/flutter-apk/app-release.apk | grep 'SHA-256 digest'
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          ACTUAL=$("$APKSIGNER" verify --print-certs \
+            build/app/outputs/flutter-apk/app-release.apk \
+            | grep 'SHA-256 digest' | head -1 | grep -oE '[0-9a-f]{64}')
+          EXPECTED=86e812bd4721e2f4a6f8a5735cb0dbcb3cf3f495de5fcc57858c64240d96f877
+          echo "cert SHA-256: $ACTUAL"
+          echo "expected    : $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::签名证书指纹与历史版本不一致，中止发版（APK 未进任何通道）"
+            exit 1
+          fi
 
       - name: 附到 Release（不存在则建草稿）
         env:
