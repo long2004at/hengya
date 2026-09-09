@@ -1,0 +1,67 @@
+{
+  "delivery_version": "F3 inclined selected delivery",
+  "all_checks_passed": true,
+  "all_15_original_assets_byte_identical_to_selected_F3": true,
+  "all_original_F3_files_included": true,
+  "other_variants_included": false,
+  "tooth_remains_inclined": true,
+  "no_tooth_only_counterrotation": true,
+  "tooth_ring_overlap_nonzero_alpha_pixels": 0,
+  "eight_neighbor_contact_pixels": 0,
+  "foreground_component_count": 2,
+  "component_pixel_counts": [
+    131973,
+    5671
+  ],
+  "layer_to_foreground_recomposition_error": 0,
+  "foreground_to_main_recomposition_error": 0,
+  "foreground_max_radius_px": 297.806,
+  "pixels_outside_requested_66pct_circle": 0,
+  "pixels_outside_66_of_108_circle": 0,
+  "main_PNGs_have_sRGB_profiles": true,
+  "original_selected_version_checks": {
+    "id": "F3",
+    "directory": "f3-airy-separated",
+    "canvas_px": [
+      1024,
+      1024
+    ],
+    "nominal_clearance_px": 7.84,
+    "tooth_and_ring_overlap_nonzero_alpha_pixels": 0,
+    "eight_neighbor_touching_nonzero_alpha_pixels": 0,
+    "foreground_nonzero_alpha_component_count": 2,
+    "foreground_component_pixel_counts": [
+      131973,
+      5671
+    ],
+    "minimum_nonzero_alpha_boundary_pixel_center_distance_px": 6.708,
+    "boundary_measurement_note": "Pixel-center distance after antialiasing, not nominal geometric clearance.",
+    "selected_F_tooth_path_unchanged": true,
+    "selected_F_microgold_gradient_unchanged": true,
+    "selected_F_position_scale_and_rotation_unchanged": true,
+    "pixels_changed_outside_local_detachment_region": 0,
+    "background_byte_identical_to_selected_F": true,
+    "foreground_max_radius_px": 297.806,
+    "pixels_outside_requested_66pct_circle": 0,
+    "pixels_outside_66_of_108_circle": 0,
+    "visible_text_or_embedded_raster_elements": 0,
+    "foreground_recomposition_max_channel_error": 0,
+    "icon_recomposition_max_channel_error": 0,
+    "main_icon_mode": "RGB",
+    "foreground_modes": [
+      "RGBA",
+      "RGBA",
+      "RGBA"
+    ],
+    "export_sizes_px": [
+      48,
+      96,
+      192,
+      512,
+      1024
+    ],
+    "tooth_sha256": "70683dd9dda96ac7db47dba6ea4029310d362565d9120eef3d9de9508c3b1c6a",
+    "icon_sha256": "b6c141801f769b6e1a0a9643c1e4c2407bc7f942592ec77397787a63823ce54a"
+  },
+  "scope_note": "File/geometry verification and visual preview inspection; no new user study, trademark review or device integration test."
+}

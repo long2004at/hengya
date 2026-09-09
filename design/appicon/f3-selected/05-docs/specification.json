@@ -1,0 +1,47 @@
+{
+  "brand": "恒牙",
+  "selected_version": "F3 随环倾斜 · 微金牙齿完全独立",
+  "source_variant": "f3-airy-separated, v7",
+  "delivery_action": "Organize existing selected assets without modifying them.",
+  "main_icon": "01-icons/icon-1024.png",
+  "excludes": [
+    "牙齿竖直试验版",
+    "F1/F2 间距对比方案",
+    "此前各轮草稿"
+  ],
+  "design": {
+    "tooth_finish": "低饱和浅香槟金",
+    "tooth_palette": [
+      "#FFFCF2",
+      "#F4E9D0",
+      "#EADAB5",
+      "#DDC69B"
+    ],
+    "tooth_orientation": "随环倾斜，未单独扶正",
+    "ring_long_axis_right_down_degrees": 12,
+    "shared_transform": "translate(512 512) scale(.98) rotate(19) translate(-512 -512)",
+    "tooth_has_upright_counterrotation": false,
+    "tooth_ring_relationship": "两个完全独立图形，无接触、无连接",
+    "nominal_gap_at_1024_px": 7.84,
+    "canvas_px": [
+      1024,
+      1024
+    ],
+    "full_bleed_square": true,
+    "baked_round_corners": false
+  },
+  "layer_composition": [
+    "background-1024.png",
+    "ring-1024.png",
+    "tooth-1024.png"
+  ],
+  "color_profile": "sRGB",
+  "export_sizes_px": [
+    48,
+    96,
+    192,
+    512,
+    1024
+  ],
+  "asset_original_count": 15
+}

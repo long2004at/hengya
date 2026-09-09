@@ -45,14 +45,25 @@ appicon/
 ## 渲染
 
 ```powershell
-cd D:\heng\design\appicon\tools
+cd design\appicon\tools
+npm install
 node render.js
 ```
 
 改 SVG 后重跑即可重出全部 PNG（6 概念 × 5 尺寸 + 前景/背景层）。
 
-## 第二轮（待选定方向后）
+## 第二轮 · 已选定：F3 随环倾斜版（现为 App 正式图标）
 
-1. 按反馈微调选中稿（比例、配色、点缀取舍）；
-2. 导出 Android 自适应图标全套：mipmap-xxxhdpi 等密度 ic_launcher 前景/背景 PNG + 512×512 商店陈列图；
-3. 视需要给 thinned/monochrome 变体（主题图标）。
+**F3：微金牙齿随环倾斜，长牙根与环带完全独立**（源变体 `f3-airy-separated v7`）。牙齿低饱和浅香槟金、保留微弱金属光；环带右倾 12°、随环下沉不扶正；牙与环无接触无连接（1024 原图名义间距 7.84px）；1024×1024 全出血方形、无预绘圆角；已通过中央 66% 安全圆与 66/108 自适应安全区校验。
+
+- 完整交付包（官方 PNG / 独立图层 / SVG 源 / 规格与 SHA-256 校验）：`f3-selected/`
+- 重新生成 Android 图标（写入 `app/android/app/src/main/res/`，幂等）：
+
+```powershell
+cd design\appicon\tools
+node render-android.js ..\f3-selected
+```
+
+产物：旧版 `ic_launcher.png` 五密度（48/72/96/144/192，其中 48/96/192 字节不变复制官方 PNG）+ 自适应图标 `ic_launcher_foreground/background.png` 五密度（108/162/216/324/432）+ `mipmap-anydpi-v26/ic_launcher.xml`。
+
+第一轮六概念稿保留于 `svg/`、`png/` 作过程存档；后续可选：thinned/monochrome 主题图标变体、512×512 商店陈列图。

@@ -1,0 +1,164 @@
+{
+  "package": "恒牙 F3 随环倾斜版",
+  "original_asset_count": 15,
+  "total_files_including_this_manifest": 22,
+  "self_excluded_from_hashes": true,
+  "files": [
+    {
+      "path": "01-icons/icon-1024.png",
+      "bytes": 99409,
+      "sha256": "b6c141801f769b6e1a0a9643c1e4c2407bc7f942592ec77397787a63823ce54a",
+      "purpose": "正式主图 PNG",
+      "source_selected_F3_file": "icon-1024.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "01-icons/icon-192.png",
+      "bytes": 16169,
+      "sha256": "c1927827e51b63463b12a883ab3b7dfa67a2680add445c9cdbcece661154d350",
+      "purpose": "正式主图 PNG",
+      "source_selected_F3_file": "icon-192.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "01-icons/icon-48.png",
+      "bytes": 3008,
+      "sha256": "e03d9482198ad8711ac78e5d1cebebf52fcd69963819cc7b1a831fdc3efbc8bd",
+      "purpose": "正式主图 PNG",
+      "source_selected_F3_file": "icon-48.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "01-icons/icon-512.png",
+      "bytes": 54781,
+      "sha256": "7444c0791ae7aeb4b8037647fd5955452292e5513a59c59e12b40eeb15967b48",
+      "purpose": "正式主图 PNG",
+      "source_selected_F3_file": "icon-512.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "01-icons/icon-96.png",
+      "bytes": 7131,
+      "sha256": "077ed7551771ff78af0457203b4fde696a256dff7a6ce0bb42a7ec37d2d8e0cb",
+      "purpose": "正式主图 PNG",
+      "source_selected_F3_file": "icon-96.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "02-layers/background-1024.png",
+      "bytes": 62815,
+      "sha256": "0c9e2c341077fecad64781079a57f4efd8ba56c040777fde184e2f051b49d817",
+      "purpose": "可直接叠加的独立 PNG 图层",
+      "source_selected_F3_file": "background-1024.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "02-layers/foreground-1024.png",
+      "bytes": 50438,
+      "sha256": "8464de028ceb427de3d97febf1514eddd5f269d3788cff330a9ef25e380f6f96",
+      "purpose": "可直接叠加的独立 PNG 图层",
+      "source_selected_F3_file": "foreground-1024.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "02-layers/ring-1024.png",
+      "bytes": 46471,
+      "sha256": "559ea0a8ba539f0abe67bf9129140724e774fec3491bf6373a4c322f5c3c6f22",
+      "purpose": "可直接叠加的独立 PNG 图层",
+      "source_selected_F3_file": "ring-1024.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "02-layers/tooth-1024.png",
+      "bytes": 9014,
+      "sha256": "70683dd9dda96ac7db47dba6ea4029310d362565d9120eef3d9de9508c3b1c6a",
+      "purpose": "可直接叠加的独立 PNG 图层",
+      "source_selected_F3_file": "tooth-1024.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "03-vectors/background.svg",
+      "bytes": 28106,
+      "sha256": "d685891df5ba1d22841a32265c5dc335e09f5ec7fcef77bef06f9467deee30ed",
+      "purpose": "可编辑 SVG",
+      "source_selected_F3_file": "background.svg",
+      "unchanged_copy": true
+    },
+    {
+      "path": "03-vectors/foreground.svg",
+      "bytes": 48304,
+      "sha256": "d1181c98a3b2dc1b39766c7dd395af6c0514c53845366f913f3dfeecf1a7215b",
+      "purpose": "可编辑 SVG",
+      "source_selected_F3_file": "foreground.svg",
+      "unchanged_copy": true
+    },
+    {
+      "path": "03-vectors/ring.svg",
+      "bytes": 48213,
+      "sha256": "ae7c58389719ada077ff7175b4fdd511552133fa1d7c281ec6e6e2b83f6af2df",
+      "purpose": "可编辑 SVG",
+      "source_selected_F3_file": "ring.svg",
+      "unchanged_copy": true
+    },
+    {
+      "path": "03-vectors/source.svg",
+      "bytes": 48501,
+      "sha256": "72b2f6cedebf568224d8e29dbd03ba58fed7485e68478ad2dcba51e93695e767",
+      "purpose": "可编辑 SVG",
+      "source_selected_F3_file": "source.svg",
+      "unchanged_copy": true
+    },
+    {
+      "path": "03-vectors/tooth.svg",
+      "bytes": 42111,
+      "sha256": "e4722b5a664ad7da250d60cafa6fffb3d03f9a3d5272d10973f3fa0a891cfe5c",
+      "purpose": "可编辑 SVG",
+      "source_selected_F3_file": "tooth.svg",
+      "unchanged_copy": true
+    },
+    {
+      "path": "04-review/48px-check.png",
+      "bytes": 96155,
+      "sha256": "a6beaf12fe1d3e59af54786a61c7dd8ba1050af9e949ec9aa6e689f0db0d0c20",
+      "purpose": "F3 专属预览与检查"
+    },
+    {
+      "path": "04-review/layers-preview.png",
+      "bytes": 79278,
+      "sha256": "35c6ad5fe315760b16685f730121d4ce9c40c9a70aa5437ce82648c762fc9e08",
+      "purpose": "F3 专属预览与检查"
+    },
+    {
+      "path": "04-review/separation-detail-512.png",
+      "bytes": 46925,
+      "sha256": "2ce7220358a5c1a71a355ef8ccb7df4ea735d9197c6522fa108a6a56517bd1f3",
+      "purpose": "F3 专属预览与检查",
+      "source_selected_F3_file": "separation-detail-512.png",
+      "unchanged_copy": true
+    },
+    {
+      "path": "05-docs/specification.json",
+      "bytes": 1274,
+      "sha256": "4b09de950dfcb4639404cefbdb37dd5215785eb85c347a97ff032dfc23ad84d0",
+      "purpose": "交付文档与校验"
+    },
+    {
+      "path": "05-docs/validation.json",
+      "bytes": 2459,
+      "sha256": "2021fb680782381bc797bd58bd9590eebf1c4c4e5c93b96c2294843787c1442a",
+      "purpose": "交付文档与校验"
+    },
+    {
+      "path": "preview.png",
+      "bytes": 187703,
+      "sha256": "399d02e540101a118157be55b278cf8069bf1128617bfa1ba9695f55973db7bc",
+      "purpose": "已选版本确认总览"
+    },
+    {
+      "path": "README.zh-CN.md",
+      "bytes": 4035,
+      "sha256": "a750f8b2ac57d7ce81bba30596db91d63fba84aa316baf52f0a6b2cd91dabdd0",
+      "purpose": "交付说明"
+    }
+  ]
+}
