@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>恒牙 · App 图标概念稿 · 第一轮</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #070C1A;
+    color: #D9E3F6;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 56px 6vw 96px;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  header { margin-bottom: 48px; }
+  header h1 { font-size: 26px; font-weight: 600; letter-spacing: 2px; color: #FFFFFF; }
+  header h1 em { color: #6FA0F2; font-style: normal; }
+  header p { margin-top: 10px; color: #7D8FB4; font-size: 13px; line-height: 1.9; }
+  h2 { font-size: 19px; font-weight: 600; color: #FFFFFF; letter-spacing: 1px; }
+  .sub { color: #6FA0F2; font-size: 13px; margin: 4px 0 14px; letter-spacing: 1px; }
+
+  /* 总览 */
+  .overview { margin-bottom: 20px; }
+  .overview h2, .sizerow h2 { font-size: 14px; color: #8FA3CC; letter-spacing: 3px; margin-bottom: 18px; font-weight: 500; }
+  .row { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-end; }
+  .mini { width: 72px; height: 72px; border-radius: 50%; overflow: hidden; }
+  .mini img { width: 100%; height: 100%; display: block; }
+  .sizerow { margin: 34px 0 56px; }
+  .sizerow .cell { display: flex; align-items: center; gap: 12px; }
+  .sizerow img { display: block; }
+  .sizerow .cap { color: #55658C; font-size: 11px; margin-top: 8px; text-align: center; }
+  .sizerow .cell48 { text-align: center; }
+
+  /* 概念区块 */
+  .concept {
+    display: flex; gap: 44px; align-items: flex-start; flex-wrap: wrap;
+    padding: 42px 0; border-top: 1px solid #16224A;
+  }
+  .concept .main { flex: 0 0 380px; }
+  .concept .big {
+    width: 380px; height: 380px; display: block;
+    border-radius: 22px; box-shadow: 0 22px 60px rgba(0,0,0,.5);
+  }
+  .concept .side { flex: 1; min-width: 0; }
+  .concept p.desc { color: #A9B8DA; font-size: 13.5px; line-height: 1.95; margin-bottom: 12px; }
+  .concept p.tone { color: #55658C; font-size: 12px; margin-bottom: 22px; letter-spacing: .5px; }
+
+  .masks { display: flex; gap: 18px; align-items: center; margin-bottom: 26px; flex-wrap: wrap; }
+  .chip { width: 150px; height: 150px; overflow: hidden; display: block; position: relative; }
+  .chip img { width: 100%; height: 100%; display: block; }
+  .circle  { border-radius: 50%; }
+  .rounded { border-radius: 22%; }
+  .squircle{ border-radius: 27%; }
+  .masklbl { color: #55658C; font-size: 11px; text-align: center; margin-top: 8px; }
+  .maskwrap { text-align: center; }
+
+  .sizes { display: flex; gap: 26px; align-items: flex-end; margin-bottom: 26px; flex-wrap: wrap; }
+  .sizes .cap { color: #55658C; font-size: 11px; margin-top: 8px; text-align: center; }
+
+  .adaptive { display: flex; gap: 16px; align-items: center; }
+  .adaptive .chip { width: 132px; height: 132px; }
+  .adaptive .chip img { position: absolute; inset: 0; }
+  .adaptive .lbl { color: #55658C; font-size: 11.5px; line-height: 1.8; max-width: 300px; }
+
+  footer { margin-top: 64px; border-top: 1px solid #16224A; padding-top: 28px;
+           color: #55658C; font-size: 12.5px; line-height: 2.1; }
+  code { color: #9DBCF5; background: #0D1631; padding: 1px 8px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>恒牙 · App 图标概念稿 <em>· 第一轮 6 方向</em></h1>
+  <p>SVG 矢量源（1024 全出血方形，主形置于中央 ~66% 安全区）→ resvg 真实光栅导出。
+     48px 行为真 48 像素渲染，非浏览器缩放，可直接作桌面辨识度验收。
+     六稿无文字、无牙齿主体、无医疗符号；A/B/D 亮渐变家族，C/E/F 午夜恒光家族。</p>
+</header>
+
+<div class="overview">
+  <h2>总览 · 72px 圆形掩膜</h2>
+  <div class="row">
+    <span class="mini"><img src="../png/full/a_infinity_star_192.png" alt="A"></span>
+    <span class="mini"><img src="../png/full/b_orbit_ring_192.png" alt="B"></span>
+    <span class="mini"><img src="../png/full/c_eternal_star_192.png" alt="C"></span>
+    <span class="mini"><img src="../png/full/d_ridge_loop_192.png" alt="D"></span>
+    <span class="mini"><img src="../png/full/e_white_dragon_192.png" alt="E"></span>
+    <span class="mini"><img src="../png/full/f_aurora_arc_192.png" alt="F"></span>
+  </div>
+</div>
+
+<div class="sizerow">
+  <h2>硬门测试 · 真 48px 光栅</h2>
+  <div class="row">
+    <div class="cell48"><img src="../png/full/a_infinity_star_48.png" width="48" height="48"><div class="cap">A</div></div>
+    <div class="cell48"><img src="../png/full/b_orbit_ring_48.png" width="48" height="48"><div class="cap">B</div></div>
+    <div class="cell48"><img src="../png/full/c_eternal_star_48.png" width="48" height="48"><div class="cap">C</div></div>
+    <div class="cell48"><img src="../png/full/d_ridge_loop_48.png" width="48" height="48"><div class="cap">D</div></div>
+    <div class="cell48"><img src="../png/full/e_white_dragon_48.png" width="48" height="48"><div class="cap">E</div></div>
+    <div class="cell48"><img src="../png/full/f_aurora_arc_48.png" width="48" height="48"><div class="cap">F</div></div>
+  </div>
+</div>
+
+<section class="concept">
+  <div class="main"><img class="big" src="../png/full/a_infinity_star_512.png" alt="概念A"></div>
+  <div class="side">
+    <h2>A · 恒环·星栖</h2>
+    <p class="sub">无限环带 × 星牙合一（你指定的方向）</p>
+    <p class="desc">一笔不断开的横置环带——坚持的闭环；环的交点上栖着一颗光体：
+      上半是四芒星光，下半收拢成根形，「似星又似牙冠带根」的抽象双关，仅此一处、含蓄克制。
+      远读整稿亦如冠冕镶珠：恒 = 永恒，冠 = 无声的牙科余韵。</p>
+    <p class="tone">底色：品牌渐变 #366EF4 → #003CAB（135°）｜主体：白 → 淡蓝｜点缀：纯蓝家族</p>
+    <div class="masks">
+      <div class="maskwrap"><span class="chip circle"><img src="../png/full/a_infinity_star_512.png"></span><div class="masklbl">圆形</div></div>
+      <div class="maskwrap"><span class="chip rounded"><img src="../png/full/a_infinity_star_512.png"></span><div class="masklbl">圆角方</div></div>
+      <div class="maskwrap"><span class="chip squircle"><img src="../png/full/a_infinity_star_512.png"></span><div class="masklbl">squircle 近似</div></div>
+    </div>
+    <div class="sizes">
+      <div><img src="../png/full/a_infinity_star_96.png" width="96" height="96"><div class="cap">96px</div></div>
+      <div><img src="../png/full/a_infinity_star_48.png" width="48" height="48"><div class="cap">48px</div></div>
+    </div>
+    <div class="adaptive">
+      <span class="chip circle">
+        <img src="../png/bg/a_infinity_star_bg_1024.png">
+        <img src="../png/fg/a_infinity_star_fg_1024.png">
+      </span>
+      <span class="lbl">自适应图标分层合成演示<br>（背景层 PNG + 前景层透明 PNG）</span>
+    </div>
+  </div>
+</section>
+
+<section class="concept">
+  <div class="main"><img class="big" src="../png/full/b_orbit_ring_512.png" alt="概念B"></div>
+  <div class="side">
+    <h2>B · 恒环</h2>
+    <p class="sub">一枚不断开的圆环 / 轨道</p>
+    <p class="desc">永恒的最简符号：一枚微微倾侧悬浮的环，贵金属白的环身，
+      香槟金流光扫过外缘，一粒星火停驻——光线经过永恒的那一瞬。
+      金为点缀实验，可整支移除回归纯蓝。</p>
+    <p class="tone">底色：品牌渐变 #366EF4 → #003CAB（垂直）+ 左上柔光｜点缀：香槟金微光</p>
+    <div class="masks">
+      <div class="maskwrap"><span class="chip circle"><img src="../png/full/b_orbit_ring_512.png"></span><div class="masklbl">圆形</div></div>
+      <div class="maskwrap"><span class="chip rounded"><img src="../png/full/b_orbit_ring_512.png"></span><div class="masklbl">圆角方</div></div>
+      <div class="maskwrap"><span class="chip squircle"><img src="../png/full/b_orbit_ring_512.png"></span><div class="masklbl">squircle 近似</div></div>
+    </div>
+    <div class="sizes">
+      <div><img src="../png/full/b_orbit_ring_96.png" width="96" height="96"><div class="cap">96px</div></div>
+      <div><img src="../png/full/b_orbit_ring_48.png" width="48" height="48"><div class="cap">48px</div></div>
+    </div>
+    <div class="adaptive">
+      <span class="chip circle">
+        <img src="../png/bg/b_orbit_ring_bg_1024.png">
+        <img src="../png/fg/b_orbit_ring_fg_1024.png">
+      </span>
+      <span class="lbl">自适应图标分层合成演示<br>（背景层 PNG + 前景层透明 PNG）</span>
+    </div>
+  </div>
+</section>
+
+<section class="concept">
+  <div class="main"><img class="big" src="../png/full/c_eternal_star_512.png" alt="概念C"></div>
+  <div class="side">
+    <h2>C · 恒星</h2>
+    <p class="sub">恒星 = 永恒之星（深夜恒光方向）</p>
+    <p class="desc">中文里「恒星」字面即永恒之星——无需文字，意象自明。
+      午夜蓝幕上一枚恒久发光的四芒星，光晕层层如深空灯塔：长亮，不灭。
+      与 App 界面的极光氛围同源，疏星为底，拒绝一切多余。</p>
+    <p class="tone">底色：午夜蓝（径向）#0E2E66 → #020C22 + 极光余晖｜主体：白 → 冰蓝</p>
+    <div class="masks">
+      <div class="maskwrap"><span class="chip circle"><img src="../png/full/c_eternal_star_512.png"></span><div class="masklbl">圆形</div></div>
+      <div class="maskwrap"><span class="chip rounded"><img src="../png/full/c_eternal_star_512.png"></span><div class="masklbl">圆角方</div></div>
+      <div class="maskwrap"><span class="chip squircle"><img src="../png/full/c_eternal_star_512.png"></span><div class="masklbl">squircle 近似</div></div>
+    </div>
+    <div class="sizes">
+      <div><img src="../png/full/c_eternal_star_96.png" width="96" height="96"><div class="cap">96px</div></div>
+      <div><img src="../png/full/c_eternal_star_48.png" width="48" height="48"><div class="cap">48px</div></div>
+    </div>
+    <div class="adaptive">
+      <span class="chip circle">
+        <img src="../png/bg/c_eternal_star_bg_1024.png">
+        <img src="../png/fg/c_eternal_star_fg_1024.png">
+      </span>
+      <span class="lbl">自适应图标分层合成演示<br>（背景层 PNG + 前景层透明 PNG）</span>
+    </div>
+  </div>
+</section>
+
+<section class="concept">
+  <div class="main"><img class="big" src="../png/full/d_ridge_loop_512.png" alt="概念D"></div>
+  <div class="side">
+    <h2>D · 一笔恒线 · 山恒</h2>
+    <p class="sub">一笔画完又回到起点的连续曲线</p>
+    <p class="desc">一条不断开的线：起于地平，翻过两座山（左低右高，进阶之山），
+      落回大地，闭合成环——「坚持」的书写本身。
+      线顶走势极含蓄地暗合山峦与冠形起伏，属允许的抽象双关，不作主体。</p>
+    <p class="tone">底色：深蓝垂直渐变 #2A5FE3 → #002D7E｜主体：白 → 冰蓝单线</p>
+    <div class="masks">
+      <div class="maskwrap"><span class="chip circle"><img src="../png/full/d_ridge_loop_512.png"></span><div class="masklbl">圆形</div></div>
+      <div class="maskwrap"><span class="chip rounded"><img src="../png/full/d_ridge_loop_512.png"></span><div class="masklbl">圆角方</div></div>
+      <div class="maskwrap"><span class="chip squircle"><img src="../png/full/d_ridge_loop_512.png"></span><div class="masklbl">squircle 近似</div></div>
+    </div>
+    <div class="sizes">
+      <div><img src="../png/full/d_ridge_loop_96.png" width="96" height="96"><div class="cap">96px</div></div>
+      <div><img src="../png/full/d_ridge_loop_48.png" width="48" height="48"><div class="cap">48px</div></div>
+    </div>
+    <div class="adaptive">
+      <span class="chip circle">
+        <img src="../png/bg/d_ridge_loop_bg_1024.png">
+        <img src="../png/fg/d_ridge_loop_fg_1024.png">
+      </span>
+      <span class="lbl">自适应图标分层合成演示<br>（背景层 PNG + 前景层透明 PNG）</span>
+    </div>
+  </div>
+</section>
+
+<section class="concept">
+  <div class="main"><img class="big" src="../png/full/e_white_dragon_512.png" alt="概念E"></div>
+  <div class="side">
+    <h2>E · 白龙</h2>
+    <p class="sub">内部代号「白龙」的抽象化（彩蛋向）</p>
+    <p class="desc">一条单笔流动的白色飘带：尾梢上挑、腹部饱满、昂首破线回望——
+      无鳞无目，纯以动势作龙。香槟金一线为外缘鳞光（点缀实验，可移除）。
+      午夜蓝幕 + 右下极光余晖 + 疏星，深夜方向。</p>
+    <p class="tone">底色：午夜蓝 #081D4A → #02081E + 右下极光余晖｜主体：白飘带｜点缀：香槟金鳞光</p>
+    <div class="masks">
+      <div class="maskwrap"><span class="chip circle"><img src="../png/full/e_white_dragon_512.png"></span><div class="masklbl">圆形</div></div>
+      <div class="maskwrap"><span class="chip rounded"><img src="../png/full/e_white_dragon_512.png"></span><div class="masklbl">圆角方</div></div>
+      <div class="maskwrap"><span class="chip squircle"><img src="../png/full/e_white_dragon_512.png"></span><div class="masklbl">squircle 近似</div></div>
+    </div>
+    <div class="sizes">
+      <div><img src="../png/full/e_white_dragon_96.png" width="96" height="96"><div class="cap">96px</div></div>
+      <div><img src="../png/full/e_white_dragon_48.png" width="48" height="48"><div class="cap">48px</div></div>
+    </div>
+    <div class="adaptive">
+      <span class="chip circle">
+        <img src="../png/bg/e_white_dragon_bg_1024.png">
+        <img src="../png/fg/e_white_dragon_fg_1024.png">
+      </span>
+      <span class="lbl">自适应图标分层合成演示<br>（背景层 PNG + 前景层透明 PNG）</span>
+    </div>
+  </div>
+</section>
+
+<section class="concept">
+  <div class="main"><img class="big" src="../png/full/f_aurora_arc_512.png" alt="概念F"></div>
+  <div class="side">
+    <h2>F · 极光光弧</h2>
+    <p class="sub">持续升起的流动光弧（与 App 界面同源）</p>
+    <p class="desc">三道弧自夜幕逐层升起：远弧最淡、主弧最亮最壮、近弧最高——
+      一段持续不断的光，光在持续，夜在退去。
+      App 界面本身即极光渐变氛围，图标与其气质一脉同源。</p>
+    <p class="tone">底色：夜幕 #030F2C → #0A2E6E + 地平线辉光（自底缘升起）｜主体：白主弧 + 蓝回声弧</p>
+    <div class="masks">
+      <div class="maskwrap"><span class="chip circle"><img src="../png/full/f_aurora_arc_512.png"></span><div class="masklbl">圆形</div></div>
+      <div class="maskwrap"><span class="chip rounded"><img src="../png/full/f_aurora_arc_512.png"></span><div class="masklbl">圆角方</div></div>
+      <div class="maskwrap"><span class="chip squircle"><img src="../png/full/f_aurora_arc_512.png"></span><div class="masklbl">squircle 近似</div></div>
+    </div>
+    <div class="sizes">
+      <div><img src="../png/full/f_aurora_arc_96.png" width="96" height="96"><div class="cap">96px</div></div>
+      <div><img src="../png/full/f_aurora_arc_48.png" width="48" height="48"><div class="cap">48px</div></div>
+    </div>
+    <div class="adaptive">
+      <span class="chip circle">
+        <img src="../png/bg/f_aurora_arc_bg_1024.png">
+        <img src="../png/fg/f_aurora_arc_fg_1024.png">
+      </span>
+      <span class="lbl">自适应图标分层合成演示<br>（背景层 PNG + 前景层透明 PNG）</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  文件：<code>svg/</code> 矢量源（六稿，分层结构）｜<code>png/full/</code> 1024/512/192/96/48 全尺寸｜<code>png/fg/</code> 前景层（透明）｜<code>png/bg/</code> 背景层（满幅）<br>
+  重渲染：<code>cd tools && node render.js</code>（SVG 改动后自动重出全部 PNG）<br>
+  下一步：选定方向 → 第二轮精做（微调比例/配色）→ 导出 Android 自适应图标全套 mipmap + 512×512 商店图。
+</footer>
+
+</body>
+</html>

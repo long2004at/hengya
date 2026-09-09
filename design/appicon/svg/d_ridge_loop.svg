@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 恒牙 · 概念D「一笔恒线·山恒」 v2
+     意象：一条不断开的线，一笔画完又回到起点——坚持的抽象表达。
+           线顶是不对称双峰山脊（左峰低、右峰高：进阶的山），
+           底线压平成大地——山立在地上，环合为一。远景淡读如冠形起伏。
+     底色：深蓝垂直渐变 #2A5FE3 -> #002D7E
+     分层约定：background 组 = 满幅底；foreground 组 = 一笔线（自适应图标前景层） -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="dBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A5FE3"/>
+      <stop offset="1" stop-color="#002D7E"/>
+    </linearGradient>
+    <radialGradient id="dGlow" cx="512" cy="540" r="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3F76F0" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#3F76F0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="dVign" cx="512" cy="512" r="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00102E" stop-opacity="0"/>
+      <stop offset="0.72" stop-color="#00102E" stop-opacity="0"/>
+      <stop offset="1" stop-color="#00102E" stop-opacity="0.34"/>
+    </radialGradient>
+    <linearGradient id="dLine" x1="512" y1="287" x2="512" y2="737" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#A6C4F0"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#dBg)"/>
+    <circle cx="512" cy="540" r="430" fill="url(#dGlow)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#dVign)"/>
+  </g>
+
+  <g id="foreground">
+    <!-- 一笔闭环：起于地平，翻两座山（左低右高），回到起点，不断开 -->
+    <path d="M 512,700
+             C 430,700 330,694 268,668
+             C 224,648 208,584 220,506
+             C 238,444 266,408 356,408
+             C 430,408 476,462 512,494
+             C 548,446 590,334 672,318
+             C 742,326 788,420 796,540
+             C 800,604 776,660 716,686
+             C 640,700 566,700 512,700 Z"
+          fill="none" stroke="url(#dLine)" stroke-width="62"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

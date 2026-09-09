@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 恒牙 · 概念E「白龙」 v2
+     意象：品牌内部代号「白龙」的抽象化——一条单笔流动的白色飘带，
+           尾梢上挑、腹满于下、昂首破线回望；无鳞无目，纯以动势作龙。
+           香槟金不再点睛（避免拟人误读），改为龙腹下缘一线底光。
+     底色：午夜蓝幕 + 右下极光余晖 + 疏星
+     分层约定：background 组 = 满幅底；foreground 组 = 白龙带（自适应图标前景层） -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="eBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#081D4A"/>
+      <stop offset="1" stop-color="#02081E"/>
+    </linearGradient>
+    <radialGradient id="eAur1" cx="770" cy="790" r="560" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E56D8" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#1E56D8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="eAur2" cx="240" cy="200" r="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#366EF4" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#366EF4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="eVign" cx="512" cy="512" r="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000818" stop-opacity="0"/>
+      <stop offset="0.72" stop-color="#000818" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000818" stop-opacity="0.4"/>
+    </radialGradient>
+    <linearGradient id="eBody" x1="188" y1="536" x2="690" y2="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#BFD6FA"/>
+      <stop offset="0.5" stop-color="#E9F1FF"/>
+      <stop offset="1" stop-color="#FFFFFF"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#eBg)"/>
+    <circle cx="770" cy="790" r="560" fill="url(#eAur1)"/>
+    <circle cx="240" cy="200" r="420" fill="url(#eAur2)"/>
+    <circle cx="160" cy="180" r="4" fill="#AECBFF" opacity="0.35"/>
+    <circle cx="866" cy="330" r="3" fill="#AECBFF" opacity="0.30"/>
+    <circle cx="92" cy="640" r="3.5" fill="#AECBFF" opacity="0.28"/>
+    <circle cx="706" cy="64" r="3" fill="#AECBFF" opacity="0.30"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#eVign)"/>
+  </g>
+
+  <g id="foreground">
+    <!-- 白龙一笔：尾梢上挑，环腹而下，昂首回望 -->
+    <path d="M 188,536
+             C 212,598 246,654 282,690
+             C 322,744 392,770 454,766
+             C 530,758 612,732 658,683
+             C 708,632 756,578 776,504
+             C 794,448 796,390 790,338
+             C 788,300 736,262 674,234
+             C 644,248 610,258 586,270
+             C 610,284 652,292 694,284
+             C 702,304 714,336 722,366
+             C 730,396 718,436 696,468
+             C 664,512 630,568 598,609
+             C 546,654 496,668 450,670
+             C 386,668 348,654 318,630
+             C 262,600 218,552 188,536 Z"
+          fill="url(#eBody)"/>
+    <!-- 鳞光：香槟金沿外缘上段的一线微光 -->
+    <path d="M 762,486 C 774,442 780,394 777,348"
+          fill="none" stroke="#E7C483" stroke-width="9" stroke-linecap="round" opacity="0.55"/>
+  </g>
+</svg>

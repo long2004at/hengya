@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 恒牙 · 概念F「极光光弧」 v2
+     意象：一段持续升起的流动光弧——与 App 界面的极光渐变氛围同源。
+           三道弧自夜幕逐层升起（远弧最淡、主弧最亮、近弧最高），无多余饰物。
+     底色：夜幕垂直渐变 + 地平线辉光（自底缘升起）
+     分层约定：background 组 = 满幅底；foreground 组 = 光弧组（自适应图标前景层） -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="fBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#030F2C"/>
+      <stop offset="1" stop-color="#0A2E6E"/>
+    </linearGradient>
+    <radialGradient id="fHorizon" cx="512" cy="1060" r="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1D55E0" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#1D55E0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="fVign" cx="512" cy="512" r="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000818" stop-opacity="0"/>
+      <stop offset="0.72" stop-color="#000818" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000818" stop-opacity="0.38"/>
+    </radialGradient>
+    <linearGradient id="fMain" x1="512" y1="430" x2="512" y2="710" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#8FB2F2"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#fBg)"/>
+    <circle cx="512" cy="1060" r="640" fill="url(#fHorizon)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#fVign)"/>
+  </g>
+
+  <g id="foreground">
+    <!-- 远弧：最外，最淡 -->
+    <path d="M 202,758 A 360,360 0 0 1 822,758"
+          fill="none" stroke="#2F6BE0" stroke-width="36" stroke-linecap="round" opacity="0.6"/>
+    <!-- 主弧：最亮最粗，恒光本体 -->
+    <path d="M 252,664 A 280,280 0 0 1 772,664"
+          fill="none" stroke="url(#fMain)" stroke-width="92" stroke-linecap="round"/>
+    <!-- 近弧：最高一道回声，与主弧留足间隙 -->
+    <path d="M 356,452 A 200,200 0 0 1 668,452"
+          fill="none" stroke="#6FA0F2" stroke-width="44" stroke-linecap="round" opacity="0.8"/>
+  </g>
+</svg>

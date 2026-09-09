@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to deploy.config.json (gitignored) and fill in your ECS values. sshPort=22 unless you changed it. remoteDir must match the nginx alias dir in the ECS guide.",
+  "host": "1.2.3.4",
+  "user": "root",
+  "sshPort": 22,
+  "remoteDir": "/var/www/heng-update"
+}

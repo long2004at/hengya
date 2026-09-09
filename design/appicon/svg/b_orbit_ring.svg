@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 恒牙 · 概念B「恒环」
+     意象：一枚不断开的圆环/轨道，微微倾侧悬浮——「永恒」最简的符号。
+           贵金属白环身，香槟金流光扫过环缘，一粒星火停驻——
+           光线经过永恒的那一瞬。
+     底色：品牌渐变 #366EF4 -> #003CAB（垂直）+ 左上柔光
+     分层约定：background 组 = 满幅底；foreground 组 = 环体（自适应图标前景层） -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#366EF4"/>
+      <stop offset="1" stop-color="#003CAB"/>
+    </linearGradient>
+    <radialGradient id="bSoft" cx="300" cy="270" r="620" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6E9BFF" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#6E9BFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bVign" cx="512" cy="512" r="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00102E" stop-opacity="0"/>
+      <stop offset="0.72" stop-color="#00102E" stop-opacity="0"/>
+      <stop offset="1" stop-color="#00102E" stop-opacity="0.34"/>
+    </radialGradient>
+    <linearGradient id="bRing" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#D2E1FB"/>
+      <stop offset="1" stop-color="#A2BDEC"/>
+    </linearGradient>
+    <linearGradient id="bGold" x1="221" y1="427" x2="406" y2="277" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F7DFAD"/>
+      <stop offset="1" stop-color="#D3A25B"/>
+    </linearGradient>
+    <radialGradient id="bSparkGlow" cx="293" cy="335" r="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFDFA0" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FFDFA0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bSpark" cx="293" cy="335" r="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFDF7"/>
+      <stop offset="0.65" stop-color="#FFEBC2"/>
+      <stop offset="1" stop-color="#F6D79A"/>
+    </radialGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#bBg)"/>
+    <circle cx="300" cy="270" r="620" fill="url(#bSoft)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#bVign)"/>
+  </g>
+
+  <g id="foreground">
+    <g transform="rotate(-16 512 512)">
+      <!-- 恒环：外 310x250 / 内 200x140，环身约 110 粗 -->
+      <path d="M 202,512 A 310 250 0 1 0 822,512 A 310 250 0 1 0 202,512 Z
+               M 312,512 A 200 140 0 1 0 712,512 A 200 140 0 1 0 312,512 Z"
+            fill="url(#bRing)" fill-rule="evenodd"/>
+      <!-- 香槟金流光：光扫过环外缘的瞬间 -->
+      <path d="M 220.7,426.5 A 310 250 0 0 1 406,277"
+            fill="none" stroke="url(#bGold)" stroke-width="18" stroke-linecap="round" opacity="0.9"/>
+      <!-- 一粒星火停在环缘 -->
+      <circle cx="292.8" cy="335.2" r="88" fill="url(#bSparkGlow)"/>
+      <path d="M 292.8,295.2 Q 286,326 266.8,335.2 Q 286,344.4 292.8,375.2 Q 299.6,344.4 318.8,335.2 Q 299.6,326 292.8,295.2 Z"
+            fill="url(#bSpark)"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 恒牙 · 概念C「恒星」
+     意象：恒星——中文里字面即「永恒之星」。午夜蓝幕上一枚恒久发光的
+           四芒星，光晕层层，如深空灯塔：长亮，不灭。
+     底色：午夜蓝幕（径向）+ 右下/左上极光余晖 + 疏星数点
+     分层约定：background 组 = 满幅底；foreground 组 = 星与光晕（自适应图标前景层） -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="cBg" cx="512" cy="430" r="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0E2E66"/>
+      <stop offset="1" stop-color="#020C22"/>
+    </radialGradient>
+    <radialGradient id="cAur1" cx="790" cy="830" r="620" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E56D8" stop-opacity="0.40"/>
+      <stop offset="1" stop-color="#1E56D8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cAur2" cx="210" cy="180" r="520" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#366EF4" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#366EF4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cHalo" cx="512" cy="500" r="330" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3F76E8" stop-opacity="0.50"/>
+      <stop offset="1" stop-color="#3F76E8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cHalo2" cx="512" cy="500" r="235" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8FBAFF" stop-opacity="0.60"/>
+      <stop offset="1" stop-color="#8FBAFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cStar" x1="512" y1="235" x2="512" y2="765" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#9BB9F2"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#cBg)"/>
+    <circle cx="790" cy="830" r="620" fill="url(#cAur1)"/>
+    <circle cx="210" cy="180" r="520" fill="url(#cAur2)"/>
+    <circle cx="150" cy="210" r="4" fill="#AECBFF" opacity="0.30"/>
+    <circle cx="844" cy="160" r="3" fill="#AECBFF" opacity="0.35"/>
+    <circle cx="882" cy="704" r="5" fill="#AECBFF" opacity="0.25"/>
+    <circle cx="118" cy="762" r="4" fill="#AECBFF" opacity="0.28"/>
+    <circle cx="248" cy="946" r="3" fill="#AECBFF" opacity="0.24"/>
+    <circle cx="762" cy="926" r="3.5" fill="#AECBFF" opacity="0.22"/>
+  </g>
+
+  <g id="foreground">
+    <circle cx="512" cy="500" r="330" fill="url(#cHalo)"/>
+    <circle cx="512" cy="500" r="235" fill="url(#cHalo2)"/>
+    <!-- 恒星本体：四芒，凹边，上下轴长 -->
+    <path d="M 512,235 Q 488,462 337,500 Q 488,538 512,765 Q 536,538 687,500 Q 536,462 512,235 Z"
+          fill="url(#cStar)"/>
+  </g>
+</svg>

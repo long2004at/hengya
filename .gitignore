@@ -1,0 +1,56 @@
+# ============================================================
+# 恒牙公开仓库 .gitignore
+# 安全红线：凭证（SSH 私钥 / token / 证书私钥 / 部署配置）一律不入库
+# ============================================================
+
+# --- Dart / Flutter ---
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+.vscode/
+*.lock
+!pubspec.lock
+
+# --- 数据库与运行时产物 ---
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- 凭证（绝不入库）---
+*.pem
+*.key
+*.p12
+*.jks
+secrets/
+**/token.txt
+.env
+*.env
+tools/deploy.config.json
+
+# --- 私有语料（版权原因不入公开仓库）---
+content/
+schedule/
+
+# --- 设计工具链 ---
+design/appicon/tools/node_modules/
+
+# --- 编辑器 / OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 构建产物 ---
+*.apk
+*.zip
+*.tar.gz
+
+# --- 测试期 SQLite 伴生文件 ---
+app/test/fixtures/migration/*.db-wal
+app/test/fixtures/migration/*.db-shm

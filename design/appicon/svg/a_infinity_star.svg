@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 恒牙 · 概念A「恒环·星栖」
+     意象：横置的无限环带（不断开的坚持闭环），环上栖着一颗光体——
+           上半是四芒星光，下半收拢成根形：似星又似牙冠带根的抽象双关。
+     底色：品牌渐变 #366EF4 -> #003CAB（对角 135°）
+     分层约定：background 组 = 满幅底；foreground 组 = 主图形（即自适应图标前景层） -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="aBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#366EF4"/>
+      <stop offset="1" stop-color="#003CAB"/>
+    </linearGradient>
+    <radialGradient id="aStarGlow" cx="512" cy="396" r="235" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A9CCFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#A9CCFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="aVign" cx="512" cy="512" r="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00102E" stop-opacity="0"/>
+      <stop offset="0.72" stop-color="#00102E" stop-opacity="0"/>
+      <stop offset="1" stop-color="#00102E" stop-opacity="0.34"/>
+    </radialGradient>
+    <linearGradient id="aBand" x1="512" y1="440" x2="512" y2="748" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#B4CDF9"/>
+    </linearGradient>
+    <linearGradient id="aStarFill" x1="512" y1="262" x2="512" y2="548" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F6FAFF"/>
+      <stop offset="1" stop-color="#C9DDFF"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#aBg)"/>
+    <circle cx="512" cy="396" r="235" fill="url(#aStarGlow)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#aVign)"/>
+  </g>
+
+  <g id="foreground">
+    <!-- 无限环带：一笔不断开，一笔画完回到起点 -->
+    <path d="M 322,690
+             C 200,690 200,502 322,502
+             C 444,502 580,690 702,690
+             C 824,690 824,502 702,502
+             C 580,502 444,690 322,690 Z"
+          fill="none" stroke="url(#aBand)" stroke-width="86"/>
+    <!-- 星栖：上如星芒，下收根形，尖端恰落在环带交点之上 -->
+    <path d="M 512,262 Q 494,368 436,400 Q 500,432 512,548 Q 524,432 588,400 Q 530,368 512,262 Z"
+          fill="url(#aStarFill)"/>
+    <path d="M 512,330 Q 503,384 478,400 Q 503,416 512,470 Q 521,416 546,400 Q 521,384 512,330 Z"
+          fill="#FFFFFF"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用内更新（batch3 node1）APK 下载目录映射：
+     LocalBackend.dataDir = getApplicationSupportDirectory() = /data/user/0/<pkg>/files，
+     下载目录为其下 update/ → files-path 覆盖；root-path 兜底防未来 dataDir 形态变化。
+     FileProvider 仅按 URI 单点只读授权，exported=false，无越权面。 -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path name="update" path="update/"/>
+    <root-path name="app_root" path="."/>
+</paths>
