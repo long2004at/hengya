@@ -335,4 +335,29 @@ void main() {
     final db = await LocalBackend.instance.sharedDb;
     expect(db.settingGet('update.source'), url);
   });
+
+  group('默认源（海外线路 GitHub raw）回退', () {
+    test('effectiveSourceUrl：未设置 → GitHub 默认源；设置后 → 持久值', () async {
+      expect(await UpdateService.instance.effectiveSourceUrl(),
+          UpdateService.githubSourceUrl);
+      const url = 'http://1.2.3.4:8080/heng-token/latest.json';
+      await UpdateService.instance.setSourceUrl(url);
+      expect(await UpdateService.instance.effectiveSourceUrl(), url);
+    });
+
+    test('checkUpdate 未传源且 db 未设置 → 用 GitHub 默认源（新装零配置）', () async {
+      fakePackage();
+      String? fetchedUrl;
+      UpdateService.debugFetchOverride = (url) async {
+        fetchedUrl = url;
+        return latestJson(
+            versionName: '1.6.2+14',
+            versionCode: 14,
+            sha256: List.filled(64, '0').join());
+      };
+      final r = await UpdateService.instance.checkUpdate();
+      expect(fetchedUrl, UpdateService.githubSourceUrl);
+      expect(r.available, isFalse);
+    });
+  });
 }

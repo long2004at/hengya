@@ -1,5 +1,7 @@
-// 应用内更新服务（batch3 node1，2026-09-07）——**云直链单通道**（已拍板）：
-// 用户个人阿里云 ECS 上 nginx 静态分发 latest.json + APK，无任何其它更新通道。
+// 应用内更新服务（batch3 node1，2026-09-07；2026-09-09 更新线路版）：
+// 双线路口径——默认源为 GitHub raw 直链（海外线路，公开仓库 main 分支，
+// 新装用户零配置可检查更新）；国内线路（ECS 直链）属私密信息，只在私渠道
+// 传播，绝不内置进 APK 二进制（token 会被解包提取），由用户手动填入。
 //
 // 职责（设置页只渲染状态，全部逻辑/文案在此）：
 //   · 更新源 URL 持久化：db settings key=update.source（settingGet/settingSet）
@@ -157,7 +159,9 @@ class UpdateMessages {
   const UpdateMessages._();
 
   static const sourceLabel = '更新源（latest.json 直链）';
-  static const sourceHint = 'http://<ECS-IP>:8443/heng-<token>/latest.json';
+  static const sourceHint = '国内线路：粘贴你获得的 latest.json 直链';
+  static const overseasLineButton = '海外线路';
+  static const domesticLineButton = '国内线路';
   static const checkButton = '检查更新';
   static const downloadButton = '下载并安装';
 
@@ -196,6 +200,12 @@ class UpdateService {
   /// db settings 键（settingGet/settingSet 持久化）
   static const String sourceKey = 'update.source';
 
+  /// 预设「海外线路」：GitHub raw 直链（公开仓 main 分支 update/latest.json）。
+  /// 未设置源时的新装用户默认走此源（零配置可检查更新）。
+  /// 「国内线路」不预设 URL：ECS 直链属私密信息，只在私渠道传播，绝不内置进 APK。
+  static const String githubSourceUrl =
+      'https://raw.githubusercontent.com/long2004at/hengya/main/update/latest.json';
+
   /// 唯一原生通道（协议见 MainActivity.kt 头注释）
   static const MethodChannel _channel = MethodChannel('dev.hengya.hengya/update');
 
@@ -231,6 +241,12 @@ class UpdateService {
     db.settingSet(sourceKey, url);
   }
 
+  /// 生效源：db 持久值（空/缺失回退）→ GitHub 默认源（海外线路）。
+  Future<String> effectiveSourceUrl() async {
+    final saved = await getSourceUrl();
+    return (saved == null || saved.isEmpty) ? githubSourceUrl : saved;
+  }
+
   // ---------------- 当前版本 ----------------
 
   /// 当前包信息（Kotlin PackageManager；longVersionCode 兜 API<28）。
@@ -249,9 +265,10 @@ class UpdateService {
 
   // ---------------- 检查更新 ----------------
 
-  /// [sourceUrl] 显式传入（页面用输入框值；测试直填），否则读 db 持久值。
+  /// [sourceUrl] 显式传入（页面用输入框值；测试直填），否则走生效源
+  /// （db 持久值 → GitHub 默认源回退，新装零配置）。
   Future<UpdateCheckResult> checkUpdate({String? sourceUrl}) async {
-    final src = (sourceUrl ?? (await getSourceUrl()) ?? '').trim();
+    final src = (sourceUrl ?? await effectiveSourceUrl()).trim();
     if (src.isEmpty) throw UpdateException(UpdateMessages.emptySource);
     final uri = Uri.tryParse(src);
     if (uri == null || !uri.hasScheme ||

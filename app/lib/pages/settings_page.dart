@@ -89,6 +89,7 @@ class _SettingsPageState extends State<SettingsPage> {
   // 状态机/文案全在 UpdateService（UpdateUiPhase / UpdateMessages）；此处只持
   // 渲染态。源 URL 持久化 db settings（update.source），检查前先把输入框值落库。
   final TextEditingController _updateSourceCtrl = TextEditingController();
+  final FocusNode _updateSourceFocus = FocusNode(); // 「国内线路」清空后聚焦
   UpdateUiPhase _updatePhase = UpdateUiPhase.idle;
   UpdateManifest? _updateManifest;
   String _updateVersionName = ''; // 当前版本（Kotlin getPackageInfo）
@@ -112,6 +113,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void dispose() {
     _updateSourceCtrl.dispose();
+    _updateSourceFocus.dispose();
     _corpusRev.dispose();
     super.dispose();
   }
@@ -132,7 +134,9 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final url = await UpdateService.instance.getSourceUrl();
       if (!mounted) return;
-      if (url != null && url.isNotEmpty) _updateSourceCtrl.text = url;
+      // 未设置源（新装）→ 预填默认海外线路（GitHub raw），零配置可检查更新
+      _updateSourceCtrl.text =
+          (url == null || url.isEmpty) ? UpdateService.githubSourceUrl : url;
     } catch (_) {
       // db 未初始化（非 local 模式/极端时序）：输入框留空即可
     }
@@ -150,6 +154,19 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       await UpdateService.instance.setSourceUrl(_updateSourceCtrl.text.trim());
     } catch (_) {}
+  }
+
+  /// 「海外线路」：一键填入 GitHub raw 默认源并落库（透明可改）
+  Future<void> _applyOverseasLine() async {
+    _updateSourceCtrl.text = UpdateService.githubSourceUrl;
+    await _persistUpdateSource();
+  }
+
+  /// 「国内线路」：只清空 + 聚焦，绝不预设 URL
+  /// （ECS 直链属私密信息，只在私渠道传播，绝不内置进 APK 二进制）
+  void _applyDomesticLine() {
+    _updateSourceCtrl.clear();
+    _updateSourceFocus.requestFocus();
   }
 
   /// 检查更新：输入框值先落库 → 检查（检查中锁按钮）→ 状态机相位
@@ -1324,8 +1341,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                     subtitle: Text(
                       _updateVersionName.isEmpty
-                          ? '当前版本未知 · 更新包从你自己的服务器下载'
-                          : '当前版本 v$_updateVersionName · 更新包从你自己的服务器下载',
+                          ? '当前版本未知 · 默认海外线路，国内线路可手动填入'
+                          : '当前版本 v$_updateVersionName · 默认海外线路，国内线路可手动填入',
                       style: const TextStyle(fontSize: 12),
                     ),
                     trailing:
@@ -1345,6 +1362,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
                     child: TextField(
                       controller: _updateSourceCtrl,
+                      focusNode: _updateSourceFocus,
                       onSubmitted: (_) => _persistUpdateSource(),
                       keyboardType: TextInputType.url,
                       autocorrect: false,
@@ -1355,6 +1373,23 @@ class _SettingsPageState extends State<SettingsPage> {
                         hintText: UpdateMessages.sourceHint,
                         isDense: true,
                       ),
+                    ),
+                  ),
+                  // 更新线路预设：海外一键填入 GitHub raw；国内只清空聚焦
+                  // （ECS 直链不入 APK 二进制——token 会被解包提取）
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+                    child: Row(
+                      children: [
+                        TextButton(
+                          onPressed: _applyOverseasLine,
+                          child: const Text(UpdateMessages.overseasLineButton),
+                        ),
+                        TextButton(
+                          onPressed: _applyDomesticLine,
+                          child: const Text(UpdateMessages.domesticLineButton),
+                        ),
+                      ],
                     ),
                   ),
                   _updateStatusView(scheme),

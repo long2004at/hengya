@@ -110,17 +110,23 @@ void main() {
     expect(find.text('检查新版本'), findsOneWidget); // 区块主行
     expect(find.textContaining('当前版本 v1.6.2+14'), findsOneWidget); // 版本号
     expect(find.text(UpdateMessages.sourceLabel), findsOneWidget); // 输入框标签
-    expect(find.text(UpdateMessages.sourceHint), findsOneWidget); // hint
+    expect(find.text(UpdateMessages.overseasLineButton), findsOneWidget); // 海外线路按钮
+    expect(find.text(UpdateMessages.domesticLineButton), findsOneWidget); // 国内线路按钮
+    // 新装（db 未设置源）→ 输入框预填 GitHub 默认源（hint 仅空时可见，不再断言）
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, UpdateService.githubSourceUrl);
     expect(find.text(UpdateMessages.checkButton), findsOneWidget); // 按钮
     // idle 相位不渲染状态区（无检查中/已是最新等字样）
     expect(find.text(UpdateMessages.checking), findsNothing);
     expect(find.textContaining('已是最新版本'), findsNothing);
   });
 
-  testWidgets('空源点检查 → 「请先填写更新源」', (tester) async {
+  testWidgets('清空源（国内线路）后点检查 → 「请先填写更新源」', (tester) async {
     await boot();
     await openSettings(tester);
 
+    await tester.tap(find.text(UpdateMessages.domesticLineButton)); // 清空预填
+    await tester.pump();
     await tapCheckAndSettle(tester);
 
     expect(find.text(UpdateMessages.emptySource), findsOneWidget);
@@ -188,5 +194,35 @@ void main() {
     await openSettings(tester);
     final field = tester.widget<TextField>(find.byType(TextField));
     expect(field.controller!.text, url);
+  });
+
+  testWidgets('海外线路：输入任意值后一键填回 GitHub 默认源并落库', (tester) async {
+    await boot();
+    await openSettings(tester);
+
+    await tester.enterText(
+        find.byType(TextField), 'http://example.com/other/latest.json');
+    await tester.tap(find.text(UpdateMessages.overseasLineButton));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, UpdateService.githubSourceUrl);
+    // 一键填入即落库（db settings update.source）
+    final db = await LocalBackend.instance.sharedDb;
+    expect(
+        db.settingGet(UpdateService.sourceKey), UpdateService.githubSourceUrl);
+  });
+
+  testWidgets('国内线路：清空输入框并聚焦（不预设任何 URL）', (tester) async {
+    await boot();
+    await openSettings(tester);
+
+    await tester.tap(find.text(UpdateMessages.domesticLineButton));
+    await tester.pump();
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, ''); // 不预设 URL（ECS 直链不入 APK）
+    expect(field.focusNode!.hasFocus, isTrue); // 聚焦待手动粘贴
   });
 }
