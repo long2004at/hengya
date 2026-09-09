@@ -99,3 +99,38 @@ jobs:
             --generate-notes --draft \
             "hengya-${{ github.ref_name }}-release.apk" \
           || gh release upload "$GITHUB_REF_NAME" "hengya-${{ github.ref_name }}-release.apk" --clobber
+
+      # ECS 更新通道自动同步：latest.json 的 versionCode/sha256/sizeBytes 全自动生成
+      # 连接信息全部来自 Secrets（IP/token 路径/私钥不进公开仓库）
+      - name: 同步 ECS 更新通道
+        env:
+          ECS_HOST: ${{ secrets.ECS_HOST }}
+          ECS_PORT: ${{ secrets.ECS_PORT }}
+          ECS_USER: ${{ secrets.ECS_USER }}
+          ECS_PATH: ${{ secrets.ECS_PATH }}
+          ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+        run: |
+          APK="hengya-${GITHUB_REF_NAME}-release.apk"
+          SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$APK")
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: *//; s/\r//')
+          CODE=${VERSION#*+}
+          cat > latest.json <<EOF
+          {
+            "versionName": "${VERSION}",
+            "versionCode": ${CODE},
+            "apk": "${APK}",
+            "sha256": "${SHA}",
+            "sizeBytes": ${SIZE},
+            "date": "$(date +%F)",
+            "notes": "恒牙 ${GITHUB_REF_NAME}：更新说明见 GitHub Release https://github.com/long2004at/hengya/releases/tag/${GITHUB_REF_NAME}"
+          }
+          EOF
+          cat latest.json
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ECS_SSH_KEY" > ~/.ssh/ecs_key
+          chmod 600 ~/.ssh/ecs_key
+          # 先传 APK 后传 latest.json：客户端永远看不到指向缺失文件的清单
+          scp -i ~/.ssh/ecs_key -P "$ECS_PORT" -o StrictHostKeyChecking=accept-new "$APK" "$ECS_USER@$ECS_HOST:$ECS_PATH/"
+          scp -i ~/.ssh/ecs_key -P "$ECS_PORT" -o StrictHostKeyChecking=accept-new latest.json "$ECS_USER@$ECS_HOST:$ECS_PATH/"
+          echo "ECS 同步完成"

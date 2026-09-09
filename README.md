@@ -1,5 +1,9 @@
 # 恒牙（Hengya）· 口腔医学复习系统
 
+[![CI](https://github.com/long2004at/hengya/actions/workflows/ci.yml/badge.svg)](https://github.com/long2004at/hengya/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/long2004at/hengya)](https://github.com/long2004at/hengya/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Local-first 个人口腔医学间隔复习（SRS）应用：教材 / PPT / 真题在端上建库，AI 拆卡、人工终审、FSRS 调度复习。一人一机一库，日常使用零服务器依赖。
 
 > 当前版本 **0.1.0**（首个公开发布版本；Android versionCode 19）。App 身份为 `dev.hengya.hengya`，数据文件 `hengya.db`；公开版为全新应用身份，自备学习资料即可开始。

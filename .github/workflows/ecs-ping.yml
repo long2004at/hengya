@@ -1,0 +1,28 @@
+name: ECS 通道连通性测试
+
+# 手动触发（Actions 页 → 本 workflow → Run workflow）：
+# 验证 Secrets 配置与 GitHub runner → ECS 的 SSH 网络通路（tag 发版依赖此通路）
+on:
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: SSH 连通测试（runner → ECS）
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 连接并列出更新通道目录
+        env:
+          ECS_HOST: ${{ secrets.ECS_HOST }}
+          ECS_PORT: ${{ secrets.ECS_PORT }}
+          ECS_USER: ${{ secrets.ECS_USER }}
+          ECS_PATH: ${{ secrets.ECS_PATH }}
+          ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ECS_SSH_KEY" > ~/.ssh/ecs_key
+          chmod 600 ~/.ssh/ecs_key
+          ssh -i ~/.ssh/ecs_key -p "$ECS_PORT" \
+            -o StrictHostKeyChecking=accept-new \
+            "$ECS_USER@$ECS_HOST" \
+            "echo SSH-OK && ls -la $ECS_PATH"
