@@ -84,10 +84,24 @@ jobs:
           cache: true
 
       - run: flutter pub get
+
+      # 签名密钥还原：CI 出包必须与历史版本同一签名（Android 禁止跨签名覆盖安装）。
+      # 密钥以 Secret 形式加密存储（base64），构建前还原到 runner 的
+      # ~/.android/debug.keystore；缺失时 Gradle 会现场生成随机密钥 → 签名不一致。
+      - name: 还原 APK 签名密钥
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p ~/.android
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+          echo "keystore restored: $(wc -c < ~/.android/debug.keystore) bytes"
+
       - run: flutter build apk --release
 
-      - name: 计算 sha256（供 ECS latest.json 手工同步用）
-        run: sha256sum build/app/outputs/flutter-apk/app-release.apk
+      - name: 计算哈希与签名指纹（sha256 供通道同步；证书指纹供签名一致性核对）
+        run: |
+          sha256sum build/app/outputs/flutter-apk/app-release.apk
+          keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | grep -i sha256 | head -2
 
       - name: 附到 Release（不存在则建草稿）
         env:
