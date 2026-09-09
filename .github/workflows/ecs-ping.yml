@@ -1,13 +1,14 @@
 name: ECS 通道连通性测试
 
 # 手动触发（Actions 页 → 本 workflow → Run workflow）：
-# 验证 Secrets 配置与 GitHub runner → ECS 的 SSH 网络通路（tag 发版依赖此通路）
+# 验证 Secrets 配置与 GitHub runner → ECS 的 SFTP 通路（tag 发版依赖此通路）
+# ECS 账户为受限 SFTP-only 账户（internal-sftp + chroot），不支持 shell，须用 sftp 子命令
 on:
   workflow_dispatch:
 
 jobs:
   ping:
-    name: SSH 连通测试（runner → ECS）
+    name: SFTP 连通测试（runner → ECS）
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -22,7 +23,7 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$ECS_SSH_KEY" > ~/.ssh/ecs_key
           chmod 600 ~/.ssh/ecs_key
-          ssh -i ~/.ssh/ecs_key -p "$ECS_PORT" \
-            -o StrictHostKeyChecking=accept-new \
-            "$ECS_USER@$ECS_HOST" \
-            "echo SSH-OK && ls -la $ECS_PATH"
+          printf 'ls -la %s\n' "$ECS_PATH" \
+            | sftp -i ~/.ssh/ecs_key -P "$ECS_PORT" \
+              -o StrictHostKeyChecking=accept-new \
+              "$ECS_USER@$ECS_HOST"
