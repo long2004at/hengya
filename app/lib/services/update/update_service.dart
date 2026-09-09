@@ -359,9 +359,24 @@ class UpdateService {
     } catch (_) {}
   }
 
+  /// 已落盘文件是否与 manifest 一致（存在 + 大小 + SHA-256 流式校验）；
+  /// 任何异常按「不符」处理（残留半截/损坏文件 → 走重新下载覆盖）。
+  static Future<bool> _fileMatches(File f, UpdateManifest m) async {
+    try {
+      if (!f.existsSync()) return false;
+      if (m.sizeBytes > 0 && f.lengthSync() != m.sizeBytes) return false;
+      final digest = await crypto.sha256.bind(f.openRead()).first;
+      return digest.toString() == m.sha256;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 下载到 dataDir/update/ 下（文件名取 manifest.apk）并做 SHA-256 校验。
   /// [onProgress](received, total)；total 为 null = 大小未知（页面转不确定进度）。
   /// 校验失败 → 删文件 + [UpdateMessages.verifyFailed]。
+  /// 已存在且校验通过的同名文件（上次下载完成、安装未遂的残留）→ 直接复用，
+  /// 不重复下载（安装器拉起失败/用户退出后重试零流量）。
   Future<File> downloadAndVerify(
     UpdateManifest manifest, {
     required String sourceUrl,
@@ -369,6 +384,12 @@ class UpdateService {
   }) async {
     final dir = await _downloadDir();
     final dest = File('$dir/${manifest.apk}');
+    // 复用上次已下载且校验通过的安装包
+    if (await _fileMatches(dest, manifest)) {
+      final len = dest.lengthSync();
+      onProgress?.call(len, len);
+      return dest;
+    }
     final url = apkUrlOf(manifest, sourceUrl);
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
     IOSink? sink;

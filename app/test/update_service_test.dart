@@ -324,6 +324,59 @@ void main() {
       );
       expect(File(destPath).existsSync(), isFalse); // 下载物被删
     });
+
+    test('复用已校验的安装包：二次调用不触网（服务器已关）+ 进度回调 100%', () async {
+      fakePackage();
+      final apkBytes = List<int>.generate(300000, (i) => i % 251);
+      final digest = crypto.sha256.convert(apkBytes);
+      serveRoutes(
+        manifestBody:
+            latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
+        apkBytes: apkBytes,
+      );
+      final m = UpdateManifest.tryParse(latestJson(
+          sha256: digest.toString(), sizeBytes: apkBytes.length))!;
+      final src = 'http://127.0.0.1:${server.port}/latest.json';
+      final f1 =
+          await UpdateService.instance.downloadAndVerify(m, sourceUrl: src);
+      expect(f1.existsSync(), isTrue);
+
+      // 断网（关掉回环服务器）：复用路径若触网必抛 unreachable
+      await server.close(force: true);
+      var sawProgress = false;
+      var gotTotal = -1;
+      final f2 = await UpdateService.instance.downloadAndVerify(
+        m,
+        sourceUrl: src,
+        onProgress: (received, total) {
+          sawProgress = true;
+          gotTotal = total ?? -1;
+        },
+      );
+      expect(f2.path, f1.path); // 同一文件
+      expect(f2.lengthSync(), apkBytes.length);
+      expect(sawProgress, isTrue); // 复用也回调进度（页面可显示满进度）
+      expect(gotTotal, apkBytes.length);
+    });
+
+    test('残留文件与 manifest 不符（损坏/半截）→ 重新下载覆盖为正确内容', () async {
+      fakePackage();
+      final apkBytes = List<int>.generate(1000, (i) => i);
+      final digest = crypto.sha256.convert(apkBytes);
+      serveRoutes(
+        manifestBody:
+            latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
+        apkBytes: apkBytes,
+      );
+      final m = UpdateManifest.tryParse(latestJson(sha256: digest.toString()))!;
+      final src = 'http://127.0.0.1:${server.port}/latest.json';
+      // 造一个内容不符的残留（大小也不同）
+      Directory('${tmp.path}/update').createSync(recursive: true);
+      File('${tmp.path}/update/fake.apk').writeAsBytesSync(List.filled(64, 9));
+      final f =
+          await UpdateService.instance.downloadAndVerify(m, sourceUrl: src);
+      expect(f.lengthSync(), apkBytes.length); // 被正确内容覆盖
+    });
   });
 
   test('源 URL db 持久化：setSourceUrl → getSourceUrl 回读一致（settings 表）', () async {
