@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Windows 宿主：全量测试主战场（测试套件绑 test/sqlite3.dll + win-x64 pdfium，均已入库）
+  test-windows:
+    name: analyze + 全量测试（Windows）
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  # Linux 宿主：试探性验证（PDF/金样用例自动 SKIP；sqlite3 走系统库）
+  test-linux:
+    name: analyze + 测试（Linux，非阻断试探）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装系统 libsqlite3
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  # 打 tag（v*）时：Android release 构建并附到草稿 Release（发布前可编辑中文说明）
+  release-android:
+    name: Android APK 出包（tag 触发）
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter build apk --release
+
+      - name: 计算 sha256（供 ECS latest.json 手工同步用）
+        run: sha256sum build/app/outputs/flutter-apk/app-release.apk
+
+      - name: 附到 Release（不存在则建草稿）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv build/app/outputs/flutter-apk/app-release.apk hengya-${{ github.ref_name }}-release.apk
+          gh release create "$GITHUB_REF_NAME" \
+            --title "恒牙 $GITHUB_REF_NAME" \
+            --generate-notes --draft \
+            "hengya-${{ github.ref_name }}-release.apk" \
+          || gh release upload "$GITHUB_REF_NAME" "hengya-${{ github.ref_name }}-release.apk" --clobber
