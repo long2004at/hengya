@@ -122,16 +122,27 @@ jobs:
             exit 1
           fi
 
-      - name: 附到 Release（不存在则建草稿）
+      - name: 附到 Release（已存在则上传，否则建草稿）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           mv build/app/outputs/flutter-apk/app-release.apk hengya-${{ github.ref_name }}-release.apk
-          gh release create "$GITHUB_REF_NAME" \
-            --title "恒牙 $GITHUB_REF_NAME" \
-            --generate-notes --draft \
-            "hengya-${{ github.ref_name }}-release.apk" \
-          || gh release upload "$GITHUB_REF_NAME" "hengya-${{ github.ref_name }}-release.apk" --clobber
+          APK="hengya-${{ github.ref_name }}-release.apk"
+          # 显式分支：gh release view 判断同名 Release 是否已存在。
+          # 不要依赖 `gh release create ... || gh release upload ...`——create 对
+          # 已存在 tag 会静默建出 untagged 草稿（0.1.5 发版踩坑：APK 进草稿、正式
+          # Release 无包），|| 兜底根本不会触发。
+          if gh release view "$GITHUB_REF_NAME" --json tagName >/dev/null 2>&1; then
+            echo "::notice::Release $GITHUB_REF_NAME 已存在，直接上传 APK"
+            gh release upload "$GITHUB_REF_NAME" "$APK" --clobber
+          else
+            echo "::notice::Release $GITHUB_REF_NAME 不存在，创建草稿"
+            gh release create "$GITHUB_REF_NAME" \
+              --title "恒牙 $GITHUB_REF_NAME" \
+              --generate-notes --draft \
+              "$APK"
+          fi
 
       # ECS 更新通道自动同步：latest.json 的 versionCode/sha256/sizeBytes 全自动生成
       # 连接信息全部来自 Secrets（IP/token 路径/私钥不进公开仓库）
