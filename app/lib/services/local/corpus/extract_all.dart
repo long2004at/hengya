@@ -74,8 +74,16 @@ import 'search_engine.dart'
 
 // ------------------------------------------------------------- 常量 ----
 
-/// 嵌入 API 批量上限（Python DEFAULT_BATCH L110）。
-const int kDefaultBatch = 32;
+/// 嵌入 API 批量上限（Python DEFAULT_BATCH L110 原值 32）。
+///
+/// 2026-09-10 改 20（向量免费档对齐）：模力方舟（Gitee AI）/v1/embeddings
+/// 按 input **条数**分档计费——小批量（约 ≤25 条）免费、大批量按 token 收费
+/// （Qwen3-VL-Embedding-8B ¥0.35/M）。账单实证（2026-09-08）：24 条尾批判
+/// 小批量 0 元、32 条整批判大批量计费；且同尺寸内容（~103 tokens/条）24 条
+/// 免费 / 32 条收费——分界只看条数、不看 token。取 20 留安全余量；429/超时
+/// 降批链 20→10→5 全程不越线。查询侧单条、重排窗口 20（search_engine
+/// kRerankTopDefault）天然在免费档。
+const int kDefaultBatch = 20;
 
 /// 单次嵌入 API 超时秒（Python API_TIMEOUT L111；检索侧 kApiTimeoutS=20
 /// 是查询单条口径，建库批量沿用 Python ingest 侧 30s）。

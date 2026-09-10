@@ -106,7 +106,7 @@ class CorpusBuildRequest {
   /// MRL 截断维度覆盖（缺省 [kEmbedDim]）。
   final int? dim;
 
-  /// 嵌入批量大小（缺省 [kDefaultBatch]=32）。
+  /// 嵌入批量大小（缺省 [kDefaultBatch]=20，模力方舟免费档对齐）。
   final int batch;
 
   /// pptx 大小上限 MB（缺省 defaultMaxFileMb）。

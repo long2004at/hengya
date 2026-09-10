@@ -1068,7 +1068,12 @@ Future<Map<String, Object?>> corpusSearch(
   if (rerankOn && scored.length < 2) {
     notes.add('重排跳过：融合候选仅 ${scored.length} 条（<2），重排无意义');
   } else if (rerankOn) {
-    final window = scored.sublist(0, math.max(kRerankTopDefault, k));
+    // 模力方舟免费档：重排 documents 条数与嵌入同源分档（约 ≤25 条免费，
+    // 见 extract_all kDefaultBatch 注释的账单实证）——窗口钉死
+    // [kRerankTopDefault]=20，防未来 k 调大时 max(20,k) 越线触发大批量计费；
+    // 顺带修掉融合候选 <20 时 sublist 越界的隐患（min 夹取）。
+    final window =
+        scored.sublist(0, math.min(scored.length, kRerankTopDefault));
     final winRows = fetchChunkRows(
         db, sch, window.map((t) => '${t.$6['chunk_id']}'),
         subject: subject, sourceType: sourceType);
