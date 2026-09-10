@@ -250,9 +250,12 @@ void main() {
       expect(() => mgr.validatePackage(sv2),
           throwsA(isA<CorpusPackageException>()));
 
-      final minHigh = buildPackageZip(appMinVersion: '99.0.0');
+final minHigh = buildPackageZip(appMinVersion: '99.0.0');
       expect(() => mgr.validatePackage(minHigh, appVersion: '1.8.0+16'),
           throwsA(isA<CorpusPackageException>()));
+      // 语义方向兼容：主版本一代之差（0.x 公开版 vs 1.x 内测重计号）放行
+      final renumb = buildPackageZip(appMinVersion: '1.8.1');
+      expect(mgr.validatePackage(renumb, appVersion: '0.1.5+24').subjects.length, 3);
       // appVersion 未提供 → 守卫跳过（真机由 UI 传版本）
       expect(mgr.validatePackage(minHigh).subjects.length, 3);
     });

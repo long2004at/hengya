@@ -46,6 +46,7 @@
 // {corpus.db, toc/, progress.json, incoming/, extract_manifest.json}}。
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -224,17 +225,20 @@ class CorpusPackageManager {
 
   /// 只读校验语料包并返回摘要（导入预览用）。不满足契约抛
   /// [CorpusPackageException]（文件不存在/不是 zip/缺件/版本守卫/含主库）。
-  CorpusPackageSummary validatePackage(String zipPath, {String? appVersion}) {
+CorpusPackageSummary validatePackage(String zipPath, {String? appVersion}) {
     final f = File(zipPath);
     if (!f.existsSync()) {
       throw CorpusPackageException('文件不存在：$zipPath');
     }
-    final bytes = f.lengthSync() == 0
-        ? throw CorpusPackageException('文件为空')
-        : f.readAsBytesSync();
+    if (f.lengthSync() == 0) {
+      throw CorpusPackageException('文件为空');
+    }
+    // 流式解码：逐条目处理，用完即弃。绝不用 readAsBytesSync+decodeBytes
+    // 整包进内存（100MB 语料包会展开成 190MB+ 的 Archive，两次峰值直接
+    // OOM 杀进程 = 导入闪退，Dart try/catch 拦不住 native 层崩溃）。
     final Archive arc;
     try {
-      arc = ZipDecoder().decodeBytes(bytes);
+      arc = ZipDecoder().decodeStream(InputFileStream(zipPath));
     } catch (e) {
       throw CorpusPackageException('不是合法的 zip 文件：$e');
     }
@@ -270,9 +274,9 @@ class CorpusPackageManager {
     if (pkgEntry == null) {
       throw CorpusPackageException('包内缺 package.json');
     }
-    final Map<String, Object?> pkg;
+final Map<String, Object?> pkg;
     try {
-      final obj = jsonDecode(utf8.decode(pkgEntry.content));
+      final obj = jsonDecode(utf8.decode(_readEntryBytes(pkgEntry)));
       if (obj is! Map) throw const FormatException('顶层非对象');
       pkg = Map<String, Object?>.from(obj);
     } catch (e) {
@@ -326,7 +330,8 @@ class CorpusPackageManager {
       ));
     }
 
-    // corpus.db 落临时文件 → 只读校验（表齐全 + meta 可读 + 计数）
+// corpus.db 落临时文件 → 只读校验（表齐全 + meta 可读 + 计数）
+    // 流式写出：绝不 e.content 整文件进内存（192MB 的库一次展平 = OOM）。
     final dbEntry = arc.files
         .firstWhere((e) => _normalizeEntryName(e.name) == '$prefix$_corpusDbName');
     final tmpDir = Directory.systemTemp.createTempSync('hengya-pkg-validate_');
@@ -334,7 +339,7 @@ class CorpusPackageManager {
     String? dbModelName;
     try {
       final tmpDb = File('${tmpDir.path}/$_corpusDbName');
-      tmpDb.writeAsBytesSync(dbEntry.content);
+      _streamEntryToFile(dbEntry, tmpDb.path);
       Database? db;
       try {
         db = sqlite3.open(tmpDb.path, mode: OpenMode.readOnly);
@@ -391,7 +396,7 @@ class CorpusPackageManager {
       chunks: chunks,
       outlineEntries: outlineEntries,
       tocFiles: tocFiles,
-      packageBytes: bytes.length,
+packageBytes: f.lengthSync(),
       dbModelName: dbModelName,
       stats: pkg['stats'] is Map
           ? Map<String, Object?>.from(pkg['stats'] as Map)
@@ -689,8 +694,10 @@ class CorpusPackageManager {
   /// 节点②若整目录打包会带上）一概忽略：progress.json 是手机侧「只补不改」
   /// 数据绝不随包覆盖；incoming/ 是手机自有上传队列；chunks.jsonl 为建库
   /// 中间产物。package.json 只作元数据不落盘。
-  void _extractContent(String zipPath, Directory outDir) {
-    final arc = ZipDecoder().decodeBytes(File(zipPath).readAsBytesSync());
+void _extractContent(String zipPath, Directory outDir) {
+    // 流式解码 + 逐文件流式落盘（整包 readAsBytes+decodeBytes 在 100MB+
+    // 语料包上会 OOM 闪退——native 层杀进程，Dart try/catch 拦不住）。
+    final arc = ZipDecoder().decodeStream(InputFileStream(zipPath));
     final String prefix;
     final names = [for (final e in arc.files) _normalizeEntryName(e.name)];
     if (names.contains('corpus/$_corpusDbName')) {
@@ -723,8 +730,48 @@ class CorpusPackageManager {
       if (_isJunkPath(rel)) continue;
       final dest = File('${outDir.path}/$rel');
       dest.parent.createSync(recursive: true);
-      dest.writeAsBytesSync(e.content);
+      // 流式写盘，不经过内存（192MB corpus.db 整包进内存 = OOM）
+      _streamEntryToFile(e, dest.path);
     }
+  }
+
+/// 流式把 zip 条目写到目标文件：仅当条目 content 已在内存时才走
+  /// 快速路径（测试用小 zip），否则逐块读流落盘（生产大包）。
+  /// [ArchiveFile.getContent] 返回懒加载解码流，写盘峰值内存 ≈
+  /// 单块缓冲（1MB），与文件大小无关。
+static void _streamEntryToFile(ArchiveFile e, String path) {
+    final out = File(path).openSync(mode: FileMode.write);
+    try {
+      final stream = e.getContent();
+      if (stream == null) {
+        out.closeSync();
+        throw CorpusPackageException('zip 条目不可读：${e.name}');
+      }
+// 1MB 块缓冲：readBytes 按可用长度自动截断，EOF 返回空流。
+      // 峰值内存 ≈ 单块大小，与文件大小无关。
+      while (true) {
+        final buf = stream.readBytes(1 << 20);
+        if (buf.length == 0) break;
+        out.writeFromSync(buf.toUint8List());
+      }
+    } finally {
+      out.closeSync();
+    }
+  }
+
+  /// 读 zip 条目全部字节（package.json 等小件用）。
+  static Uint8List _readEntryBytes(ArchiveFile e) {
+    final stream = e.getContent();
+    if (stream == null) {
+      throw CorpusPackageException('zip 条目不可读：${e.name}');
+    }
+final out = BytesBuilder(copy: false);
+    while (true) {
+      final buf = stream.readBytes(1 << 20);
+      if (buf.length == 0) break;
+      out.add(buf.toUint8List());
+    }
+    return out.toBytes();
   }
 
   // ---------------- 小工具 ----------------
@@ -768,8 +815,13 @@ class CorpusPackageManager {
     return out;
   }
 
-  /// 语义化版本下界：a < b（'1.8.0+16' 的 +build 段忽略；非数字段按 0；
+/// 语义化版本下界：a < b（'1.8.0+16' 的 +build 段忽略；非数字段按 0；
   /// 任一不可解析 → false 不拦）。appMinVersion 形如 '1.8.0'。
+  ///
+  /// 语义方向兼容：主版本号相差恰为 **1**（如 0.x 公开版 vs 1.x 内测版）
+  /// 视为同一产品线重计号/换代——数字上 0.1.5 < 1.8.1，但公开版 0.x
+  /// 功能上继承自内测 1.8.x（且包格式契约已由 schemaVersion 硬把关），
+  /// 此时跳过下界检查。相差 >1 或同代内的反超仍严格拦截。
   static bool _versionBelow(String a, String b) {
     List<int>? parse(String v) {
       final head = v.split('+').first;
@@ -785,7 +837,9 @@ class CorpusPackageManager {
 
     final va = parse(a);
     final vb = parse(b);
-    if (va == null || vb == null) return false;
+    if (va == null || vb == null || va.isEmpty || vb.isEmpty) return false;
+    // 语义方向兼容：主版本一代之差放行（0↔1、1↔2 等重计号/换代）
+    if ((va[0] - vb[0]).abs() == 1) return false;
     final n = va.length > vb.length ? va.length : vb.length;
     for (var i = 0; i < n; i++) {
       final x = i < va.length ? va[i] : 0;
