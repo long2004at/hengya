@@ -5,27 +5,40 @@
 //
 // 职责（设置页只渲染状态，全部逻辑/文案在此）：
 //   · 更新源 URL 持久化：db settings key=update.source（settingGet/settingSet）
-//   · checkUpdate：GET 源 latest.json（8s 超时）→ 防御式解析 → versionCode 比较
+//   · checkUpdate：GET 源 latest.json（8s 超时）→ 防御式解析 → Ed25519 验签
+//     （安全修复 B：HTTP 明文链路上哈希与清单同源可被整体替换，签名把信任锚
+//     移到 APK 内置公钥；无 signature / 验签失败一律拒绝）→ versionCode 比较
 //   · downloadAndVerify：直链下载（apk 为相对源目录文件名）→ 进度回调 →
+//     15 分钟总超时 watchdog（批1 E2：到期 abort，删半截文件）→
 //     SHA-256 校验（crypto 已有依赖，不新增）→ 不符 → 删文件 + 报错
 //   · installApk：MethodChannel 唤起系统安装器（Android 不允许静默安装）；
 //     未授「安装未知应用」→ 结构化错误码 not_authorized → 页面引导跳授权页
 //
 // 测试 seam（对齐 LocalBackend.corpusBuildJobOverride 风格）：
-//   · debugFetchOverride   —— 替代 HTTP 取 latest.json 原文（testWidgets 宿主
+//   · debugFetchOverride     —— 替代 HTTP 取 latest.json 原文（testWidgets 宿主
 //     HttpClient 是恒 400 假实现，UI 测试必须注入）
-//   · debugChannelOverride —— 替代原生 MethodChannel（宿主非 Android 时也能
+//   · debugChannelOverride   —— 替代原生 MethodChannel（宿主非 Android 时也能
 //     提供 getPackageInfo / installApk 假响应）
+//   · debugPublicKeyOverride —— 替代 assets/certs/update_pub.b64 的验签公钥
+//     （单测注入固定测试密钥对的公钥 bytes）
+//
+// 签名规范（与 CI / tools 脚本逐字段一致，不可偏离）：
+//   canonical payload = "$versionName|$versionCode|$apk|$sha256|$sizeBytes"
+//   （versionCode / sizeBytes 为十进制整数字符串；sha256 为小写 hex），
+//   Ed25519 签名 → base64 无换行 → latest.json 顶层 "signature" 字段。
 //
 // 契约见 docs/ECS更新服务部署指南.md；latest.json 由 tools/release_build.ps1 生成：
 //   {"versionName":"1.7.0+15","versionCode":15,"apk":"heng-1.7.0+15-local-release.apk",
-//    "sha256":"<64hex>","sizeBytes":80530636,"date":"ISO8601","notes":"更新说明"}
+//    "sha256":"<64hex>","sizeBytes":80530636,"date":"ISO8601","notes":"更新说明",
+//    "signature":"<base64 Ed25519>"}
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:crypto/crypto.dart' as crypto;
-import 'package:flutter/services.dart' show MethodChannel, MissingPluginException;
+import 'package:flutter/services.dart'
+    show MethodChannel, MissingPluginException, rootBundle;
 
 import '../local/local_backend.dart';
 
@@ -37,6 +50,7 @@ class UpdateManifest {
     required this.apk,
     required this.sha256,
     required this.sizeBytes,
+    this.signature,
     this.date,
     this.notes = '',
   });
@@ -55,6 +69,10 @@ class UpdateManifest {
 
   /// 字节数（可缺省 0 → 展示「大小未知」、进度条转不确定态）
   final int sizeBytes;
+
+  /// Ed25519 签名（base64 无换行；安全修复 B）。可缺省——缺省由
+  /// [UpdateService.checkUpdate] 验签环节拒绝（缺省 ≠ 解析失败，解析语义不变）。
+  final String? signature;
 
   final String? date;
 
@@ -84,16 +102,24 @@ class UpdateManifest {
     final sizeBytes = decoded['sizeBytes'];
     final date = decoded['date'];
     final notes = decoded['notes'];
+    final signature = decoded['signature'];
     return UpdateManifest(
       versionName: versionName,
       versionCode: versionCode,
       apk: apk,
       sha256: sha256.toLowerCase(),
       sizeBytes: sizeBytes is int ? sizeBytes : 0,
+      signature: signature is String ? signature : null,
       date: date is String ? date : null,
       notes: notes is String ? notes : '',
     );
   }
+
+  /// 签名 canonical payload（全链统一，与 CI / tools 脚本逐字段一致）：
+  /// `$versionName|$versionCode|$apk|$sha256|$sizeBytes`（versionCode /
+  /// sizeBytes 为十进制整数字符串；sha256 用归一化后的小写 hex）。
+  String get canonicalPayload =>
+      '$versionName|$versionCode|$apk|$sha256|$sizeBytes';
 
   /// 大小展示：「76.8 MB」；sizeBytes 缺省 0 → 「大小未知」
   String get sizeDisplay =>
@@ -180,10 +206,13 @@ class UpdateMessages {
   static const emptySource = '请先填写更新源';
   static const badSourceUrl = '更新源地址无效（需 http/https 直链）';
   static const manifestBad = '更新源数据无法解析或缺少必要字段';
+  static const signVerifyFailed =
+      '更新源签名校验失败：清单可能被篡改或来自旧版发布流程，请联系维护者';
   static const unreachable = '无法连接更新源，请检查网络或稍后重试';
   static String httpStatus(int status) => '更新源返回 HTTP $status';
   static String downloadHttpStatus(int status) => '下载失败：HTTP $status';
   static const downloadIncomplete = '下载中断，文件不完整';
+  static const downloadTimeout = '下载超时，请检查网络后重试';
   static const noCurrentVersion = '无法读取当前应用版本';
   static const noDataDir = '本地数据目录未初始化';
 
@@ -218,6 +247,10 @@ class UpdateService {
   /// 非 null 时全部原生调用经此（假 getPackageInfo/installApk 响应）。
   static Future<Object?> Function(String method, [Map<String, dynamic>? args])?
       debugChannelOverride;
+
+  /// 非 null 时验签公钥直接用这份原始 32 字节（不再读 asset）——单测注入
+  /// 固定测试密钥对的公钥（对齐 debugFetchOverride 注入风格）。
+  static List<int>? debugPublicKeyOverride;
 
   static Future<Object?> _invoke(String method, [Map<String, dynamic>? args]) async {
     final override = debugChannelOverride;
@@ -263,6 +296,48 @@ class UpdateService {
     throw UpdateException(UpdateMessages.noCurrentVersion);
   }
 
+  // ---------------- 更新清单签名校验（安全修复 B） ----------------
+
+  /// 验签公钥 base64 缓存（assets/certs/update_pub.b64 首载后静态缓存；
+  /// debugPublicKeyOverride 不经过此缓存）。
+  static String? _pubKeyB64Cache;
+
+  /// 验签公钥原始 32 字节：debugPublicKeyOverride（测试 seam）优先；
+  /// 否则 rootBundle 读 assets/certs/update_pub.b64（base64、原始 32 字节）。
+  Future<List<int>> _loadPublicKeyBytes() async {
+    final override = debugPublicKeyOverride;
+    if (override != null) return override;
+    final cached = _pubKeyB64Cache;
+    if (cached != null) return base64Decode(cached);
+    final b64 =
+        (await rootBundle.loadString('assets/certs/update_pub.b64')).trim();
+    _pubKeyB64Cache = b64;
+    return base64Decode(b64);
+  }
+
+  /// Ed25519 验签（payload 见 UpdateManifest.canonicalPayload）。
+  /// 无 signature / 验签失败 / 公钥加载或 base64 异常 → 一律
+  /// [UpdateMessages.signVerifyFailed]（不区分原因，不给篡改者探测反馈）。
+  Future<void> _verifyManifestSignature(UpdateManifest manifest) async {
+    final sig = manifest.signature;
+    if (sig == null || sig.isEmpty) {
+      throw UpdateException(UpdateMessages.signVerifyFailed);
+    }
+    try {
+      final pubBytes = await _loadPublicKeyBytes();
+      final publicKey = SimplePublicKey(pubBytes, type: KeyPairType.ed25519);
+      final ok = await Ed25519().verify(
+        utf8.encode(manifest.canonicalPayload),
+        signature: Signature(base64Decode(sig), publicKey: publicKey),
+      );
+      if (!ok) throw UpdateException(UpdateMessages.signVerifyFailed);
+    } on UpdateException {
+      rethrow;
+    } catch (_) {
+      throw UpdateException(UpdateMessages.signVerifyFailed);
+    }
+  }
+
   // ---------------- 检查更新 ----------------
 
   /// [sourceUrl] 显式传入（页面用输入框值；测试直填），否则走生效源
@@ -278,6 +353,9 @@ class UpdateService {
     final body = await _fetchLatest(uri);
     final manifest = UpdateManifest.tryParse(body);
     if (manifest == null) throw UpdateException(UpdateMessages.manifestBad);
+    // 签名校验（安全修复 B）：置于 versionCode 比较前——无效清单（含旧版
+    // 发布流程产出的无签名清单）不进入任何后续流程。
+    await _verifyManifestSignature(manifest);
     final info = await currentPackageInfo();
     return UpdateCheckResult(
       available: manifest.versionCode > info.versionCode,
@@ -394,6 +472,11 @@ class UpdateService {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
     IOSink? sink;
     var received = 0;
+    // 下载总超时 watchdog（批1 E2）：连接超时只管建链，流式下载此前无总时长
+    // 上限（弱网慢滴流会永远挂着）。15 分钟覆盖 80MB 级 APK 的正常余量，
+    // 到期 abort 请求 + 强杀连接 → 传输层抛错 → 既有失败路径删半截文件。
+    var timedOut = false;
+    Timer? watchdog;
     try {
       final rq = await client.getUrl(url).timeout(const Duration(seconds: 8));
       final rs = await rq.close();
@@ -405,6 +488,11 @@ class UpdateService {
       final total = contentLength ??
           (manifest.sizeBytes > 0 ? manifest.sizeBytes : null);
       sink = dest.openWrite();
+      watchdog = Timer(const Duration(minutes: 15), () {
+        timedOut = true;
+        rq.abort();
+        client.close(force: true);
+      });
       await for (final chunk in rs) {
         sink.add(chunk);
         received += chunk.length;
@@ -423,8 +511,11 @@ class UpdateService {
     } catch (_) {
       await _closeQuietly(sink);
       _deleteQuietly(dest);
-      throw UpdateException(UpdateMessages.unreachable);
+      throw UpdateException(
+        timedOut ? UpdateMessages.downloadTimeout : UpdateMessages.unreachable,
+      );
     } finally {
+      watchdog?.cancel();
       await _closeQuietly(sink);
       client.close();
     }

@@ -20,6 +20,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:hengya/services/api/api_client.dart';
+import 'package:hengya/services/local/ai_key_vault.dart';
 import 'package:hengya/services/local/data_manager.dart';
 import 'package:hengya/services/local/local_backend.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -41,6 +42,8 @@ void main() {
   late String snapshotPath;
 
   setUp(() async {
+    // 安全修复 C：AI key 走 vault——测试宿主无平台通道，注入 InMemoryVault
+    AiKeyVault.instance = InMemoryVault();
     tmp = await Directory.systemTemp.createTemp('hengya_journey_');
     snapshotPath = await writeSyntheticSnapshot(tmp.path);
     await be.resetForTest();
@@ -48,6 +51,7 @@ void main() {
   });
 
   tearDown(() async {
+    AiKeyVault.instance = null; // 恢复默认真 vault（跨文件零污染）
     await be.resetForTest();
     try {
       await tmp.delete(recursive: true);

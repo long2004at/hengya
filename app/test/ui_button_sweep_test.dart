@@ -25,6 +25,7 @@ import 'package:hengya/pages/review_page.dart';
 import 'package:hengya/pages/settings_page.dart';
 import 'package:hengya/pages/stats_page.dart';
 import 'package:hengya/services/api/api_client.dart';
+import 'package:hengya/services/local/ai_key_vault.dart';
 import 'package:hengya/services/local/data_manager.dart';
 import 'package:hengya/services/local/local_backend.dart';
 import 'package:hengya/widgets/top_toast.dart';
@@ -48,6 +49,9 @@ void main() {
   // !! 同 course_flow_ui_test 的两层假异步坑结论：setUp/tearDown 必须 100% 同步
   // （体内 await 安全、setup/teardown await 永挂）；后端 boot 在用例体首行。
   setUp(() {
+    // 安全修复 C：AI key 走 vault——测试宿主无平台通道，注入 InMemoryVault
+    //（设置页 AI 保存 PUT → LocalBackend → vault）
+    AiKeyVault.instance = InMemoryVault();
     tmp = Directory.systemTemp.createTempSync('hengya_sweep_');
   });
 
@@ -62,6 +66,7 @@ void main() {
 
   tearDown(() {
     debugBackendMode = null;
+    AiKeyVault.instance = null; // 恢复默认真 vault（跨文件零污染）
     ApiClient.instance.resetSubjectCaches();
     // 不 await：微任务链在真实事件队列 FIFO 自完成
     LocalBackend.instance.resetForTest();

@@ -11,6 +11,8 @@
 //   - 文案逐字断言（UpdateMessages 为准绳）。
 //
 // 覆盖：区块渲染 / 空源 / 已是最新 / 发现新版本 / 网络失败 / 源 URL 落库回显
+//（安全修复 B：fake 清单均带合法 Ed25519 签名，公钥经
+//  UpdateService.debugPublicKeyOverride 注入固定测试密钥对）
 import 'dart:convert' as convert;
 import 'dart:ffi' as ffi;
 import 'dart:io';
@@ -24,6 +26,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqlite3/open.dart' as sqlite_open;
 
+import 'update_sign_fixture.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows) {
@@ -32,6 +36,8 @@ void main() {
   }
 
   late Directory tmp;
+  // 固定测试密钥对（boot() 内派生——同 seed 恒同 key；纯 Dart 计算无定时器）
+  late UpdateSignFixture fx;
 
   setUp(() {
     tmp = Directory.systemTemp.createTempSync('hengya_update_ui_');
@@ -40,6 +46,7 @@ void main() {
   tearDown(() {
     UpdateService.debugFetchOverride = null;
     UpdateService.debugChannelOverride = null;
+    UpdateService.debugPublicKeyOverride = null;
     debugBackendMode = null;
     ApiClient.instance.resetSubjectCaches();
     // 不 await：resetForTest 同步前缀已清运行态（微任务链自完成）
@@ -56,6 +63,9 @@ void main() {
     ApiClient.instance.resetSubjectCaches();
     // 设置页 initState：DailyReminder.loadSettings 走 SharedPreferences（内存 mock）
     SharedPreferences.setMockInitialValues({});
+    // 验签公钥 = 固定测试密钥对公钥（安全修复 B；生产 asset 不在测试宿主）
+    fx = await UpdateSignFixture.load();
+    UpdateService.debugPublicKeyOverride = fx.publicKeyBytes;
     // 假原生：当前应用版本（真通道在测试宿主不存在）
     UpdateService.debugChannelOverride = (method, [args]) async {
       if (method == 'getPackageInfo') {
@@ -86,21 +96,34 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
   }
 
-  String manifestJson({
+  /// fake latest.json 原文（带合法 Ed25519 签名——安全修复 B 后 checkUpdate 必验；
+  /// 公钥已在 boot() 注入 fx 公钥）
+  Future<String> manifestJson({
     String versionName = '1.7.0+15',
     int versionCode = 15,
     int sizeBytes = 1234567,
     String notes = '修复若干问题',
-  }) =>
-      convert.jsonEncode({
-        'versionName': versionName,
-        'versionCode': versionCode,
-        'apk': 'heng-1.7.0+15-local-release.apk',
-        'sha256': List.filled(64, 'a').join(),
-        'sizeBytes': sizeBytes,
-        'date': '2026-09-07T12:00:00Z',
-        'notes': notes,
-      });
+  }) async {
+    const apk = 'heng-1.7.0+15-local-release.apk';
+    const sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    final payload = fx.canonicalPayload(
+      versionName: versionName,
+      versionCode: versionCode,
+      apk: apk,
+      sha256: sha256,
+      sizeBytes: sizeBytes,
+    );
+    return convert.jsonEncode({
+      'versionName': versionName,
+      'versionCode': versionCode,
+      'apk': apk,
+      'sha256': sha256,
+      'sizeBytes': sizeBytes,
+      'date': '2026-09-07T12:00:00Z',
+      'notes': notes,
+      'signature': await fx.sign(payload),
+    });
+  }
 
   testWidgets('更新区块渲染：版本行 / 源输入框 / 检查按钮', (tester) async {
     await boot();
@@ -135,7 +158,7 @@ void main() {
   testWidgets('fake 检查：versionCode 相等 → 「已是最新版本（v1.6.2+14）」', (tester) async {
     await boot();
     UpdateService.debugFetchOverride = (url) async =>
-        manifestJson(versionName: '1.6.2+14', versionCode: 14);
+        await manifestJson(versionName: '1.6.2+14', versionCode: 14);
     await openSettings(tester);
 
     await tester.enterText(
@@ -149,7 +172,7 @@ void main() {
 
   testWidgets('fake 检查：versionCode 更大 → 发现新版本（notes + 大小 + 下载按钮）', (tester) async {
     await boot();
-    UpdateService.debugFetchOverride = (url) async => manifestJson();
+    UpdateService.debugFetchOverride = (url) async => await manifestJson();
     await openSettings(tester);
 
     await tester.enterText(
@@ -178,7 +201,7 @@ void main() {
   testWidgets('源 URL 落库 + 重开设置页回显（db settings update.source）', (tester) async {
     await boot();
     UpdateService.debugFetchOverride = (url) async =>
-        manifestJson(versionName: '1.6.2+14', versionCode: 14);
+        await manifestJson(versionName: '1.6.2+14', versionCode: 14);
     await openSettings(tester);
 
     const url = 'http://47.98.1.2:8080/heng-abc123/latest.json';

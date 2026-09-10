@@ -15,7 +15,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show kDebugMode, visibleForTesting;
 import 'package:shared/hengya_shared.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -136,6 +136,20 @@ class ApiClient {
     if (token != null) 'Authorization': 'Bearer $token',
   };
 
+  /// remote 模式 HTTPS 门禁（批1 D 加固）：remote 下 [baseUrl] 不以
+  /// https:// 开头即抛 [ApiException]——Bearer token 与复习数据绝不走
+  /// 明文 HTTP。四个网络路径（_getRaw / _postJson / _putJson /
+  /// uploadCourseware 的 remote 分支）统一在进入 try 前调用。
+  /// kDebugMode 豁免：保留模拟器 http://10.0.2.2 开发路径
+  /// （flutter test 亦运行于 debug → 既有 remote+http 测试不受影响）。
+  void _assertRemoteHttps() {
+    if (kDebugMode) return; // 开发/测试豁免
+    if (currentBackendMode != BackendMode.remote) return;
+    if (!baseUrl.startsWith('https://')) {
+      throw ApiException(0, 'API_BASE 必须以 https:// 开头（remote 模式禁明文 HTTP）');
+    }
+  }
+
   // ---------------- 基础 ----------------
 
   Future<String> _getRaw(String path) async {
@@ -150,6 +164,7 @@ class ApiClient {
       case BackendMode.remote:
         break;
     }
+    _assertRemoteHttps(); // remote 门禁：禁明文 HTTP
     try {
       final req = await _client.getUrl(Uri.parse('$baseUrl$path'));
       _headers.forEach(req.headers.set);
@@ -185,6 +200,7 @@ class ApiClient {
       case BackendMode.remote:
         break;
     }
+    _assertRemoteHttps(); // remote 门禁：禁明文 HTTP
     try {
       final req = await _client.postUrl(Uri.parse('$baseUrl$path'));
       _headers.forEach(req.headers.set);
@@ -214,6 +230,7 @@ class ApiClient {
       case BackendMode.remote:
         break;
     }
+    _assertRemoteHttps(); // remote 门禁：禁明文 HTTP
     try {
       final req = await _client.openUrl('PUT', Uri.parse('$baseUrl$path'));
       _headers.forEach(req.headers.set);
@@ -726,6 +743,7 @@ class ApiClient {
       case BackendMode.remote:
         break;
     }
+    _assertRemoteHttps(); // remote 门禁：禁明文 HTTP
     try {
       final req = await _client.postUrl(Uri.parse('$baseUrl$path'));
       // 上传是原始字节流，不能用 _headers 的 JSON Content-Type
@@ -832,11 +850,12 @@ class ApiClient {
   ///   · baseUrl = **完整 rerank 端点**（不拼后缀）——最小探测/生产重排均直接
   ///     `POST <baseUrl>`，body {model, query, documents[], top_n}，Bearer key
   ///     （SiliconFlow /rerank 契约，响应 {id, results:[{index, relevance_score}]}）
-  ///   · 端上存储：hengya.db settings 表（local 模式）键 reranker.baseUrl /
-  ///     reranker.model / reranker.apiKey（与 llm.*/embedding.* 同机制）
+  ///   · 端上存储（local 模式）：baseUrl/model 存 hengya.db settings 表键
+  ///     reranker.baseUrl / reranker.model；apiKey 经 AiKeyVault 存系统安全
+  ///     存储（flutter_secure_storage，安全修复 C），不入库不落明文
   ///   · 读取接口：本类 fetchAiSettings().reranker（掩码态）或
   ///     LocalBackend GET /settings/ai；明文 key 仅 LocalBackend 内部经
-  ///     db.settingGet('reranker.apiKey') 取用
+  ///     AiKeyVault 实例取用
   static const Set<String> kAiServices = {'llm', 'embedding', 'reranker'};
 
   /// reranker 默认预填（未配置时编辑层回填；用户可改任意）：

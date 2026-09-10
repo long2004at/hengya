@@ -20,6 +20,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:hengya/services/api/api_client.dart';
+import 'package:hengya/services/local/ai_key_vault.dart';
 import 'package:hengya/services/local/corpus/progress_db.dart'
     show loadProgress, progressEntryOf, saveProgress, setSubjectNo;
 import 'package:hengya/services/local/corpus_build_job.dart'
@@ -45,10 +46,14 @@ void main() {
   late Directory tmp;
 
   setUp(() async {
+    // 安全修复 C：AI key 走系统安全存储 vault——测试宿主无平台通道，
+    // 注入 InMemoryVault（settings/ai PUT 落 vault + 内存缓存）
+    AiKeyVault.instance = InMemoryVault();
     tmp = await Directory.systemTemp.createTemp('hengya_local_test_');
   });
 
   tearDown(() async {
+    AiKeyVault.instance = null; // 恢复默认真 vault（跨文件零污染）
     await LocalBackend.instance.resetForTest();
     try {
       await tmp.delete(recursive: true);
@@ -769,6 +774,20 @@ void main() {
     expect(llm1['model'], 'gpt-4o');
     expect(llm1['keySet'], true);
     expect(llm1['keyMasked'], 'sk-****78');
+    expect(llm1['encrypted'], true); // 安全修复 C：key 存系统安全存储
+
+    // key 不落 settings 表明文：键位保留、值恒空串（key 在 vault）
+    final db = await LocalBackend.instance.sharedDb;
+    expect(db.settingGet('llm.apiKey'), '');
+
+    // 空 key 再保持一次（缓存兜底路径）：掩码不变
+    final p3 = await be.put('/settings/ai/llm', {
+      'baseUrl': 'https://api2.example.com/v1',
+      'model': 'gpt-4o',
+      'apiKey': '',
+    });
+    expect(p3['keySet'], true);
+    expect(p3['keyMasked'], 'sk-****78');
   });
 
   test('流水线标志：首次 triggered=true，重复 false；未初始化防护', () async {

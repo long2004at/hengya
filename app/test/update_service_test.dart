@@ -11,6 +11,8 @@
 //   3. 检查失败映射：HTTP 404 / 连不上（关掉的服务器端口）/ 坏 JSON / 空 URL / 非 http
 //   4. 下载+校验：正常（进度回调/落盘）、sha256 不符 → 删文件 + verifyFailed
 //   5. 源 URL db 持久化（settings 表 update.source 回写回读）
+//   6. 清单签名：本文件所有 latest.json 均带合法 Ed25519 签名（安全修复 B；
+//      验签正/负例专项见 update_signature_test.dart）
 import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
@@ -21,12 +23,21 @@ import 'package:hengya/services/update/update_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/open.dart' as sqlite_open;
 
+import 'update_sign_fixture.dart';
+
 void main() {
   // Windows 测试宿主：显式加载 test/sqlite3.dll（CWD = 包根 app/）
   if (Platform.isWindows) {
     final dll = File('test/sqlite3.dll').absolute.path;
     sqlite_open.open.overrideForAll(() => ffi.DynamicLibrary.open(dll));
   }
+
+  // 固定测试密钥对（checkUpdate 验签公钥经 debugPublicKeyOverride 注入）
+  late UpdateSignFixture fx;
+
+  setUpAll(() async {
+    fx = await UpdateSignFixture.load();
+  });
 
   late Directory tmp;
   late HttpServer server;
@@ -36,12 +47,14 @@ void main() {
     // LocalBackend：下载目录（dataDir/update/）+ 源 URL 持久化都要它
     await LocalBackend.instance.resetForTest();
     LocalBackend.instance.init(tmp.path);
+    UpdateService.debugPublicKeyOverride = fx.publicKeyBytes;
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   });
 
   tearDown(() async {
     UpdateService.debugFetchOverride = null;
     UpdateService.debugChannelOverride = null;
+    UpdateService.debugPublicKeyOverride = null;
     await server.close(force: true);
     await LocalBackend.instance.resetForTest();
     try {
@@ -58,12 +71,13 @@ void main() {
   }
 
   /// 回环 HTTP 服务：/latest.json 吐 manifestBody；/fake.apk 吐 apkBytes
-  void serveRoutes({required String manifestBody, required List<int> apkBytes}) {
+  void serveRoutes(
+      {required Future<String> manifestBody, required List<int> apkBytes}) {
     server.listen((req) async {
       if (req.uri.path == '/latest.json') {
         req.response.statusCode = 200;
         req.response.headers.contentType = ContentType.json;
-        req.response.add(utf8.encode(manifestBody));
+        req.response.add(utf8.encode(await manifestBody));
       } else if (req.uri.path == '/fake.apk') {
         req.response.statusCode = 200;
         req.response.headers.contentLength = apkBytes.length;
@@ -75,22 +89,32 @@ void main() {
     });
   }
 
-  String latestJson({
+  /// latest.json 原文（带合法 Ed25519 签名——安全修复 B 后 checkUpdate 必验）
+  Future<String> latestJson({
     String versionName = '1.7.0+15',
     int versionCode = 15,
     String apk = 'fake.apk',
     String sha256 = '',
     int sizeBytes = 1234567,
-  }) =>
-      jsonEncode({
-        'versionName': versionName,
-        'versionCode': versionCode,
-        'apk': apk,
-        'sha256': sha256,
-        'sizeBytes': sizeBytes,
-        'date': '2026-09-07T12:00:00Z',
-        'notes': '修复若干问题',
-      });
+  }) async {
+    final payload = fx.canonicalPayload(
+      versionName: versionName,
+      versionCode: versionCode,
+      apk: apk,
+      sha256: sha256,
+      sizeBytes: sizeBytes,
+    );
+    return jsonEncode({
+      'versionName': versionName,
+      'versionCode': versionCode,
+      'apk': apk,
+      'sha256': sha256,
+      'sizeBytes': sizeBytes,
+      'date': '2026-09-07T12:00:00Z',
+      'notes': '修复若干问题',
+      'signature': await fx.sign(payload),
+    });
+  }
 
   test('UpdateManifest.tryParse：完整契约逐字段 + sha256 归一化小写 + sizeDisplay', () {
     final body = jsonEncode({
@@ -242,7 +266,7 @@ void main() {
 
     test('HTTP 404 → 「更新源返回 HTTP 404」', () async {
       fakePackage();
-      serveRoutes(manifestBody: '{}', apkBytes: []);
+      serveRoutes(manifestBody: Future.value('{}'), apkBytes: []);
       await expectLater(
         UpdateService.instance.checkUpdate(
             sourceUrl: 'http://127.0.0.1:${server.port}/nope.json'),
@@ -265,7 +289,7 @@ void main() {
 
     test('坏 JSON → 「更新源数据无法解析或缺少必要字段」', () async {
       fakePackage();
-      serveRoutes(manifestBody: 'garbage!!!', apkBytes: []);
+      serveRoutes(manifestBody: Future.value('garbage!!!'), apkBytes: []);
       await expectLater(
         UpdateService.instance.checkUpdate(
             sourceUrl: 'http://127.0.0.1:${server.port}/latest.json'),
@@ -284,7 +308,7 @@ void main() {
         manifestBody: latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
         apkBytes: apkBytes,
       );
-      final m = UpdateManifest.tryParse(latestJson(
+      final m = UpdateManifest.tryParse(await latestJson(
           sha256: digest.toString(), sizeBytes: apkBytes.length))!;
       final progresses = <int>[];
       final file = await UpdateService.instance.downloadAndVerify(
@@ -310,7 +334,7 @@ void main() {
         manifestBody: latestJson(sha256: wrongSha, sizeBytes: apkBytes.length),
         apkBytes: apkBytes,
       );
-      final m = UpdateManifest.tryParse(latestJson(sha256: wrongSha))!;
+      final m = UpdateManifest.tryParse(await latestJson(sha256: wrongSha))!;
       final src = 'http://127.0.0.1:${server.port}/latest.json';
       final destPath =
           '${tmp.path}${Platform.pathSeparator}update${Platform.pathSeparator}fake.apk';
@@ -334,7 +358,7 @@ void main() {
             latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
         apkBytes: apkBytes,
       );
-      final m = UpdateManifest.tryParse(latestJson(
+      final m = UpdateManifest.tryParse(await latestJson(
           sha256: digest.toString(), sizeBytes: apkBytes.length))!;
       final src = 'http://127.0.0.1:${server.port}/latest.json';
       final f1 =
@@ -368,7 +392,7 @@ void main() {
             latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
         apkBytes: apkBytes,
       );
-      final m = UpdateManifest.tryParse(latestJson(sha256: digest.toString()))!;
+      final m = UpdateManifest.tryParse(await latestJson(sha256: digest.toString()))!;
       final src = 'http://127.0.0.1:${server.port}/latest.json';
       // 造一个内容不符的残留（大小也不同）
       Directory('${tmp.path}/update').createSync(recursive: true);
@@ -403,7 +427,7 @@ void main() {
       String? fetchedUrl;
       UpdateService.debugFetchOverride = (url) async {
         fetchedUrl = url;
-        return latestJson(
+        return await latestJson(
             versionName: '1.6.2+14',
             versionCode: 14,
             sha256: List.filled(64, '0').join());

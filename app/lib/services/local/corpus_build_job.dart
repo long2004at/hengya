@@ -93,8 +93,8 @@ class CorpusBuildRequest {
   ///   须提供 [apiKey]；缺 key 抛错）
   final CorpusEmbedMode mode;
 
-  /// 在线模式 API key（来源由调用方决定：App = settings embedding.apiKey；
-  /// 绝不打印/不进结果）。offline/drill 忽略。
+  /// 在线模式 API key（来源由调用方决定：App = LocalBackend.aiKeyOf
+  ///（AiKeyVault 安全存储缓存）；绝不打印/不进结果）。offline/drill 忽略。
   final String? apiKey;
 
   /// 嵌入模型覆盖（缺省 [kEmbedModel]；drill 固定 local-charhash-1024-v1）。
@@ -176,7 +176,7 @@ class CorpusBuildResult {
 ///   inputPath: '$dataDir/corpus/incoming',   // 用户放入语料的目录
 ///   corpusDbPath: '$dataDir/corpus/corpus.db',
 ///   mode: CorpusEmbedMode.online,            // 真实嵌入（有计费）
-///   apiKey: db.settingGet('embedding.apiKey'),
+///   apiKey: LocalBackend.instance.aiKeyOf('embedding'), // 安全存储缓存
 /// ));
 /// handle.progress.listen((e) => log('${e.stage}: ${e.message}'));
 /// try {

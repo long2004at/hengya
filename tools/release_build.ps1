@@ -9,6 +9,10 @@
 #   2. flutter build apk --release --dart-define=BACKEND=local
 #   3. Copy APK to <repo>\update-dist\heng-<version>-local-release.apk
 #   4. Compute SHA-256 + size, write update-dist\latest.json (UTF-8, no BOM)
+#   4b. Sign latest.json with Ed25519 (security fix B): canonical payload
+#       "$versionName|$versionCode|$apk|$sha256|$sizeBytes" -> top-level
+#       "signature" field (base64, no line breaks). Requires openssl
+#       (shipped with Git for Windows) + private key secrets\update_signing_key.pem.
 #   5. If tools\deploy.config.json exists: scp APK + latest.json to the server.
 #      If not: print a notice and stop (files staged locally only).
 #
@@ -106,6 +110,52 @@ $latestPath = Join-Path $distDir 'latest.json'
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($latestPath, $json, $utf8NoBom)
 Write-Host "[4/5] wrote: $latestPath"
+
+# --- [4b/5] sign latest.json with Ed25519 (security fix B) --------------------
+# Canonical payload - MUST stay field-for-field identical with the app-side
+# verifier (app\lib\services\update\update_service.dart):
+#     "$versionName|$versionCode|$apk|$sha256|$sizeBytes"
+# Ed25519 via openssl pkeyutl -rawin; signature base64 (no line breaks) is
+# injected as top-level "signature" field. New app builds REJECT unsigned
+# manifests, so this step must not be skipped on release machines.
+$signKeyPem = Join-Path $repoRoot 'secrets\update_signing_key.pem'
+$openssl = $null
+$cmdOpenssl = Get-Command openssl -ErrorAction SilentlyContinue
+$candidates = @()
+if ($cmdOpenssl) { $candidates += $cmdOpenssl.Source }
+$candidates += @(
+    'C:\Program Files\Git\mingw64\bin\openssl.exe',
+    'C:\Program Files\Git\usr\bin\openssl.exe',
+    'C:\GIT\Git\mingw64\bin\openssl.exe',
+    "$env:LOCALAPPDATA\Programs\Git\mingw64\bin\openssl.exe"
+)
+foreach ($cand in $candidates) {
+    if ($cand -and (Test-Path $cand)) { $openssl = $cand; break }
+}
+if ($openssl) {
+    if (-not (Test-Path $signKeyPem)) {
+        throw "signing key not found: $signKeyPem (generate it per the deploy guide, section 'update manifest signing')"
+    }
+    $payloadTxt = "$versionName|$versionCode|$apkName|$sha256|$sizeB"
+    $tmpPayload = Join-Path $env:TEMP 'hengya_manifest_payload.txt'
+    $tmpSigBin  = Join-Path $env:TEMP 'hengya_manifest_sig.bin'
+    [System.IO.File]::WriteAllText($tmpPayload, $payloadTxt, $utf8NoBom)
+    & $openssl pkeyutl -sign -inkey $signKeyPem -rawin -in $tmpPayload -out $tmpSigBin
+    if ($LASTEXITCODE -ne 0) { throw "openssl Ed25519 signing failed (exit code $LASTEXITCODE)" }
+    $sigB64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($tmpSigBin))
+    Remove-Item $tmpPayload, $tmpSigBin -ErrorAction SilentlyContinue
+
+    # Re-read the JSON we just wrote, add signature, write back (UTF-8, no BOM)
+    $manifestObj = Get-Content $latestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $manifestObj | Add-Member -NotePropertyName signature -NotePropertyValue $sigB64 -Force
+    $json = $manifestObj | ConvertTo-Json
+    [System.IO.File]::WriteAllText($latestPath, $json, $utf8NoBom)
+    Write-Host '      signed: Ed25519 signature injected into latest.json'
+} else {
+    Write-Warning 'openssl not found - latest.json is UNSIGNED.'
+    Write-Warning 'New app builds (security fix B) will REJECT this manifest.'
+    Write-Warning 'Install Git for Windows (ships openssl) or add openssl to PATH, then re-run.'
+}
 
 # --- [5/5] upload via scp (only when deploy.config.json exists) ---------------
 if (Test-Path $deployCfg) {

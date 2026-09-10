@@ -87,16 +87,21 @@ jobs:
 
       # 签名密钥还原：显式 release 签名（key.properties 模式），不依赖 runner 的
       # debug 默认路径（AGP 在 CI 会现场生成随机密钥 → 跨签名无法覆盖安装）。
+      # 凭据全部走 GitHub Secrets（配置清单见 AGENTS.md「发布签名 Secrets 清单」）；
+      # Secrets 未配置时密码为空 → 构建失败，属预期防护。
       - name: 还原 APK 签名密钥（显式 release 签名）
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$HOME/hengya-release.keystore"
           cat > android/key.properties <<EOF
           storeFile=$HOME/hengya-release.keystore
-          storePassword=android
-          keyAlias=androiddebugkey
-          keyPassword=android
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
           EOF
           echo "keystore restored: $(wc -c < "$HOME/hengya-release.keystore") bytes"
 
@@ -137,6 +142,7 @@ jobs:
           ECS_USER: ${{ secrets.ECS_USER }}
           ECS_PATH: ${{ secrets.ECS_PATH }}
           ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+          UPDATE_SIGN_KEY: ${{ secrets.UPDATE_SIGN_KEY }}
         run: |
           APK="hengya-${GITHUB_REF_NAME}-release.apk"
           SHA=$(sha256sum "$APK" | cut -d' ' -f1)
@@ -154,6 +160,20 @@ jobs:
             "notes": "恒牙 ${GITHUB_REF_NAME}：更新说明见 GitHub Release https://github.com/long2004at/hengya/releases/tag/${GITHUB_REF_NAME}"
           }
           EOF
+          # Ed25519 清单签名（安全修复 B）：canonical payload 五字段竖线拼接，
+          # 与 App 端 update_service.dart 逐字段一致；签名 base64 无换行注入
+          # 顶层 signature 字段（新版 App 拒绝无签名清单）
+          printf '%s' "$UPDATE_SIGN_KEY" > /tmp/update_sign_key.pem
+          if [ ! -s /tmp/update_sign_key.pem ]; then
+            echo "::error::UPDATE_SIGN_KEY secret 未配置，拒绝产出无签名清单"; exit 1
+          fi
+          printf '%s' "${VERSION}|${CODE}|${APK}|${SHA}|${SIZE}" > /tmp/manifest_payload.txt
+          openssl pkeyutl -sign -inkey /tmp/update_sign_key.pem -rawin \
+            -in /tmp/manifest_payload.txt -out /tmp/manifest_sig.bin
+          SIG=$(base64 -w0 /tmp/manifest_sig.bin)
+          jq --arg sig "$SIG" '. + {signature: $sig}' latest.json > latest.json.tmp \
+            && mv latest.json.tmp latest.json
+          rm -f /tmp/update_sign_key.pem /tmp/manifest_payload.txt /tmp/manifest_sig.bin
           cat latest.json
           mkdir -p ~/.ssh
           printf '%s\n' "$ECS_SSH_KEY" > ~/.ssh/ecs_key
@@ -169,6 +189,7 @@ jobs:
         working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
+          UPDATE_SIGN_KEY: ${{ secrets.UPDATE_SIGN_KEY }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           APK="hengya-${TAG}-release.apk"
@@ -189,6 +210,20 @@ jobs:
             "notes": "恒牙 ${TAG}：更新说明见 GitHub Release https://github.com/long2004at/hengya/releases/tag/${TAG}"
           }
           EOF
+          # Ed25519 清单签名（安全修复 B）：canonical payload 五字段竖线拼接
+          # （此通道 apk 字段为 Release 资产绝对链接 APK_URL），与 App 端
+          # update_service.dart 逐字段一致；签名 base64 无换行注入顶层 signature
+          printf '%s' "$UPDATE_SIGN_KEY" > /tmp/update_sign_key.pem
+          if [ ! -s /tmp/update_sign_key.pem ]; then
+            echo "::error::UPDATE_SIGN_KEY secret 未配置，拒绝产出无签名清单"; exit 1
+          fi
+          printf '%s' "${VERSION}|${CODE}|${APK_URL}|${SHA}|${SIZE}" > /tmp/manifest_payload.txt
+          openssl pkeyutl -sign -inkey /tmp/update_sign_key.pem -rawin \
+            -in /tmp/manifest_payload.txt -out /tmp/manifest_sig.bin
+          SIG=$(base64 -w0 /tmp/manifest_sig.bin)
+          jq --arg sig "$SIG" '. + {signature: $sig}' update/latest.json > update/latest.json.tmp \
+            && mv update/latest.json.tmp update/latest.json
+          rm -f /tmp/update_sign_key.pem /tmp/manifest_payload.txt /tmp/manifest_sig.bin
           cat update/latest.json
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

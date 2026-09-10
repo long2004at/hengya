@@ -122,9 +122,12 @@ void main() {
     expect(db.settingGet('embedding.instructQuery'), '1');
 
     // 接线：设置 '0' 后装配层 queryInstruct=''（禁用前缀）
-    db.settingSet('embedding.apiKey', 'sk-ui-test');
+    //（安全修复 C：key 不再读 settings 表——显式传 apiKey 模拟 vault 缓存）
     db.settingSet('embedding.model', 'M');
     db.settingSet('embedding.instructQuery', '0');
-    expect(assembleEmbedConfig(db)!.queryInstruct, '');
+    expect(
+      assembleEmbedConfig(db, apiKey: 'sk-ui-test')!.queryInstruct,
+      '',
+    );
   });
 }

@@ -15,6 +15,7 @@ import 'dart:io';
 
 import 'package:hengya/services/api/api_client.dart';
 import 'package:hengya/services/api/demo_backend.dart';
+import 'package:hengya/services/local/ai_key_vault.dart';
 import 'package:hengya/services/local/local_backend.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/open.dart' as sqlite_open;
@@ -31,10 +32,13 @@ void main() {
   late Directory tmp;
 
   setUp(() async {
+    // 安全修复 C：AI key 走 vault——测试宿主无平台通道，注入 InMemoryVault
+    AiKeyVault.instance = InMemoryVault();
     tmp = await Directory.systemTemp.createTemp('hengya_reranker_test_');
   });
 
   tearDown(() async {
+    AiKeyVault.instance = null; // 恢复默认真 vault（跨文件零污染）
     LocalBackend.rerankProbeOverride = null; // 恢复真外呼链路（同步置空）
     await LocalBackend.instance.resetForTest();
     try {
@@ -142,7 +146,7 @@ void main() {
     expect(rr1['model'], 'Qwen/Qwen3-Reranker-8B');
     expect(rr1['keySet'], true);
     expect(rr1['keyMasked'], 'rr-****77');
-    expect(rr1['encrypted'], false); // 端上暂明文（与 llm/embedding 同语义）
+    expect(rr1['encrypted'], true); // 安全修复 C：key 存系统安全存储（Keystore）
 
     // apiKey 空串 = 保持原 key（掩码不变）
     final p2 = await be.put('/settings/ai/reranker', {
@@ -172,9 +176,11 @@ void main() {
       'apiKey': 'rr-fake-112233',
     });
 
-    // 关闭连接（等同进程退出）→ 同一数据目录重新初始化（等同重启 App）
+    // 关闭连接（等同进程退出）→ 同一数据目录重新初始化（等同重启 App——
+    // 真实链路 main() 启动即 initAiKeys 预热 vault 缓存，安全修复 C）
     await LocalBackend.instance.resetForTest();
     LocalBackend.instance.init(tmp.path);
+    await LocalBackend.instance.initAiKeys(); // key 从系统安全存储回读
 
     final s = await be.get('/settings/ai');
     final rr = (s as Map)['reranker'] as Map<String, dynamic>;

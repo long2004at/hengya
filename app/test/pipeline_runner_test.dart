@@ -565,9 +565,9 @@ void main() {
     expect(noKey.embedModel, isNull);
 
     // 有 key+model → embed 注入 + 真实 model 透传（绝不打印 key）
-    db.settingSet('embedding.apiKey', 'sk-embed-test-123456');
+    //（安全修复 C：key 不再读 settings 表——显式传 apiKey 模拟 vault 下发）
     db.settingSet('embedding.model', 'Qwen/Qwen3-VL-Embedding-8B');
-    final wired = assembleEmbedder(db);
+    final wired = assembleEmbedder(db, apiKey: 'sk-embed-test-123456');
     expect(wired.embed, isNotNull);
     expect(wired.embedModel, 'Qwen/Qwen3-VL-Embedding-8B');
 
@@ -655,25 +655,26 @@ void main() {
     final db = await openDb();
     addTearDown(db.close);
 
-    db.settingSet('embedding.apiKey', 'sk-embed-test-123456');
+    // 安全修复 C：key 不再读 settings 表——显式传 apiKey 模拟 vault 下发
+    const key = 'sk-embed-test-123456';
     db.settingSet('embedding.model', 'Qwen/Qwen3-VL-Embedding-8B');
 
     // 缺省（默认开=保持旧行为）→ null = 内置 kQueryInstruct
-    final def = assembleEmbedConfig(db);
+    final def = assembleEmbedConfig(db, apiKey: key);
     expect(def, isNotNull);
     expect(def!.queryInstruct, isNull);
 
     // '0' → ''（禁用前缀——Gitee/模力方舟通道）
     db.settingSet('embedding.instructQuery', '0');
-    final off = assembleEmbedConfig(db);
+    final off = assembleEmbedConfig(db, apiKey: key);
     expect(off!.queryInstruct, '');
 
     // '1' → 显式开（与缺省同语义）
     db.settingSet('embedding.instructQuery', '1');
-    expect(assembleEmbedConfig(db)!.queryInstruct, isNull);
+    expect(assembleEmbedConfig(db, apiKey: key)!.queryInstruct, isNull);
 
     // 端到端：闭包装配形态不受影响（embed 注入 + 真实 model 透传）
-    final wired = assembleEmbedder(db);
+    final wired = assembleEmbedder(db, apiKey: key);
     expect(wired.embed, isNotNull);
     expect(wired.embedModel, 'Qwen/Qwen3-VL-Embedding-8B');
   });

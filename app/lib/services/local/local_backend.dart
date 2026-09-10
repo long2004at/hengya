@@ -13,9 +13,11 @@
 //   progress      progress.json + 辅文章过滤（§7.9 九项精确集合，去空白归一）
 //   corpus        status 优雅降级 + upload 校验链（科目/清洗/白名单/魔数）+
 //                 build 触发/进度/结果（App 内建库：consume 上游 isolate job）
-//   settings/ai   掩码态（明文 key 永不出后端；encrypted=false 端上暂明文存，
-//                 Phase 2 换 flutter_secure_storage 时迁移；三套服务：
-//                 llm / embedding / reranker——键名 llm.*/embedding.*/reranker.*）
+//   settings/ai   掩码态（明文 key 永不出后端；key 存系统安全存储
+//                 AiKeyVault——Android Keystore 加密，settings 表只留空
+//                 键位；三套服务：llm / embedding / reranker——键名
+//                 llm.*/embedding.*/reranker.*，key 经 [LocalBackend.aiKeyOf]
+//                 从内存缓存同步取用）
 //   pipeline      .force_run 标志 + pipelineKick 后台消费（Phase 4 端上流水线
 //
 // 响应形状约定（对齐 DemoBackend 与真实服务端）：裸数组端点（pending/
@@ -37,6 +39,7 @@ import 'package:shared/hengya_shared.dart';
 import 'package:sqlite3/sqlite3.dart' show OpenMode, sqlite3;
 
 import '../api/api_client.dart';
+import 'ai_key_vault.dart';
 import 'corpus/extract_all.dart' show CorpusEmbedMode, loadManifest;
 import 'corpus/exam_topics.dart';
 import 'corpus/outline_docx.dart' show kOutlineUploadCode;
@@ -102,12 +105,52 @@ class LocalBackend {
   /// 也立即生效（真实 job 由自身 finally 收尾；测试内不应遗留真实 job）。
   Future<void> resetForTest() async {
     _resetCorpusBuildState();
+    _aiKeys.clear(); // AI key 缓存随单例重置（vault 状态由测试自行注入/清理）
+    _aiKeysInit = null;
     await reload();
     _dataDir = null;
   }
 
   /// Phase 4：流水线等上层服务共用连接（与路由同源单写者，WAL）。
   Future<Db> get sharedDb => _db;
+
+  // ---------------- AI key 安全存储（安全修复 C：vault + 内存缓存） ----------------
+
+  /// AI 服务 key 内存缓存（svc → key）：vault 读写是异步平台通道调用，
+  /// 而消费方（路由 / 建库选路 / 掩码视图）多为同步上下文——启动时
+  /// [initAiKeys] 一次性预热，运行期经 [aiKeyOf] 同步取用（写路径见
+  /// settings/ai PUT：同步更新缓存 + vault 异步落盘）。
+  final Map<String, String> _aiKeys = {};
+
+  /// [initAiKeys] 单飞 memo（幂等；失败置 null，下次调用重试）。
+  Future<void>? _aiKeysInit;
+
+  /// 三把 AI key 从 [AiKeyVault] 预热入缓存（幂等；main() 启动接线 +
+  /// settings/ai PUT 首用兜底）。先经 [AiKeyVault.migrateFromDb] 把旧库
+  /// settings 表明文 key 一次性迁入 vault（键位保留、值清空），再读 vault。
+  Future<void> initAiKeys() {
+    final pending = _aiKeysInit;
+    if (pending != null) return pending;
+    final init = _loadAiKeys();
+    _aiKeysInit = init;
+    return init;
+  }
+
+  Future<void> _loadAiKeys() async {
+    try {
+      final db = await _db;
+      await AiKeyVault.instance.migrateFromDb(db);
+      for (final svc in kAiKeyServices) {
+        _aiKeys[svc] = await AiKeyVault.instance.read(svc);
+      }
+    } catch (_) {
+      _aiKeysInit = null; // 失败不缓存失败态：下次调用重试
+      rethrow;
+    }
+  }
+
+  /// 运行期同步取 AI key（缓存未命中返回 ''；写入见 settings/ai PUT 路径）。
+  String aiKeyOf(String svc) => _aiKeys[svc] ?? '';
 
   // ---------------- Phase 4：流水线后台执行接线 ----------------
 
@@ -649,7 +692,7 @@ class LocalBackend {
       r'^/settings/ai/(llm|embedding|reranker)/test$',
     ).firstMatch(path);
     if (aiTest != null) {
-      return _testAiService(db, aiTest.group(1)!, m);
+      return _testAiService(aiTest.group(1)!, m);
     }
 
     // /pipeline/trigger（标志 + pipelineKick 后台消费；契约见 _triggerPipeline）
@@ -675,7 +718,8 @@ class LocalBackend {
         : const <String, dynamic>{};
 
     // /settings/ai/<svc>（baseUrl 必须 https://、model 非空；apiKey 空=保持；
-    // 键名 <svc>.baseUrl / <svc>.model / <svc>.apiKey，svc ∈ llm|embedding|reranker）
+    // 键名 <svc>.baseUrl / <svc>.model（settings 表），<svc>.apiKey 只留空
+    // 键位——key 本体存系统安全存储 AiKeyVault，svc ∈ llm|embedding|reranker）
     final aiPut = RegExp(
       r'^/settings/ai/(llm|embedding|reranker)$',
     ).firstMatch(path);
@@ -688,13 +732,21 @@ class LocalBackend {
         throw ApiException(400, 'baseUrl 必须以 https:// 开头');
       }
       if (model.isEmpty) throw ApiException(400, 'model 不能为空');
-      final oldKey = db.settingGet('$svc.apiKey') ?? '';
+      // 安全修复 C：key 存系统安全存储（vault）+ 内存缓存；settings 表该键
+      // 只保留键位、值恒空串（兼容 data_manager 导出剥离与旧版导入）。
+      await initAiKeys();
+      final oldKey = aiKeyOf(svc);
       final effectiveKey = apiKey.isEmpty ? oldKey : apiKey;
       db.settingSet('$svc.baseUrl', baseUrl);
       db.settingSet('$svc.model', model);
       if (apiKey.isNotEmpty) {
-        // 端上暂明文存（Phase 2 迁移 flutter_secure_storage 时升级）
-        db.settingSet('$svc.apiKey', apiKey);
+        _aiKeys[svc] = apiKey; // 同步更新缓存（回显/test 兜底立即可见）
+        db.settingSet('$svc.apiKey', ''); // 键位保留、值清空（key 在 vault）
+        // 异步落盘；失败不回滚缓存（Keystore 写实践中不失败；失败时下次
+        // PUT 重写即可——绝不把明文 key 留回 settings 表）。
+        unawaited(
+          AiKeyVault.instance.save(svc, apiKey).catchError((Object _) {}),
+        );
       }
       return {
         'ok': true,
@@ -898,8 +950,9 @@ class LocalBackend {
   // ---- 嵌入模式自动选路（用户拍板：UI 不做任何 API key 引导） ----
 
   /// 嵌入模式自动选路规则（语义同探针 --mode；探针读 .env，App 读本机
-  /// settings 表）：
-  ///   1. settings `embedding.apiKey` 已配置（非空）→ **online**：真实嵌入
+  /// 配置——key 在系统安全存储 AiKeyVault（经 [aiKeyOf] 内存缓存），
+  /// model/baseUrl 在 settings 表）：
+  ///   1. embedding key 已配置（非空）→ **online**：真实嵌入
   ///      （有计费）；model/baseUrl 取 settings 的 `embedding.model` /
   ///      `embedding.baseUrl`（空回退 worker 内默认 kEmbedModel /
   ///      kEmbedApiUrl）。settings 存基址（…/v1，与 /settings/ai test 的
@@ -911,9 +964,9 @@ class LocalBackend {
   ///      显式指定（探针 --mode drill 同义）。
   /// key 纪律：key 值只进 [CorpusBuildRequest.apiKey]，绝不进日志 / 进度 /
   /// 结果 / 异常文本（上游协议已守卫）。
-  static (CorpusEmbedMode, String? apiKey, String? model, String? baseUrl)
+  (CorpusEmbedMode, String? apiKey, String? model, String? baseUrl)
   _selectBuildMode(Db db) {
-    final key = db.settingGet('embedding.apiKey') ?? '';
+    final key = aiKeyOf('embedding');
     if (key.isEmpty) return (CorpusEmbedMode.offline, null, null, null);
     final model = db.settingGet('embedding.model') ?? '';
     var base = db.settingGet('embedding.baseUrl') ?? '';
@@ -1254,15 +1307,16 @@ class LocalBackend {
 
   // ---------------- settings/ai 视图与外呼 ----------------
 
-  /// 单套 AI 服务配置（掩码态；encrypted=false：端上暂明文存储，Phase 2 迁移）
+  /// 单套 AI 服务配置（掩码态；key 存系统安全存储 AiKeyVault——Android
+  /// Keystore 加密，encrypted=true；明文 key 永不出后端）
   Map<String, dynamic> _serviceView(Db db, String svc) {
-    final key = db.settingGet('$svc.apiKey') ?? '';
+    final key = aiKeyOf(svc);
     return {
       'baseUrl': db.settingGet('$svc.baseUrl') ?? '',
       'model': db.settingGet('$svc.model') ?? '',
       'keySet': key.isNotEmpty,
       'keyMasked': key.isEmpty ? '' : maskApiKey(key),
-      'encrypted': false,
+      'encrypted': true,
     };
   }
 
@@ -1271,14 +1325,15 @@ class LocalBackend {
   /// 才算 ok；reranker POST `<baseUrl>`（完整端点，SiliconFlow /rerank 契约），
   /// 200 且 results 非空才算 ok。异常不抛：统一 ok=false + message。）
   Future<Map<String, dynamic>> _testAiService(
-    Db db,
     String svc,
     Map<String, dynamic> m,
   ) async {
     final baseUrl = _str(m['baseUrl']).trim();
     final model = _str(m['model']).trim();
+    // 空 key = 用已存 key（系统安全存储 AiKeyVault 的内存缓存，与 PUT/
+    // 流水线同源）；非空 = 表单新 key 直测
     final apiKey = _str(m['apiKey']).isEmpty
-        ? (db.settingGet('$svc.apiKey') ?? '')
+        ? aiKeyOf(svc)
         : _str(m['apiKey']);
     if (!baseUrl.startsWith('https://')) {
       throw ApiException(400, 'baseUrl 必须以 https:// 开头');

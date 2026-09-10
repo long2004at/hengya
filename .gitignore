@@ -33,6 +33,8 @@ secrets/
 .env
 *.env
 tools/deploy.config.json
+key.properties
+**/key.properties
 
 # --- 私有语料（版权原因不入公开仓库）---
 content/

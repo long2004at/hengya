@@ -26,6 +26,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:hengya/services/api/api_client.dart';
+import 'package:hengya/services/local/ai_key_vault.dart';
 import 'package:hengya/services/local/corpus/search_engine.dart'
     show corpusSearch;
 import 'package:hengya/services/local/corpus_build_job.dart'
@@ -53,10 +54,14 @@ void main() {
   late Directory tmp;
 
   setUp(() {
+    // 安全修复 C：AI key 走 vault——测试宿主无平台通道，注入 InMemoryVault
+    //（updateAiService 配假 embedding key → 自动选路 online 预览）
+    AiKeyVault.instance = InMemoryVault();
     tmp = Directory.systemTemp.createTempSync('hengya_corpus_route_');
   });
 
   tearDown(() async {
+    AiKeyVault.instance = null; // 恢复默认真 vault（跨文件零污染）
     await LocalBackend.instance.resetForTest();
     debugBackendMode = null;
     ApiClient.instance.resetSubjectCaches();

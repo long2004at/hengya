@@ -1282,13 +1282,18 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
 /// 向量路静默跳过）。key/model 任一缺失 → null：词面单路，offline 无 key
 /// 路不炸。绝不打印 key。
 ///
+/// key 来源（安全修复 C：key 存系统安全存储 AiKeyVault，不再读 settings
+/// 表明文）：[apiKey] 显式传入（worker 侧——vault 平台通道仅主 isolate
+/// 可用，key 由 PipelineCatchupRequest 随请求下发）；缺省读主 isolate 的
+/// [LocalBackend.aiKeyOf] 内存缓存。
+///
 /// instruct 前缀开关（节点③）：settings `embedding.instructQuery`='0' →
 /// queryInstruct=''（禁用前缀，Gitee/模力方舟通道）；缺省/其他值 → null
 /// （=内置 kQueryInstruct，2026-09-06 真库 A/B 定论：保留——禁用则生造词
 /// 越过低分线）。建库侧（ingest）嵌入不带前缀（Python 同口径），该开关
 /// 仅作用于查询侧——所有查询嵌入装配统一走本函数。
-SiliconFlowConfig? assembleEmbedConfig(Db db) {
-  final key = db.settingGet('embedding.apiKey') ?? '';
+SiliconFlowConfig? assembleEmbedConfig(Db db, {String? apiKey}) {
+  final key = apiKey ?? LocalBackend.instance.aiKeyOf('embedding');
   final model = db.settingGet('embedding.model') ?? '';
   if (key.isEmpty || model.isEmpty) {
     return null;
@@ -1315,8 +1320,12 @@ SiliconFlowConfig? assembleEmbedConfig(Db db) {
 /// （corpusSearch 以此对库内 meta.embedding_model 做空间互斥——占位值会让
 /// 向量路静默跳过）。key/model 任一缺失 → (null, null)：词面单路，
 /// offline 无 key 路不炸。绝不打印 key。
-({EmbedQueryFn? embed, String? embedModel}) assembleEmbedder(Db db) {
-  final cfg = assembleEmbedConfig(db);
+/// key 来源见 [assembleEmbedConfig]（安全修复 C：AiKeyVault）。
+({EmbedQueryFn? embed, String? embedModel}) assembleEmbedder(
+  Db db, {
+  String? apiKey,
+}) {
+  final cfg = assembleEmbedConfig(db, apiKey: apiKey);
   if (cfg == null) {
     return (embed: null, embedModel: null);
   }
@@ -1419,6 +1428,7 @@ class PipelineCatchupRequest {
   const PipelineCatchupRequest({
     required this.dataDir,
     required this.prompts,
+    required this.aiKeys,
     required this.promptNotes,
     this.trigger = kPipelineTriggerManual,
   });
@@ -1429,6 +1439,12 @@ class PipelineCatchupRequest {
   /// 提示词模板（loadPromptsAsset 产物；worker 直用，与主 isolate 直跑
   /// 时的装配完全同源）。
   final Map<String, String> prompts;
+
+  /// AI 服务 key（'embedding' / 'llm'——worker 需要的两把）。安全修复 C：
+  /// key 存系统安全存储 AiKeyVault，而 vault 走平台通道**仅主 isolate
+  /// 可用**（文件头 ③）——主 isolate 经 [LocalBackend.aiKeyOf] 内存缓存
+  /// 预读随请求下发，与 prompts 同一跨隔离模式；worker 绝不自读 vault。
+  final Map<String, String> aiKeys;
 
   /// 模板加载 note（LLM 账本 notes 附加——语义同前）。
   final List<String> promptNotes;
@@ -1481,7 +1497,9 @@ void pipelineCatchupWorkerEntry(IsolateWorkerBoot boot) {
 
 /// worker 侧六步总编排执行（P1-3 迁移自 PipelineRunner._runOnce 主体；
 /// 装配链 assembleEmbedder/assembleRunSearch/llmChatFn 与主 isolate 直跑
-/// 完全同源——settings（llm.*/embedding.*）读自 worker 自己的连接）。
+/// 完全同源——baseUrl/model 等非敏感 settings（llm.*/embedding.*）读自
+/// worker 自己的连接；AI key 例外：vault 平台通道仅主 isolate，key 由
+/// [PipelineCatchupRequest.aiKeys] 随请求下发（安全修复 C））。
 Future<Map<String, Object?>> _runCatchupInWorker(
   PipelineCatchupRequest req,
   IsolateWorkerContext ctx,
@@ -1492,7 +1510,12 @@ Future<Map<String, Object?>> _runCatchupInWorker(
     final corpusPath = '$dataDir/corpus/corpus.db';
     final cdb = tryOpenCorpusDb(corpusPath);
     try {
-      final (:embed, :embedModel) = assembleEmbedder(db);
+      final (:embed, :embedModel) = assembleEmbedder(
+        db,
+        // 安全修复 C：key 随请求下发（vault 平台通道仅主 isolate），
+        // worker 绝不自读 vault/settings 表明文
+        apiKey: req.aiKeys['embedding'] ?? '',
+      );
       final runSearch = assembleRunSearch(
         corpusDb: cdb,
         corpusPath: corpusPath,
@@ -1501,7 +1524,7 @@ Future<Map<String, Object?>> _runCatchupInWorker(
       );
       final llmCfg = LlmConfig(
         baseUrl: db.settingGet('llm.baseUrl') ?? '',
-        apiKey: db.settingGet('llm.apiKey') ?? '',
+        apiKey: req.aiKeys['llm'] ?? '',
         model: db.settingGet('llm.model') ?? '',
       );
       final account = LlmAccount();
@@ -1702,7 +1725,13 @@ class PipelineRunner {
     if (override != null) {
       return override(dataDir);
     }
-    // 平台通道仅主 isolate：提示词先读好随请求下发（文件头 ③）
+    // 平台通道仅主 isolate：提示词先读好随请求下发（文件头 ③）；
+    // AI key 同理——vault 缓存预热（main() 已接线，幂等兜底）后随请求
+    // 下发（安全修复 C）。预热失败不阻断：worker 以空 key 降级
+    //（LLM 未配置 → 关键词 failed 留补跑，契约 9）。
+    try {
+      await LocalBackend.instance.initAiKeys();
+    } catch (_) {}
     final (prompts, promptNotes) = await loadPromptsAsset();
     final handle = await IsolateRunner.instance.start<Map<String, Object?>>(
       jobId: pipelineCatchupJobId,
@@ -1710,6 +1739,10 @@ class PipelineRunner {
       args: PipelineCatchupRequest(
         dataDir: dataDir,
         prompts: prompts,
+        aiKeys: {
+          'embedding': LocalBackend.instance.aiKeyOf('embedding'),
+          'llm': LocalBackend.instance.aiKeyOf('llm'),
+        },
         promptNotes: promptNotes,
         trigger: trigger,
       ),

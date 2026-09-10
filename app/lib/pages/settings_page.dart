@@ -1878,9 +1878,9 @@ class _AiServiceEditSheetState extends State<_AiServiceEditSheet> {
   }
 
   /// #2：拉取服务方 /models 列表（run_llm.llmListModels），核对所配 model
-  /// 是否在列。key 口径：表单填了用表单；留空且 local 模式读本机 settings
-  /// 表已存 key（与流水线同源）；remote 模式 key 在服务端、端上拿不到 →
-  /// 无法核对，静默跳过（保守：不误导、不降级连通性结论）。
+  /// 是否在列。key 口径：表单填了用表单；留空且 local 模式读本机系统安全
+  /// 存储（AiKeyVault 内存缓存，与流水线同源）；remote 模式 key 在服务端、
+  /// 端上拿不到 → 无法核对，静默跳过（保守：不误导、不降级连通性结论）。
   /// 返回 null = 在列表 / 无法核对；非 null = 所配 model 名（不在列表）。
   Future<String?> _checkModelInList() async {
     final baseUrl = _baseUrlCtrl.text.trim();
@@ -1889,8 +1889,8 @@ class _AiServiceEditSheetState extends State<_AiServiceEditSheet> {
     var key = _keyCtrl.text.trim();
     if (key.isEmpty && currentBackendMode == BackendMode.local) {
       try {
-        final db = await LocalBackend.instance.sharedDb;
-        key = db.settingGet('llm.apiKey') ?? '';
+        await LocalBackend.instance.initAiKeys(); // 幂等预热（main 已接线）
+        key = LocalBackend.instance.aiKeyOf('llm');
       } catch (_) {
         key = '';
       }
@@ -2021,7 +2021,8 @@ class _AiServiceEditSheetState extends State<_AiServiceEditSheet> {
             decoration: InputDecoration(
               labelText: 'apiKey',
               hintText: '留空保持不变',
-              // local 模式 key 存本机库（AiKeyVault → settings 表），非服务器
+              // local 模式 key 存本机系统安全存储（AiKeyVault，Android
+              // Keystore 加密），非服务器；remote 模式存服务端
               helperText: currentBackendMode == BackendMode.local
                   ? '加密存储在本机，界面只显示掩码'
                   : '加密存储在服务器，界面只显示掩码',
