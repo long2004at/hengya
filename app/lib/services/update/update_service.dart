@@ -8,8 +8,9 @@
 //   · checkUpdate：GET 源 latest.json（8s 超时）→ 防御式解析 → Ed25519 验签
 //     （安全修复 B：HTTP 明文链路上哈希与清单同源可被整体替换，签名把信任锚
 //     移到 APK 内置公钥；无 signature / 验签失败一律拒绝）→ versionCode 比较
-//   · downloadAndVerify：直链下载（apk 为相对源目录文件名）→ 进度回调 →
-//     15 分钟总超时 watchdog（批1 E2：到期 abort，删半截文件）→
+//   · downloadAndVerify：直链下载（apk 为相对源目录文件名；断点续传：中断
+//     保留 <apk>.part，重进经 HTTP Range 从断点续传）→ 进度回调 →
+//     15 分钟总超时 watchdog（批1 E2：到期 abort；part 保留供续传）→
 //     SHA-256 校验（crypto 已有依赖，不新增）→ 不符 → 删文件 + 报错
 //   · installApk：MethodChannel 唤起系统安装器（Android 不允许静默安装）；
 //     未授「安装未知应用」→ 结构化错误码 not_authorized → 页面引导跳授权页
@@ -450,11 +451,59 @@ class UpdateService {
     }
   }
 
+  // ---------------- 断点续传（2026-09-10） ----------------
+
+  /// .part 指纹侧车（防拿别份 manifest 的半截文件续传：换更新源 / 重发布
+  /// 同名 APK 时 sha/size 必不一致 → 弃 part 整包重下）。
+  static void _writePartMeta(File f, UpdateManifest m) {
+    try {
+      f.writeAsStringSync(jsonEncode({
+        'v': 1,
+        'sha256': m.sha256,
+        'sizeBytes': m.sizeBytes,
+      }));
+    } catch (_) {}
+  }
+
+  static bool _partMetaMatches(File f, UpdateManifest m) {
+    try {
+      if (!f.existsSync()) return false;
+      final o = jsonDecode(f.readAsStringSync());
+      return o is Map &&
+          o['v'] == 1 &&
+          o['sha256'] == m.sha256 &&
+          o['sizeBytes'] == m.sizeBytes;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 清扫下载目录里**其他版本**的 .part/.part.json 残留（换版本后孤儿
+  /// 80MB 级文件不堆积占盘；当前版本的 part 不动）。吞错——清扫失败不挡主流程。
+  static void _sweepStaleParts(String dir, String currentApk) {
+    try {
+      for (final e in Directory(dir).listSync()) {
+        if (e is! File) continue;
+        final name = e.uri.pathSegments.last;
+        if ((name.endsWith('.part') || name.endsWith('.part.json')) &&
+            !name.startsWith('$currentApk.part')) {
+          e.deleteSync();
+        }
+      }
+    } catch (_) {}
+  }
+
   /// 下载到 dataDir/update/ 下（文件名取 manifest.apk）并做 SHA-256 校验。
   /// [onProgress](received, total)；total 为 null = 大小未知（页面转不确定进度）。
   /// 校验失败 → 删文件 + [UpdateMessages.verifyFailed]。
   /// 已存在且校验通过的同名文件（上次下载完成、安装未遂的残留）→ 直接复用，
   /// 不重复下载（安装器拉起失败/用户退出后重试零流量）。
+  ///
+  /// 断点续传（2026-09-10）：下载写 `<apk>.part`；中断（退 App/断网/watchdog
+  /// 超时）**保留** part，重进经 `Range: bytes=<n>-` 续传（206 追加；服务端
+  /// 忽略 Range 返回 200 → 自动弃 part 整包重下）。`<apk>.part.json` 指纹
+  /// 侧车防拿别份 manifest 的半截续传（换源/重发布 → 弃 part）。最终 SHA-256
+  /// 校验兜底：错误续传导致哈希不符 → 全删，用户重试即整包自愈。
   Future<File> downloadAndVerify(
     UpdateManifest manifest, {
     required String sourceUrl,
@@ -468,26 +517,73 @@ class UpdateService {
       onProgress?.call(len, len);
       return dest;
     }
+    // 清扫其他版本的 .part 残留（换版本后孤儿不堆积占盘）
+    _sweepStaleParts(dir, manifest.apk);
+    final part = File('$dir/${manifest.apk}.part');
+    final partMeta = File('$dir/${manifest.apk}.part.json');
+    // 断点评估：part 在 + 指纹符 + 小于预期大小 → 可续传；否则弃之整包重下
+    var resumeFrom = 0;
+    if (part.existsSync()) {
+      final ok = _partMetaMatches(partMeta, manifest);
+      final size = part.lengthSync();
+      if (ok && size > 0 &&
+          (manifest.sizeBytes <= 0 || size < manifest.sizeBytes)) {
+        resumeFrom = size;
+      } else {
+        _deleteQuietly(part);
+        _deleteQuietly(partMeta);
+      }
+    }
     final url = apkUrlOf(manifest, sourceUrl);
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
     IOSink? sink;
-    var received = 0;
+    var base = resumeFrom; // 本会话开始前已持有的字节数
+    var received = resumeFrom;
+    var resumed = false;
     // 下载总超时 watchdog（批1 E2）：连接超时只管建链，流式下载此前无总时长
-    // 上限（弱网慢滴流会永远挂着）。15 分钟覆盖 80MB 级 APK 的正常余量，
-    // 到期 abort 请求 + 强杀连接 → 传输层抛错 → 既有失败路径删半截文件。
+    // 上限（弱网慢滴流会永远挂着）。15 分钟覆盖 80MB 级 APK 的正常余量；
+    // 续传会话重置计时。到期 abort 请求 + 强杀连接 → 传输层抛错 → part
+    // 保留，下次续传（不再从零开始）。
     var timedOut = false;
     Timer? watchdog;
     try {
       final rq = await client.getUrl(url).timeout(const Duration(seconds: 8));
+      if (resumeFrom > 0) {
+        rq.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeFrom-');
+      }
       final rs = await rq.close();
-      if (rs.statusCode != 200) {
+      if (rs.statusCode == 206 && resumeFrom > 0) {
+        resumed = true; // 服务端支持 Range：从断点继续
+      } else if (rs.statusCode == 200) {
+        // 服务端忽略 Range（或全新下载）：弃 part 从头下载
+        if (resumeFrom > 0) {
+          _deleteQuietly(part);
+          _deleteQuietly(partMeta);
+        }
+        resumeFrom = 0;
+        base = 0;
+        received = 0;
+      } else {
         await rs.drain<void>();
         throw UpdateException(UpdateMessages.downloadHttpStatus(rs.statusCode));
       }
+      if (!resumed) _writePartMeta(partMeta, manifest);
       final contentLength = rs.contentLength >= 0 ? rs.contentLength : null;
-      final total = contentLength ??
-          (manifest.sizeBytes > 0 ? manifest.sizeBytes : null);
-      sink = dest.openWrite();
+      final int? total;
+      if (resumed) {
+        // 206 的 contentLength 是「剩余字节数」：总量优先取 Content-Range 的
+        // total，退而 base + 剩余，再退 manifest.sizeBytes。
+        final cr = rs.headers.value(HttpHeaders.contentRangeHeader);
+        final crTotal = cr == null ? null : int.tryParse(cr.split('/').last);
+        total = crTotal ??
+            (contentLength != null ? base + contentLength : null) ??
+            (manifest.sizeBytes > 0 ? manifest.sizeBytes : null);
+      } else {
+        total = contentLength ??
+            (manifest.sizeBytes > 0 ? manifest.sizeBytes : null);
+      }
+      sink = resumed ? part.openWrite(mode: FileMode.append) : part.openWrite();
+      if (resumed) onProgress?.call(received, total); // 先报断点基数
       watchdog = Timer(const Duration(minutes: 15), () {
         timedOut = true;
         rq.abort();
@@ -501,16 +597,15 @@ class UpdateService {
       await sink.flush();
       await sink.close();
       sink = null;
-      if (contentLength != null && received != contentLength) {
+      if (contentLength != null && received - base != contentLength) {
         throw UpdateException(UpdateMessages.downloadIncomplete);
       }
     } on UpdateException {
+      // 中断**不删 part**——保留断点，下次续传
       await _closeQuietly(sink);
-      _deleteQuietly(dest); // 下载中断不留半截文件
       rethrow;
     } catch (_) {
-      await _closeQuietly(sink);
-      _deleteQuietly(dest);
+      await _closeQuietly(sink); // 同上：保留 part
       throw UpdateException(
         timedOut ? UpdateMessages.downloadTimeout : UpdateMessages.unreachable,
       );
@@ -520,12 +615,21 @@ class UpdateService {
       client.close();
     }
 
-    // SHA-256 校验（流式；80MB 级 APK 不整读入内存）
+    // 本会话收满：part → 正名（dest 可能有上次未过验的同名残留——Windows 上
+    // rename 到已存在路径会抛错，先删；part 侧车同步清理）。
+    _deleteQuietly(dest);
+    try {
+      await part.rename(dest.path);
+    } catch (_) {}
+    _deleteQuietly(partMeta);
+
+    // SHA-256 校验（流式；80MB 级 APK 不整读入内存）。不符 → 全删（含可能
+    // 的错误续传残留），用户重试即整包重下自愈。
     final digest = await crypto.sha256.bind(dest.openRead()).first;
     if (digest.toString() != manifest.sha256) {
-      try {
-        dest.deleteSync();
-      } catch (_) {}
+      _deleteQuietly(dest);
+      _deleteQuietly(part);
+      _deleteQuietly(partMeta);
       throw UpdateException(UpdateMessages.verifyFailed);
     }
     return dest;

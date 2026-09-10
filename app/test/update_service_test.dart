@@ -13,9 +13,11 @@
 //   5. 源 URL db 持久化（settings 表 update.source 回写回读）
 //   6. 清单签名：本文件所有 latest.json 均带合法 Ed25519 签名（安全修复 B；
 //      验签正/负例专项见 update_signature_test.dart）
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:hengya/services/local/local_backend.dart';
@@ -40,7 +42,7 @@ void main() {
   });
 
   late Directory tmp;
-  late HttpServer server;
+  late ServerSocket server;
 
   setUp(() async {
     tmp = await Directory.systemTemp.createTemp('hengya_update_test_');
@@ -48,14 +50,16 @@ void main() {
     await LocalBackend.instance.resetForTest();
     LocalBackend.instance.init(tmp.path);
     UpdateService.debugPublicKeyOverride = fx.publicKeyBytes;
-    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    // 裸 ServerSocket 手写迷你 HTTP 服务（不用 HttpServer：掐线场景经
+    // detachSocket 的字节流会被其怪癖污染，见 truncate 模式注释）
+    server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   });
 
   tearDown(() async {
     UpdateService.debugFetchOverride = null;
     UpdateService.debugChannelOverride = null;
     UpdateService.debugPublicKeyOverride = null;
-    await server.close(force: true);
+    await server.close();
     await LocalBackend.instance.resetForTest();
     try {
       await tmp.delete(recursive: true);
@@ -70,22 +74,103 @@ void main() {
     };
   }
 
-  /// 回环 HTTP 服务：/latest.json 吐 manifestBody；/fake.apk 吐 apkBytes
-  void serveRoutes(
-      {required Future<String> manifestBody, required List<int> apkBytes}) {
-    server.listen((req) async {
-      if (req.uri.path == '/latest.json') {
-        req.response.statusCode = 200;
-        req.response.headers.contentType = ContentType.json;
-        req.response.add(utf8.encode(await manifestBody));
-      } else if (req.uri.path == '/fake.apk') {
-        req.response.statusCode = 200;
-        req.response.headers.contentLength = apkBytes.length;
-        req.response.add(apkBytes);
-      } else {
-        req.response.statusCode = 404;
+  /// 迷你服务响应端：void async（listen 回调里 fire-and-forget）。
+  void miniRespond(
+    Socket socket,
+    String path,
+    String? range,
+    Future<String> manifestBody,
+    List<int> apkBytes,
+    Map<String, Object?> state,
+    void Function(String? rangeHeader)? onApkRequest,
+  ) async {
+    Future<void> reply(String status, String extraHeaders, List<int> body) async {
+      socket.add(utf8.encode('HTTP/1.1 $status\r\n'
+          'content-length: ${body.length}\r\n'
+          '$extraHeaders'
+          'connection: close\r\n\r\n'));
+      if (body.isNotEmpty) socket.add(body);
+      await socket.flush();
+      await socket.close();
+    }
+
+    if (path == '/latest.json') {
+      final body = utf8.encode(await manifestBody);
+      await reply('200 OK', 'content-type: application/json\r\n', body);
+    } else if (path == '/fake.apk') {
+      final mode = state['mode'] as String? ?? 'full';
+      onApkRequest?.call(range);
+      if (mode == 'truncate') {
+        final n = ((state['truncateBytes'] as int?) ?? 0)
+            .clamp(0, apkBytes.length);
+        socket.add(utf8.encode('HTTP/1.1 200 OK\r\n'
+            'content-length: ${apkBytes.length}\r\n'
+            'connection: close\r\n\r\n'));
+        if (n > 0) socket.add(apkBytes.sublist(0, n));
+        await socket.flush();
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        await socket.close(); // FIN：收不满声明长度 → 客户端失败 + part 留存
+        return;
       }
-      await req.response.close();
+      final rm =
+          range == null ? null : RegExp(r'bytes=(\d+)-').firstMatch(range);
+      if (mode == 'full' && rm != null) {
+        final start = int.parse(rm.group(1)!);
+        if (start >= apkBytes.length) {
+          await reply('416 Range Not Satisfiable', '', const []);
+        } else {
+          await reply(
+            '206 Partial Content',
+            'content-range: '
+                'bytes $start-${apkBytes.length - 1}/${apkBytes.length}\r\n',
+            apkBytes.sublist(start),
+          );
+        }
+      } else {
+        await reply('200 OK', '', apkBytes);
+      }
+    } else {
+      await reply('404 Not Found', '', const []);
+    }
+  }
+
+  /// 回环迷你 HTTP 服务（裸 ServerSocket 手写）：/latest.json 吐
+  /// manifestBody；/fake.apk 吐 apkBytes。每响应 connection: close。
+  ///
+  /// [state] 可在用例中途变更：
+  /// · mode = 'full'（缺省）：支持 Range → 带 Range 请求回 206 + Content-Range
+  ///   + 剩余字节；无 Range 回 200 全量（断点续传正路）
+  /// · mode = 'ignore'：无视 Range 恒回 200 全量（服务端不支持续传的回退路）
+  /// · mode = 'truncate'：声明全量 content-length 但发 [truncateBytes] 字节后
+  ///   先等 500ms（让客户端把已达数据落盘）再 FIN 掐线——客户端收不满声明
+  ///   长度即失败，part 留存待续传（模拟弱网中断/退 App）
+  /// [onApkRequest] 记录 /fake.apk 请求头（断言 Range 确实发出）。
+  void serveRoutes(
+      {required Future<String> manifestBody,
+      required List<int> apkBytes,
+      Map<String, Object?> state = const {},
+      void Function(String? rangeHeader)? onApkRequest}) {
+    server.listen((socket) {
+      final buf = BytesBuilder();
+      StreamSubscription? sub;
+      sub = socket.listen((data) {
+        buf.add(data);
+        final head = utf8.decode(buf.toBytes(), allowMalformed: true);
+        if (!head.contains('\r\n\r\n')) return; // 请求头未收全（GET 无 body）
+        sub?.cancel();
+        final lines =
+            head.substring(0, head.indexOf('\r\n\r\n')).split('\r\n');
+        final reqParts = lines.first.split(' ');
+        final path = reqParts.length > 1 ? reqParts[1] : '';
+        String? range;
+        for (final l in lines.skip(1)) {
+          if (l.toLowerCase().startsWith('range:')) {
+            range = l.substring('range:'.length).trim();
+          }
+        }
+        miniRespond(
+            socket, path, range, manifestBody, apkBytes, state, onApkRequest);
+      });
     });
   }
 
@@ -278,7 +363,7 @@ void main() {
     test('连不上（已关端口）→ 「无法连接更新源…」', () async {
       fakePackage();
       final deadPort = server.port; // 下面先把真 server 关掉拿一个死端口
-      await server.close(force: true);
+      await server.close();
       await expectLater(
         UpdateService.instance
             .checkUpdate(sourceUrl: 'http://127.0.0.1:$deadPort/latest.json'),
@@ -366,7 +451,7 @@ void main() {
       expect(f1.existsSync(), isTrue);
 
       // 断网（关掉回环服务器）：复用路径若触网必抛 unreachable
-      await server.close(force: true);
+      await server.close();
       var sawProgress = false;
       var gotTotal = -1;
       final f2 = await UpdateService.instance.downloadAndVerify(
@@ -400,6 +485,138 @@ void main() {
       final f =
           await UpdateService.instance.downloadAndVerify(m, sourceUrl: src);
       expect(f.lengthSync(), apkBytes.length); // 被正确内容覆盖
+    });
+
+    test('断点续传：中断保留 part → 二次调用 Range 续传完成（206）', () async {
+      fakePackage();
+      final apkBytes = List<int>.generate(300000, (i) => i % 251);
+      final digest = crypto.sha256.convert(apkBytes);
+      final m = UpdateManifest.tryParse(await latestJson(
+          sha256: digest.toString(), sizeBytes: apkBytes.length))!;
+      final src = 'http://127.0.0.1:${server.port}/latest.json';
+      // 第一轮：发 100000 字节后掐线 → 下载失败但 part 留存
+      final state = <String, Object?>{'mode': 'truncate', 'truncateBytes': 100000};
+      serveRoutes(
+        manifestBody:
+            latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
+        apkBytes: apkBytes,
+        state: state,
+      );
+      await expectLater(
+        UpdateService.instance.downloadAndVerify(m, sourceUrl: src),
+        throwsA(isA<UpdateException>()),
+      );
+      final partFile = File('${tmp.path}/update/fake.apk.part');
+      expect(partFile.existsSync(), isTrue); // 半截留存（不再像旧版删掉）
+      final partLen = partFile.lengthSync();
+      expect(partLen, allOf(greaterThan(0), lessThanOrEqualTo(100000)));
+      expect(File('${tmp.path}/update/fake.apk.part.json').existsSync(), isTrue);
+      expect(File('${tmp.path}/update/fake.apk').existsSync(), isFalse);
+
+      // 第二轮：网络恢复（full 模式）→ 从断点续传完成
+      state['mode'] = 'full';
+      var firstProgress = -1;
+      final file = await UpdateService.instance.downloadAndVerify(
+        m,
+        sourceUrl: src,
+        onProgress: (received, total) {
+          if (firstProgress < 0) firstProgress = received;
+        },
+      );
+      expect(file.lengthSync(), apkBytes.length);
+      expect(firstProgress, partLen); // 进度从断点基数起跳
+      expect(File('${tmp.path}/update/fake.apk.part').existsSync(), isFalse);
+      expect(File('${tmp.path}/update/fake.apk.part.json').existsSync(), isFalse);
+    });
+
+    test('断点续传：服务器侧确实收到 Range 头 + 回 206（掐线→恢复全程）', () async {
+      fakePackage();
+      final apkBytes = List<int>.generate(50000, (i) => (i * 7) % 256);
+      final digest = crypto.sha256.convert(apkBytes);
+      final m = UpdateManifest.tryParse(await latestJson(
+          sha256: digest.toString(), sizeBytes: apkBytes.length))!;
+      final src = 'http://127.0.0.1:${server.port}/latest.json';
+      final state = <String, Object?>{'mode': 'truncate', 'truncateBytes': 20000};
+      final sawRange = <String?>[];
+      serveRoutes(
+        manifestBody:
+            latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
+        apkBytes: apkBytes,
+        state: state,
+        onApkRequest: sawRange.add,
+      );
+      await expectLater(
+        UpdateService.instance.downloadAndVerify(m, sourceUrl: src),
+        throwsA(isA<UpdateException>()),
+      );
+      final partLen = File('${tmp.path}/update/fake.apk.part').lengthSync();
+      state['mode'] = 'full';
+      final file = await UpdateService.instance.downloadAndVerify(
+          m, sourceUrl: src);
+      expect(file.lengthSync(), apkBytes.length);
+      // 第 1 次无 Range（全新下载），第 2 次带断点 Range——续传实锤
+      expect(sawRange.length, 2);
+      expect(sawRange[0], isNull);
+      expect(sawRange[1], 'bytes=$partLen-');
+    });
+
+    test('服务端忽略 Range（回 200）→ 弃 part 整包重下，内容仍正确', () async {
+      fakePackage();
+      final apkBytes = List<int>.generate(5000, (i) => i % 97);
+      final digest = crypto.sha256.convert(apkBytes);
+      serveRoutes(
+        manifestBody:
+            latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
+        apkBytes: apkBytes,
+        state: const {'mode': 'ignore'},
+      );
+      // 手造「中断残留」：part + 指纹一致的侧车
+      Directory('${tmp.path}/update').createSync(recursive: true);
+      File('${tmp.path}/update/fake.apk.part')
+          .writeAsBytesSync(apkBytes.sublist(0, 2000));
+      File('${tmp.path}/update/fake.apk.part.json').writeAsStringSync(jsonEncode({
+        'v': 1,
+        'sha256': digest.toString(),
+        'sizeBytes': apkBytes.length,
+      }));
+      final m = UpdateManifest.tryParse(await latestJson(
+          sha256: digest.toString(), sizeBytes: apkBytes.length))!;
+      final f = await UpdateService.instance.downloadAndVerify(
+          m, sourceUrl: 'http://127.0.0.1:${server.port}/latest.json');
+      expect(f.lengthSync(), apkBytes.length); // 全量正确（200 整包覆盖）
+      expect(File('${tmp.path}/update/fake.apk.part').existsSync(), isFalse);
+    });
+
+    test('part 指纹与 manifest 不符（换源/重发布）→ 弃 part 全新下载', () async {
+      fakePackage();
+      final apkBytes = List<int>.generate(5000, (i) => i % 97);
+      final digest = crypto.sha256.convert(apkBytes);
+      final sawRange = <String?>[];
+      serveRoutes(
+        manifestBody:
+            latestJson(sha256: digest.toString(), sizeBytes: apkBytes.length),
+        apkBytes: apkBytes,
+        onApkRequest: sawRange.add,
+      );
+      // 手造「别份 manifest」的 part（指纹侧车 sha 不符）+ 陈旧其他版本 part
+      Directory('${tmp.path}/update').createSync(recursive: true);
+      File('${tmp.path}/update/fake.apk.part')
+          .writeAsBytesSync(apkBytes.sublist(0, 2000));
+      File('${tmp.path}/update/fake.apk.part.json').writeAsStringSync(jsonEncode({
+        'v': 1,
+        'sha256': List.filled(64, '0').join(), // 另一份的指纹
+        'sizeBytes': apkBytes.length,
+      }));
+      File('${tmp.path}/update/heng-0.0.1.apk.part')
+          .writeAsBytesSync(List.filled(999, 1)); // 其他版本孤儿 → 应被清扫
+      final m = UpdateManifest.tryParse(await latestJson(
+          sha256: digest.toString(), sizeBytes: apkBytes.length))!;
+      final f = await UpdateService.instance.downloadAndVerify(
+          m, sourceUrl: 'http://127.0.0.1:${server.port}/latest.json');
+      expect(f.lengthSync(), apkBytes.length);
+      expect(sawRange.single, isNull); // 指纹不符 → 不带 Range（全新下载）
+      expect(File('${tmp.path}/update/fake.apk.part').existsSync(), isFalse);
+      expect(File('${tmp.path}/update/heng-0.0.1.apk.part').existsSync(), isFalse);
     });
   });
 
