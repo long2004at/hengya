@@ -28,6 +28,7 @@ import '../services/notification/daily_reminder.dart';
 import '../services/update/update_service.dart';
 import '../widgets/top_toast.dart';
 import 'subject_picker.dart';
+import 'about_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -78,6 +79,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // ---------------- 语料包导入（批5 节点③，local 模式） ----------------
   bool _pkgImporting = false;
+  String _pkgPhase = ''; // 后台校验/导入阶段文案（bg worker onProgress）
 
   // ---------------- instruct 前缀开关（批5 节点③，local 模式） ----------------
   // settings embedding.instructQuery：'0' = 关（queryInstruct=''）；
@@ -85,19 +87,10 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _instructOn = true;
   bool _instructLoaded = false;
 
-  // ---------------- 应用内更新（batch3 node1，云直链单通道） ----------------
-  // 状态机/文案全在 UpdateService（UpdateUiPhase / UpdateMessages）；此处只持
-  // 渲染态。源 URL 持久化 db settings（update.source），检查前先把输入框值落库。
-  final TextEditingController _updateSourceCtrl = TextEditingController();
-  final FocusNode _updateSourceFocus = FocusNode(); // 「国内线路」清空后聚焦
-  UpdateUiPhase _updatePhase = UpdateUiPhase.idle;
-  UpdateManifest? _updateManifest;
+  // ---------------- 当前版本号（供导入语料包 appVersion 传参） ----------------
+  // 版本来源：UpdateService.currentPackageInfo()（Kotlin getPackageInfo）；
+  // 应用内更新 UI 已迁至「关于」聚合页（about_page.dart）。
   String _updateVersionName = ''; // 当前版本（Kotlin getPackageInfo）
-  double? _updateProgress; // null = 不确定进度（服务器未给长度）
-  int _updateReceived = 0;
-  int? _updateTotal;
-  String _updateError = ''; // failed/verifyFailed 相位的消息
-  int _updateLastPct = -1; // 进度渲染节流（避免逐 chunk setState 刷屏）
 
   @override
   void initState() {
@@ -106,14 +99,12 @@ class _SettingsPageState extends State<SettingsPage> {
     _loadAi();
     _loadCorpus();
     _loadBackups();
-    _loadUpdateState();
+    _loadUpdateVersion();
     _loadInstructFlag();
   }
 
   @override
   void dispose() {
-    _updateSourceCtrl.dispose();
-    _updateSourceFocus.dispose();
     _corpusRev.dispose();
     super.dispose();
   }
@@ -127,167 +118,17 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
-  // ---------------- 应用内更新（batch3 node1）：状态机驱动 ----------------
+  // ---------------- 当前版本加载（供导入语料包 appVersion 传参） ----------------
 
-  /// 区块首载：回显持久化的源 URL + 当前版本（通道取不到不炸页，静默降级）
-  Future<void> _loadUpdateState() async {
-    try {
-      final url = await UpdateService.instance.getSourceUrl();
-      if (!mounted) return;
-      // 未设置源（新装）→ 预填默认海外线路（GitHub raw），零配置可检查更新
-      _updateSourceCtrl.text =
-          (url == null || url.isEmpty) ? UpdateService.githubSourceUrl : url;
-    } catch (_) {
-      // db 未初始化（非 local 模式/极端时序）：输入框留空即可
-    }
+  /// 读取当前版本号（通道取不到不炸页，静默降级 → 导入语料包时不传 appVersion）
+  Future<void> _loadUpdateVersion() async {
     try {
       final info = await UpdateService.instance.currentPackageInfo();
       if (!mounted) return;
       setState(() => _updateVersionName = info.versionName);
     } catch (_) {
-      // 版本取不到 → 副标题显示「当前版本未知」
+      // 版本取不到 → _updateVersionName 保持 ''（导入语料包时 appVersion 传 null）
     }
-  }
-
-  /// 源输入框回车时持久化（检查按钮也会先落库——双保险）
-  Future<void> _persistUpdateSource() async {
-    try {
-      await UpdateService.instance.setSourceUrl(_updateSourceCtrl.text.trim());
-    } catch (_) {}
-  }
-
-  /// 「海外线路」：一键填入 GitHub raw 默认源并落库（透明可改）
-  Future<void> _applyOverseasLine() async {
-    _updateSourceCtrl.text = UpdateService.githubSourceUrl;
-    await _persistUpdateSource();
-  }
-
-  /// 「国内线路」：只清空 + 聚焦，绝不预设 URL
-  /// （ECS 直链属私密信息，只在私渠道传播，绝不内置进 APK 二进制）
-  void _applyDomesticLine() {
-    _updateSourceCtrl.clear();
-    _updateSourceFocus.requestFocus();
-  }
-
-  /// 检查更新：输入框值先落库 → 检查（检查中锁按钮）→ 状态机相位
-  Future<void> _checkUpdate() async {
-    if (_updatePhase == UpdateUiPhase.checking ||
-        _updatePhase == UpdateUiPhase.downloading) {
-      return; // 防重复点击
-    }
-    final src = _updateSourceCtrl.text.trim();
-    if (src.isEmpty) {
-      setState(() {
-        _updatePhase = UpdateUiPhase.failed;
-        _updateError = UpdateMessages.emptySource;
-      });
-      return;
-    }
-    try {
-      await UpdateService.instance.setSourceUrl(src);
-    } catch (_) {}
-    setState(() {
-      _updatePhase = UpdateUiPhase.checking;
-      _updateError = '';
-      _updateLastPct = -1;
-    });
-    try {
-      final r = await UpdateService.instance.checkUpdate(sourceUrl: src);
-      if (!mounted) return;
-      setState(() {
-        _updateManifest = r.manifest;
-        if (_updateVersionName.isEmpty) {
-          _updateVersionName = r.currentVersionName;
-        }
-        _updatePhase = r.available
-            ? UpdateUiPhase.available
-            : UpdateUiPhase.upToDate;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _updatePhase = UpdateUiPhase.failed;
-        _updateError = e is UpdateException ? e.message : '检查更新失败：$e';
-      });
-    }
-  }
-
-  /// 下载并安装：下载（进度节流渲染）→ SHA-256 校验 → 唤起系统安装器
-  Future<void> _downloadAndInstall() async {
-    final m = _updateManifest;
-    if (m == null || _updatePhase == UpdateUiPhase.downloading) return;
-    final src = _updateSourceCtrl.text.trim();
-    setState(() {
-      _updatePhase = UpdateUiPhase.downloading;
-      _updateProgress = null;
-      _updateReceived = 0;
-      _updateTotal = m.sizeBytes > 0 ? m.sizeBytes : null;
-      _updateLastPct = -1;
-    });
-    try {
-      final file = await UpdateService.instance.downloadAndVerify(
-        m,
-        sourceUrl: src,
-        onProgress: (received, total) {
-          if (!mounted) return;
-          // 节流：百分比变了才 setState（80MB 级包 chunk 极多）
-          if (total != null && total > 0) {
-            final pct = received * 100 ~/ total;
-            if (pct == _updateLastPct) return;
-            _updateLastPct = pct;
-          } else if ((received - _updateReceived) < 1048576) {
-            return; // 未知大小：每 MB 刷一次
-          }
-          setState(() {
-            _updateReceived = received;
-            _updateTotal = total;
-            _updateProgress = (total != null && total > 0)
-                ? received / total
-                : null;
-          });
-        },
-      );
-      if (!mounted) return;
-      final code = await UpdateService.instance.installApk(file.path);
-      if (!mounted) return;
-      setState(() {
-        if (code == null) {
-          _updatePhase = UpdateUiPhase.installHandoff;
-        } else if (code == 'not_authorized') {
-          _updatePhase = UpdateUiPhase.needPermission;
-        } else {
-          _updatePhase = UpdateUiPhase.failed;
-          _updateError = UpdateMessages.installFailed(code);
-        }
-      });
-      if (code == null) {
-        TopToast.show(
-          context,
-          UpdateMessages.installHandoff,
-          type: TopToastType.success,
-          stayDuration: kToastStayImportant,
-        );
-      }
-    } on UpdateException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _updatePhase = e.message == UpdateMessages.verifyFailed
-            ? UpdateUiPhase.verifyFailed
-            : UpdateUiPhase.failed;
-        _updateError = e.message;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _updatePhase = UpdateUiPhase.failed;
-        _updateError = '下载安装失败：$e';
-      });
-    }
-  }
-
-  /// 「去授权」：跳系统「安装未知应用」授权页（Kotlin 兜底跳应用详情）
-  Future<void> _openInstallPermission() async {
-    await UpdateService.instance.openInstallPermissionSettings();
   }
 
   /// 导入数据库（迁移主通道）：选文件 → 只读预览 → 二次确认 → 原子替换。
@@ -371,9 +212,10 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  /// 导入语料包（批5 节点③）：SAF 选 zip → validatePackage 摘要预览 →
-  /// 二次确认（模型名对暗号不符时明确警示但不阻断）→ importPackage
-  /// （备份+原子替换+补科目行+进度只补不改+失败回滚）。
+  /// 导入语料包（批5 节点③）：SAF 选 zip → validatePackageBg 摘要预览（后台 isolate，
+  /// 校验临时库在 cache 目录）→ 二次确认（模型名对暗号不符时明确警示但不阻断）→
+  /// importPackageBg（后台 isolate 准备 → 主 isolate 换库：备份+原子替换+补科目行
+  /// +进度只补不改+失败回滚）→ 终态 disposeImportedZip 清理选文件缓存拷贝。
   Future<void> _importCorpusPackage() async {
     final dir = LocalBackend.instance.dataDir;
     if (dir == null) return;
@@ -383,17 +225,25 @@ class _SettingsPageState extends State<SettingsPage> {
       ],
     );
     if (picked == null) return; // 用户取消
-    setState(() => _pkgImporting = true);
+    setState(() {
+      _pkgImporting = true;
+      _pkgPhase = '';
+    });
     try {
-      final appVersion =
-          _updateVersionName.isEmpty ? null : _updateVersionName;
-      // 只读预览（不动任何数据）
-      final summary = CorpusPackageManager.instance
-          .validatePackage(picked.path, appVersion: appVersion);
+      final appVersion = _updateVersionName.isEmpty ? null : _updateVersionName;
+      // 只读预览（后台 isolate；进度透传阶段文案，不动任何数据）
+      final summary = await CorpusPackageManager.instance.validatePackageBg(
+        picked.path,
+        appVersion: appVersion,
+        onProgress: (stage, msg) {
+          if (mounted) setState(() => _pkgPhase = msg);
+        },
+      );
       if (!mounted) return;
       // 模型名对暗号预检（确认框内警示；导入结果会再核一次）
       final curModel = _ai?.embedding.model ?? '';
-      final modelWarn = curModel.isNotEmpty &&
+      final modelWarn =
+          curModel.isNotEmpty &&
           summary.modelName.isNotEmpty &&
           curModel.toLowerCase() != summary.modelName.toLowerCase();
       final sizeMb = (summary.packageBytes / 1048576).toStringAsFixed(1);
@@ -421,12 +271,18 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       );
-      if (ok != true) return;
-      final result = await CorpusPackageManager.instance.importPackage(
+      if (ok != true) {
+        setState(() => _pkgPhase = '');
+        return;
+      }
+      final result = await CorpusPackageManager.instance.importPackageBg(
         dir,
         picked.path,
         appVersion: appVersion,
         onBeforeSwap: () => LocalBackend.instance.reload(),
+        onProgress: (stage, msg) {
+          if (mounted) setState(() => _pkgPhase = msg);
+        },
       );
       if (!mounted) return;
       TopToast.show(
@@ -445,7 +301,14 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       if (mounted) TopToast.show(context, '导入语料包失败：$e');
     } finally {
-      if (mounted) setState(() => _pkgImporting = false);
+      // 终态（成功/失败）务必清理 file_selector 拷贝的 zip 缓存
+      CorpusPackageManager.disposeImportedZip(picked.path);
+      if (mounted) {
+        setState(() {
+          _pkgImporting = false;
+          _pkgPhase = '';
+        });
+      }
     }
   }
 
@@ -1074,10 +937,12 @@ class _SettingsPageState extends State<SettingsPage> {
                       '导入语料包（成品语料库）',
                       style: TextStyle(fontWeight: FontWeight.w600),
                     ),
-                    subtitle: const Text(
-                      '选择 PC 端打包的语料包 zip（成品语料库+章节目录），替换本机语料库；'
-                      '卡片、复习记录与学习进度分毫不动，旧库自动备份',
-                      style: TextStyle(fontSize: 12),
+                    subtitle: Text(
+                      _pkgPhase.isEmpty
+                          ? '选择 PC 端打包的语料包 zip（成品语料库+章节目录），替换本机语料库；'
+                                '卡片、复习记录与学习进度分毫不动，旧库自动备份'
+                          : _pkgPhase,
+                      style: const TextStyle(fontSize: 12),
                     ),
                     trailing: _pkgImporting
                         ? const SizedBox(
@@ -1171,7 +1036,7 @@ class _SettingsPageState extends State<SettingsPage> {
           else
             Column(
               children: [
-_AiServiceCard(
+                _AiServiceCard(
                   scheme: scheme,
                   title: '生卡 LLM',
                   desc: '每晚自动拆卡用',
@@ -1330,83 +1195,6 @@ _AiServiceCard(
               ),
             ),
 
-          const SizedBox(height: 20),
-
-          // ---------------- 应用内更新（batch3 node1，云直链单通道；local 模式） ----------------
-          // 源 URL db 持久化（update.source）；remote/demo 无本地库不展示（克制口径）
-          if (kBackendMode == BackendMode.local) ...[
-            _SectionHeader(title: '应用内更新'),
-            Card(
-              elevation: 0,
-              color: scheme.surfaceContainerLow,
-              child: Column(
-                children: [
-                  ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                    title: const Text(
-                      '检查新版本',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: Text(
-                      _updateVersionName.isEmpty
-                          ? '当前版本未知 · 默认海外线路，国内线路可手动填入'
-                          : '当前版本 v$_updateVersionName · 默认海外线路，国内线路可手动填入',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    trailing:
-                        _updatePhase == UpdateUiPhase.checking ||
-                            _updatePhase == UpdateUiPhase.downloading
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : TextButton(
-                            onPressed: _checkUpdate,
-                            child: const Text(UpdateMessages.checkButton),
-                          ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                    child: TextField(
-                      controller: _updateSourceCtrl,
-                      focusNode: _updateSourceFocus,
-                      onSubmitted: (_) => _persistUpdateSource(),
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      style: const TextStyle(fontSize: 13),
-                      decoration: const InputDecoration(
-                        labelText: UpdateMessages.sourceLabel,
-                        hintText: UpdateMessages.sourceHint,
-                        isDense: true,
-                      ),
-                    ),
-                  ),
-                  // 更新线路预设：海外一键填入 GitHub raw；国内只清空聚焦
-                  // （ECS 直链不入 APK 二进制——token 会被解包提取）
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-                    child: Row(
-                      children: [
-                        TextButton(
-                          onPressed: _applyOverseasLine,
-                          child: const Text(UpdateMessages.overseasLineButton),
-                        ),
-                        TextButton(
-                          onPressed: _applyDomesticLine,
-                          child: const Text(UpdateMessages.domesticLineButton),
-                        ),
-                      ],
-                    ),
-                  ),
-                  _updateStatusView(scheme),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-          ],
-
           // ---------------- 关于 ----------------
           _SectionHeader(title: '关于'),
           Card(
@@ -1433,6 +1221,9 @@ _AiServiceCard(
                       style: const TextStyle(fontSize: 13),
                     ),
                   ),
+                  onTap: () => Navigator.of(
+                    context,
+                  ).push(MaterialPageRoute(builder: (_) => const AboutPage())),
                 ),
                 const Divider(height: 1, indent: 16, endIndent: 16),
                 ListTile(
@@ -1453,162 +1244,6 @@ _AiServiceCard(
         ],
       ),
     );
-  }
-
-  // ---------------- 应用内更新（batch3 node1）：状态区渲染 ----------------
-
-  /// 更新区块状态行：图标 + 文案（行内 Padding，其余区块同款视觉）
-  Widget _updateStatusRow(
-    ColorScheme scheme,
-    IconData icon,
-    String text,
-    Color color,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 14, color: color),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(text, style: TextStyle(fontSize: 12, color: color)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 下载进度文案：「正在下载… 42%（32.1 MB / 76.8 MB）」；未知大小转「已下载 X MB」
-  String _updateDownloadingText() {
-    final total = _updateTotal;
-    if (total != null && total > 0) {
-      // 直接用 received/total 算：首个进度回调前 _updateProgress 尚为 null
-      final pct = (_updateReceived * 100 ~/ total).toString();
-      return UpdateMessages.downloadingKnown
-          .replaceFirst('{pct}', pct)
-          .replaceFirst('{got}', (_updateReceived / 1048576).toStringAsFixed(1))
-          .replaceFirst('{total}', (total / 1048576).toStringAsFixed(1));
-    }
-    return UpdateMessages.downloadingUnknown(_updateReceived);
-  }
-
-  /// 状态机全相位渲染（idle 不占位）。文案全部来自 UpdateMessages（测试逐字断言）
-  Widget _updateStatusView(ColorScheme scheme) {
-    switch (_updatePhase) {
-      case UpdateUiPhase.idle:
-        return const SizedBox.shrink();
-      case UpdateUiPhase.checking:
-        return _updateStatusRow(
-          scheme,
-          Icons.sync_rounded,
-          UpdateMessages.checking,
-          scheme.outline,
-        );
-      case UpdateUiPhase.upToDate:
-        return _updateStatusRow(
-          scheme,
-          Icons.check_circle,
-          UpdateMessages.upToDate(_updateVersionName),
-          const Color(0xFF2BA471),
-        );
-      case UpdateUiPhase.available:
-        final m = _updateManifest!;
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                UpdateMessages.foundNew(m.versionName),
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF2BA471),
-                ),
-              ),
-              if (m.notes.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(
-                  m.notes,
-                  style: TextStyle(fontSize: 12, color: scheme.outline),
-                ),
-              ],
-              const SizedBox(height: 4),
-              Text(
-                UpdateMessages.sizeOf(m),
-                style: TextStyle(fontSize: 12, color: scheme.outline),
-              ),
-              const SizedBox(height: 8),
-              FilledButton(
-                onPressed: _downloadAndInstall,
-                child: const Text(UpdateMessages.downloadButton),
-              ),
-            ],
-          ),
-        );
-      case UpdateUiPhase.downloading:
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                _updateDownloadingText(),
-                style: TextStyle(fontSize: 12, color: scheme.outline),
-              ),
-              const SizedBox(height: 6),
-              LinearProgressIndicator(value: _updateProgress, minHeight: 4),
-            ],
-          ),
-        );
-      case UpdateUiPhase.verifyFailed:
-        return _updateStatusRow(
-          scheme,
-          Icons.error_outline,
-          UpdateMessages.verifyFailed,
-          const Color(0xFFD54941),
-        );
-      case UpdateUiPhase.needPermission:
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Icon(
-                Icons.error_outline,
-                size: 14,
-                color: Color(0xFFD54941),
-              ),
-              const SizedBox(width: 6),
-              const Expanded(
-                child: Text(
-                  UpdateMessages.needPermission,
-                  style: TextStyle(fontSize: 12, color: Color(0xFFD54941)),
-                ),
-              ),
-              TextButton(
-                onPressed: _openInstallPermission,
-                child: const Text(UpdateMessages.goGrantPermission),
-              ),
-            ],
-          ),
-        );
-      case UpdateUiPhase.installHandoff:
-        return _updateStatusRow(
-          scheme,
-          Icons.check_circle,
-          UpdateMessages.installHandoff,
-          const Color(0xFF2BA471),
-        );
-      case UpdateUiPhase.failed:
-        return _updateStatusRow(
-          scheme,
-          Icons.error_outline,
-          _updateError,
-          const Color(0xFFD54941),
-        );
-    }
   }
 
   Widget? _serverStatusText() {
@@ -1845,8 +1480,8 @@ class _AiServiceEditSheetState extends State<_AiServiceEditSheet> {
       );
       // #2：llm 连接成功 → 再核对所配 model 是否在服务方 /models 列表
       //（在滚动条期间完成，一次 setState 落结果；核对失败不降级连通性结论）
-final missing = ((widget.service == 'llm' || widget.service == 'llm_backup') &&
-              r.ok)
+      final missing =
+          ((widget.service == 'llm' || widget.service == 'llm_backup') && r.ok)
           ? await _checkModelInList()
           : null;
       if (!mounted) return;
@@ -1895,12 +1530,13 @@ final missing = ((widget.service == 'llm' || widget.service == 'llm_backup') &&
     final baseUrl = _baseUrlCtrl.text.trim();
     final model = _modelCtrl.text.trim();
     if (baseUrl.isEmpty || model.isEmpty) return null;
-var key = _keyCtrl.text.trim();
+    var key = _keyCtrl.text.trim();
     if (key.isEmpty && currentBackendMode == BackendMode.local) {
       try {
         await LocalBackend.instance.initAiKeys(); // 幂等预热（main 已接线）
-        key = LocalBackend.instance
-            .aiKeyOf(widget.service == 'llm_backup' ? 'llm_backup' : 'llm');
+        key = LocalBackend.instance.aiKeyOf(
+          widget.service == 'llm_backup' ? 'llm_backup' : 'llm',
+        );
       } catch (_) {
         key = '';
       }
@@ -1958,7 +1594,7 @@ var key = _keyCtrl.text.trim();
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-final title = switch (widget.service) {
+    final title = switch (widget.service) {
       'llm' => '编辑生卡 LLM',
       'llm_backup' => '编辑备用生卡 LLM',
       'embedding' => '编辑向量模型',
@@ -2325,7 +1961,7 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
         ],
       ),
     );
-if (go != true) return;
+    if (go != true) return;
     await _start();
   }
 
@@ -2341,8 +1977,9 @@ if (go != true) return;
       builder: (dlgCtx) => AlertDialog(
         title: const Text('重建全部向量？'),
         content: Text(
-          '将清空现有向量并全部重新嵌入（$modeLabel），'
-          '语料文本与卡片不受影响。\n\n'
+          '将清空全部现有向量并全量重算（$modeLabel），'
+          '同时重建全文检索（FTS）词面索引与检索镜像；'
+          '语料包来源不受影响，语料文本与卡片数据不丢失。\n\n'
           '适用场景：导入语料包后向量模型不一致、检索不出结果、'
           '或向量疑似损坏。\n'
           '${st.modePreview == 'online' ? '\n在线嵌入会消耗少量 API 额度。' : ''}\n'
@@ -2369,8 +2006,9 @@ if (go != true) return;
     if (_busyTrigger) return;
     setState(() => _busyTrigger = true);
     try {
-      final res = await ApiClient.instance
-          .triggerCorpusBuild(resetVectors: true);
+      final res = await ApiClient.instance.triggerCorpusBuild(
+        resetVectors: true,
+      );
       if (!mounted) return;
       if (res.triggered) {
         TopToast.show(
@@ -2379,11 +2017,7 @@ if (go != true) return;
           type: TopToastType.success,
         );
       } else {
-        TopToast.show(
-          context,
-          res.note ?? '建库已在进行中',
-          type: TopToastType.info,
-        );
+        TopToast.show(context, res.note ?? '建库已在进行中', type: TopToastType.info);
       }
       await _load();
     } on ApiException catch (e) {
@@ -2601,7 +2235,7 @@ if (go != true) return;
           _summaryView(scheme, st.result!),
           const SizedBox(height: 10),
         ],
-// ---- 开始建库（待处理为空时禁用——构建语义 = 消费待处理队列） ----
+        // ---- 开始建库（待处理为空时禁用——构建语义 = 消费待处理队列） ----
         SizedBox(
           width: double.infinity,
           child: FilledButton.icon(

@@ -358,6 +358,7 @@ final ing = await ingestCorpus(
       source: 'tree',
       pruneAbsent: true,
       resetVectors: req.resetVectors,
+      preserveDeckSource: req.resetVectors,
       progress: (m) => relay('ingest', m),
     );
     ctx.emit(

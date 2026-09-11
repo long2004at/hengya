@@ -1347,6 +1347,9 @@ String resolvePptId(
 /// 模型/维度切换 → 向量全量重建（chunks 保留）；每库一 scale 结尾本地重整；
 /// FTS 全量重建；vec_chunks 镜像重建；meta 收口。
 ///
+/// [preserveDeckSource] 用于重建/库内自嵌：冲突更新保留既有 deck 的 source
+/// （如 package 的树外剪除豁免）；新增 deck 仍使用 [source]，默认 false。
+///
 /// [embed] 三态：offline（无 key，不写向量）/ drill（确定性伪向量）/
 /// online（API 批量，429/超时退避降批、5xx 只退避、4xx 立即报错）。
 Future<IngestStats> ingestCorpus(
@@ -1357,6 +1360,7 @@ Future<IngestStats> ingestCorpus(
   String source = 'tree',
   bool pruneAbsent = false,
   bool resetVectors = false,
+  bool preserveDeckSource = false,
   Map<(String, String), ({String? filePath, String? fileMd5})> deckFiles =
       const {},
   void Function(String message)? progress,
@@ -1547,10 +1551,12 @@ try {
       } finally {
         up.dispose();
       }
+      // 重建/库内自嵌不覆盖既有来源章；INSERT 仍按 source 登记新 deck。
       final ds = db.prepare(
         'INSERT INTO deck_state VALUES (?,?,?,?,?,?,?) '
         'ON CONFLICT(subject_id, ppt_id) DO UPDATE SET '
-        'source=excluded.source, file_path=excluded.file_path, '
+        '${preserveDeckSource ? '' : 'source=excluded.source, '}'
+        'file_path=excluded.file_path, '
         'file_md5=excluded.file_md5, chunk_count=excluded.chunk_count, '
         'updated_at=excluded.updated_at',
       );

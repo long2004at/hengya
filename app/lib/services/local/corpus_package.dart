@@ -2,8 +2,9 @@
 // ============================================================================
 //
 // PC 全量建库（节点②）产出成品语料库 zip → 手机「导入语料包」一键落位，
-// 不再逐文件上传建库。与 [DataManager]（hengya.db 迁移主通道）同款风格：
-// 纯同步文件操作 + 毫秒级 SQLite 校验，失败绝不破坏原库。
+// 不再逐文件上传建库。同步兼容入口保留 [DataManager] 风格的换库/回滚语义；
+// validatePackageBg/importPackageBg 将大包校验、备份、解包、验库移至 worker，
+// 主 isolate 只负责关闭在用连接、同卷换库及科目/学习进度收尾。
 //
 // ── 包格式契约（节点②产出；若②实现有出入以② handoff 为准适配）──
 // zip 内部布局（两种形态均认，按 corpus.db 位置自动判定前缀）：
@@ -111,6 +112,33 @@ class CorpusPackageSummary {
     required this.stats,
   });
 
+  /// 从后台 worker 的完整 wire 摘要还原（不同于展示用的 [toMap]）。
+  factory CorpusPackageSummary.fromMap(Map<String, Object?> m) {
+    return CorpusPackageSummary(
+      zipPath: m['zipPath'] as String,
+      schemaVersion: (m['schemaVersion'] as num).toInt(),
+      appMinVersion: m['appMinVersion'] as String,
+      modelName: m['modelName'] as String,
+      dim: (m['dim'] as num).toInt(),
+      builtAt: m['builtAt'] as String,
+      subjects: [
+        for (final raw in m['subjects'] as List)
+          PackageSubjectSeed(
+            id: (raw as Map)['id'] as String,
+            name: raw['name'] as String,
+            textbook: raw['textbook'] as String?,
+            chapters: (raw['chapters'] as num).toInt(),
+          ),
+      ],
+      chunks: (m['chunks'] as num).toInt(),
+      outlineEntries: (m['outlineEntries'] as num).toInt(),
+      tocFiles: (m['tocFiles'] as num).toInt(),
+      packageBytes: (m['packageBytes'] as num).toInt(),
+      dbModelName: m['dbModelName'] as String?,
+      stats: Map<String, Object?>.from(m['stats'] as Map),
+    );
+  }
+
   final String zipPath;
   final int schemaVersion;
   final String appMinVersion;
@@ -197,6 +225,149 @@ class CorpusImportResult {
       };
 }
 
+/// 后台导入参数；只传路径与版本，不跨 isolate 传数据库连接或回调。
+class PackageImportJobRequest {
+  const PackageImportJobRequest({
+    required this.dataDir,
+    required this.zipPath,
+    this.appVersion,
+  });
+
+  final String dataDir;
+  final String zipPath;
+  final String? appVersion;
+}
+
+/// worker 准备阶段结果；失败也回传路径与已完成的备份清单，由主 isolate 回滚。
+class PackageImportStageResult {
+  const PackageImportStageResult({
+    required this.bakPath,
+    required this.backed,
+    required this.tmpDirPath,
+    required this.summaryWire,
+    this.error,
+  });
+
+  final String? bakPath;
+  final List<String> backed;
+  final String tmpDirPath;
+
+  /// 成功时为完整摘要 wire；[error] 非 null 时为空 Map。
+  final Map<String, Object?> summaryWire;
+  final String? error;
+}
+
+/// 复用同步导入的目录时间戳格式，避免两条路径的备份命名漂移。
+String _packageTimestamp(DateTime time) => CorpusPackageManager._timestamp(time);
+
+/// [CorpusPackageSummary.toMap] 的 subjects 是展示计数；wire 必须保留科目种子。
+Map<String, Object?> _summaryToWire(CorpusPackageSummary summary) => {
+      'zipPath': summary.zipPath,
+      ...summary.toMap(),
+      'subjects': <Map<String, Object?>>[
+        for (final subject in summary.subjects)
+          {
+            'id': subject.id,
+            'name': subject.name,
+            'textbook': subject.textbook,
+            'chapters': subject.chapters,
+          },
+      ],
+    };
+
+/// 只读校验 worker；不检查流水线占用，也不创建导入备份或替换本机库。
+void validatePackageWorkerEntry(IsolateWorkerBoot boot) {
+  isolateWorkerRun(boot, (ctx) async {
+    final args = boot.args! as Map<String, Object?>;
+    ctx.checkCancelled();
+    ctx.emit(const IsolateProgressEvent(
+      stage: 'validating',
+      message: '正在校验语料包…',
+    ));
+    final summary = CorpusPackageManager.instance.validatePackage(
+      args['zipPath'] as String,
+      appVersion: args['appVersion'] as String?,
+    );
+    return _summaryToWire(summary);
+  });
+}
+
+/// 导入准备 worker：校验、备份、解包和验库均不占用 UI isolate。
+/// 这里只写备份/临时目录，不换库、不回滚、不触碰主库与学习进度。
+void corpusPackageImportWorker(IsolateWorkerBoot boot) {
+  isolateWorkerRun(boot, (ctx) async {
+    final req = boot.args! as PackageImportJobRequest;
+    final mgr = CorpusPackageManager.instance;
+    final corpusDir = Directory('${req.dataDir}/corpus');
+    final ts = _packageTimestamp(DateTime.now());
+    final bakDir = Directory('${corpusDir.path}/bak-$ts');
+    final tmpDir = Directory('${corpusDir.path}/.import-tmp-$ts');
+    String? backupPath;
+    final backed = <String>[];
+
+    try {
+      ctx.checkCancelled();
+      ctx.emit(const IsolateProgressEvent(
+        stage: 'validating',
+        message: '正在校验语料包…',
+      ));
+      final summary = mgr.validatePackage(
+        req.zipPath,
+        appVersion: req.appVersion,
+      );
+      corpusDir.createSync(recursive: true);
+      if (mgr._anyCorpusArtifact(corpusDir)) {
+        ctx.checkCancelled();
+        ctx.emit(const IsolateProgressEvent(
+          stage: 'backing-up',
+          message: '正在备份现有语料库…',
+        ));
+        bakDir.createSync(recursive: true);
+        // 先记路径：备份中途失败也能把部分清单交回主 isolate。
+        backupPath = bakDir.path;
+        mgr._backupArtifacts(corpusDir, bakDir, backed);
+      }
+
+      ctx.checkCancelled();
+      ctx.emit(const IsolateProgressEvent(
+        stage: 'extracting',
+        message: '正在解包语料库…',
+      ));
+      if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+      tmpDir.createSync(recursive: true);
+      mgr._extractContent(req.zipPath, tmpDir);
+
+      ctx.checkCancelled();
+      ctx.emit(const IsolateProgressEvent(
+        stage: 'verifying',
+        message: '正在校验解包后的语料库…',
+      ));
+      mgr._verifyExtractedDb(
+        '${tmpDir.path}/${CorpusPackageManager._corpusDbName}',
+      );
+      return PackageImportStageResult(
+        bakPath: backupPath,
+        backed: backed,
+        tmpDirPath: tmpDir.path,
+        summaryWire: _summaryToWire(summary),
+      );
+    } catch (e) {
+      // 不在 worker 回滚；尤其不能把部分备份当完整备份删掉原库。
+      return PackageImportStageResult(
+        bakPath: backupPath,
+        backed: backed,
+        tmpDirPath: tmpDir.path,
+        summaryWire: const {},
+        error: ctx.cancelRequested
+            ? '语料包导入已取消'
+            : e is CorpusPackageException
+                ? e.message
+                : '导入准备失败：$e',
+      );
+    }
+  });
+}
+
 // ------------------------------------------------------------- 管理器 ----
 
 class CorpusPackageManager {
@@ -220,8 +391,51 @@ class CorpusPackageManager {
   static const _tocDirName = 'toc';
   static const _manifestName = 'extract_manifest.json';
   static const _pkgJsonName = 'package.json';
+  static const _validateJobId = 'pkg-validate';
+  static const _importJobId = 'pkg-import';
+
+  // runner 的单飞位在 worker 返回时释放；此位覆盖主 isolate 换库/补行收尾。
+  static bool _importBgRunning = false;
+  static final Set<String> _importDataDirs = {};
 
   // ---------------- 校验 ----------------
+
+  /// 后台只读校验；不检查 [pipelineBusyCheck]，进度仅有 validating。
+  /// 与同步校验相同的完整摘要；worker 异常统一映射为 [CorpusPackageException]。
+  Future<CorpusPackageSummary> validatePackageBg(
+    String zipPath, {
+    String? appVersion,
+    void Function(String stage, String message)? onProgress,
+  }) async {
+    if (IsolateRunner.instance.isRunning(_validateJobId)) {
+      throw CorpusPackageException('语料包正在校验，请稍后再试');
+    }
+    try {
+      final handle = await IsolateRunner.instance.start<Map<String, Object?>>(
+        jobId: _validateJobId,
+        workerEntry: validatePackageWorkerEntry,
+        args: <String, Object?>{
+          'zipPath': zipPath,
+          'appVersion': appVersion,
+        },
+      );
+      final subscription = onProgress == null
+          ? null
+          : handle.progress.listen((e) => onProgress(e.stage, e.message));
+      try {
+        return CorpusPackageSummary.fromMap(await handle.done);
+      } finally {
+        await subscription?.cancel();
+      }
+    } on IsolateJobException catch (e) {
+      const prefix = 'CorpusPackageException: ';
+      throw CorpusPackageException(e.message.startsWith(prefix)
+          ? e.message.substring(prefix.length)
+          : e.message);
+    } catch (e) {
+      throw CorpusPackageException('语料包校验失败：$e');
+    }
+  }
 
   /// 只读校验语料包并返回摘要（导入预览用）。不满足契约抛
   /// [CorpusPackageException]（文件不存在/不是 zip/缺件/版本守卫/含主库）。
@@ -507,6 +721,165 @@ final (progressCreated, progressSynced) =
     } finally {
       db.close();
     }
+  }
+
+  /// 后台准备 → 主 isolate 换库/补行。进度为 validating、backing-up（可省略）、
+  /// extracting、verifying；[onBeforeSwap] 只在准备成功后、删旧库前调用。
+  /// 准备/换库失败在主 isolate 尽力回滚并清理临时目录；主库/进度收尾的
+  /// 事务边界与 [importPackage] 相同，不回滚已经完成的科目/学习进度写入。
+  Future<CorpusImportResult> importPackageBg(
+    String dataDir,
+    String zipPath, {
+    String? appVersion,
+    Future<void> Function()? onBeforeSwap,
+    void Function(String stage, String message)? onProgress,
+  }) async {
+    if (pipelineBusyCheck()) {
+      throw CorpusPackageException(
+          '拆卡流水线或建库任务正在运行，请等它结束后稍后再试');
+    }
+    if (_importBgRunning || IsolateRunner.instance.isRunning(_importJobId)) {
+      throw CorpusPackageException('语料包正在导入，请稍后再试');
+    }
+    _importBgRunning = true;
+    try {
+      _importDataDirs.add(Directory(dataDir).absolute.path);
+      final corpusDir = Directory('$dataDir/corpus');
+      PackageImportStageResult? staged;
+      late final CorpusPackageSummary summary;
+      var swapStarted = false;
+      try {
+        final handle = await IsolateRunner.instance.start<PackageImportStageResult>(
+          jobId: _importJobId,
+          workerEntry: corpusPackageImportWorker,
+          args: PackageImportJobRequest(
+            dataDir: dataDir,
+            zipPath: zipPath,
+            appVersion: appVersion,
+          ),
+        );
+        final subscription = onProgress == null
+            ? null
+            : handle.progress.listen((e) => onProgress(e.stage, e.message));
+        try {
+          final result = await handle.done;
+          staged = result;
+          if (result.error != null) {
+            throw CorpusPackageException(result.error!);
+          }
+          summary = CorpusPackageSummary.fromMap(result.summaryWire);
+          debugHook?.call('after-extract');
+          await onBeforeSwap?.call();
+          // 只有到这里才动原库；部分备份失败绝不先删尚未备份的原件。
+          swapStarted = true;
+          _removeCorpusArtifacts(corpusDir);
+          final tmpDir = Directory(result.tmpDirPath);
+          for (final item in tmpDir.listSync()) {
+            item.renameSync('${corpusDir.path}/${_basename(item.path)}');
+          }
+          debugHook?.call('after-swap');
+        } finally {
+          await subscription?.cancel();
+        }
+      } catch (e) {
+        try {
+          if (swapStarted) _removeCorpusArtifacts(corpusDir);
+          final backupPath = staged?.bakPath;
+          if (backupPath != null) {
+            _restoreBackup(Directory(backupPath), corpusDir, staged!.backed);
+          }
+        } catch (_) {} // 回滚尽力而为；保留原异常，备份不删除。
+        throw CorpusPackageException(e is CorpusPackageException
+            ? e.message
+            : '导入失败（已回滚原库）：${e is IsolateJobException ? e.message : e}');
+      } finally {
+        final tmpDirPath = staged?.tmpDirPath;
+        if (tmpDirPath != null) {
+          try {
+            final tmpDir = Directory(tmpDirPath);
+            if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+          } catch (_) {}
+        }
+      }
+
+      // 与同步入口同款收尾：幂等补科目、模型对暗号、进度只补不改、包 deck 豁免。
+      final db = await Db.open('$dataDir/hengya.db');
+      int added = 0, existing = 0;
+      String? modelWarning;
+      try {
+        for (final s in summary.subjects) {
+          if (db.ensureSubjectRow(s.id, s.name)) {
+            added++;
+          } else {
+            existing++;
+          }
+        }
+        final cur = (db.settingGet('embedding.model') ?? '').trim();
+        if (cur.isNotEmpty &&
+            summary.modelName.isNotEmpty &&
+            cur.toLowerCase() != summary.modelName.toLowerCase()) {
+          modelWarning =
+              '本机向量模型「$cur」与语料包「${summary.modelName}」不一致，'
+              '向量检索路将不可用（词面检索不受影响；可在 AI 服务配置中改一致）';
+        }
+        final (progressCreated, progressSynced) =
+            _syncProgress(corpusDir.path, summary.subjects);
+        _markPackageDecks(corpusDir.path);
+        db.bumpDataVersion();
+        return CorpusImportResult(
+          summary: summary,
+          backupPath: staged.bakPath,
+          subjectsAdded: added,
+          subjectsExisting: existing,
+          progressCreated: progressCreated,
+          progressSynced: progressSynced,
+          modelWarning: modelWarning,
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      _importBgRunning = false;
+    }
+  }
+
+  /// 尽力清理调用方持有的 ZIP 拷贝，不递归删目录、不删符号链接。
+  /// 仅认 cache/、系统临时目录或本进程后台导入登记过的 dataDir；路径先解析
+  /// 再按目录边界判断。还须最近访问不足 30 分钟或大于 1 MiB，失败静默。
+  static void disposeImportedZip(String zipPath) {
+    if (zipPath.trim().isEmpty) return;
+    try {
+      final file = File(zipPath);
+      if (!file.existsSync() || FileSystemEntity.isLinkSync(zipPath)) return;
+      String normalize(String path) {
+        final normalized = path.replaceAll('\\', '/');
+        return Platform.isWindows ? normalized.toLowerCase() : normalized;
+      }
+
+      final path = normalize(file.resolveSymbolicLinksSync());
+      var managed = path.contains('/cache/');
+      if (!managed) {
+        for (final directory in [
+          Directory.systemTemp,
+          ..._importDataDirs.map(Directory.new),
+        ]) {
+          if (!directory.existsSync()) continue;
+          final root = normalize(directory.resolveSymbolicLinksSync());
+          if (path.startsWith(root.endsWith('/') ? root : '$root/')) {
+            managed = true;
+            break;
+          }
+        }
+      }
+      if (!managed) return;
+      final stat = file.statSync();
+      final age = DateTime.now().difference(stat.accessed);
+      final recent = !age.isNegative && age < const Duration(minutes: 30);
+      if (stat.type == FileSystemEntityType.file &&
+          (recent || stat.size > 1024 * 1024)) {
+        file.deleteSync();
+      }
+    } catch (_) {} // 清理失败不影响校验/导入结果。
   }
 
   // ---------------- 进度同步（只补不改） ----------------
