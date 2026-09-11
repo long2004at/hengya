@@ -1159,6 +1159,71 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
     await _startResetVectors();
   }
 
+  /// 「补齐缺失向量」确认（2026-09-12 增量补齐入口）：不清空现有向量，
+  /// 断点检查（chunk_state + vectors 双确认）自动跳过已嵌行，只对缺失/
+  /// 过期部分补嵌。嵌入模型/维度与库内不一致时服务端拒绝（提示走全量
+  /// 重建）。无待处理文件也可用（库内自嵌——导入语料包场景）。
+  Future<void> _confirmAndBackfillVectors() async {
+    final st = _st;
+    if (st == null || _busyTrigger) return;
+    final modeLabel = _modeLabel(st);
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dlgCtx) => AlertDialog(
+        title: const Text('补齐缺失向量？'),
+        content: Text(
+          '将保留全部现有向量，只对缺失向量的语料块补嵌（$modeLabel）；'
+          '已有向量不重算、不重复计费。\n\n'
+          '适用场景：建库嵌入中断后补齐剩余部分（增量、省额度）。\n'
+          '嵌入模型或维度与库内不一致时本次会被拒绝，'
+          '请改用「重建全部向量」。\n'
+          '${st.modePreview == 'online' ? '\n在线嵌入会消耗少量 API 额度。' : ''}\n'
+          '后台运行，期间可正常使用 App、可离开本页。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dlgCtx, true),
+            child: const Text('补齐'),
+          ),
+        ],
+      ),
+    );
+    if (go != true) return;
+    await _startBackfillVectors();
+  }
+
+  /// 触发增量补齐（backfillVectors=true）
+  Future<void> _startBackfillVectors() async {
+    if (_busyTrigger) return;
+    setState(() => _busyTrigger = true);
+    try {
+      final res = await ApiClient.instance.triggerCorpusBuild(
+        backfillVectors: true,
+      );
+      if (!mounted) return;
+      if (res.triggered) {
+        TopToast.show(
+          context,
+          res.note ?? '已在后台开始补齐缺失向量',
+          type: TopToastType.success,
+        );
+      } else {
+        TopToast.show(context, res.note ?? '建库已在进行中', type: TopToastType.info);
+      }
+      await _load();
+    } on ApiException catch (e) {
+      if (mounted) {
+        TopToast.show(context, '触发失败：${e.message}', type: TopToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _busyTrigger = false);
+    }
+  }
+
   /// 触发强制重建（resetVectors=true）
   Future<void> _startResetVectors() async {
     if (_busyTrigger) return;
@@ -1412,16 +1477,39 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
             label: Text(_busyTrigger ? '启动中…' : (canResume ? '继续建库' : '开始建库')),
           ),
         ),
-        // ---- 重建全部向量（2026-09-11 强制重建；无待处理也可用——
-        // 导入语料包后向量不符/检索无结果的修复入口，库内自嵌） ----
+        // ---- 补齐缺失向量 + 重建全部向量（同一行两个次级入口）----
+        // 补齐（2026-09-12）：保留现有向量，断点检查只嵌缺失部分——
+        // 无待处理也可用（库内自嵌）；导入语料包后向量缺行的首选修复，
+        // 模型/维度不符时 ingestCorpus 拒绝并提示走重建。
+        // 重建（2026-09-11 强制重建；无待处理也可用——导入语料包后向量
+        // 不符/检索无结果的兜底入口，库内自嵌）。
         const SizedBox(height: 6),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            onPressed: _busyTrigger ? null : _confirmAndResetVectors,
-            icon: const Icon(Icons.refresh_rounded, size: 18),
-            label: Text(_busyTrigger ? '启动中…' : '重建全部向量'),
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _busyTrigger ? null : _confirmAndBackfillVectors,
+                icon: const Icon(Icons.playlist_add_check_rounded, size: 18),
+                label: Text(
+                  _busyTrigger ? '启动中…' : '补齐缺失向量',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _busyTrigger ? null : _confirmAndResetVectors,
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: Text(
+                  _busyTrigger ? '启动中…' : '重建全部向量',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );

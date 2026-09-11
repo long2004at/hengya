@@ -1350,6 +1350,11 @@ String resolvePptId(
 /// [preserveDeckSource] 用于重建/库内自嵌：冲突更新保留既有 deck 的 source
 /// （如 package 的树外剪除豁免）；新增 deck 仍使用 [source]，默认 false。
 ///
+/// [backfillVectors] 增量补齐（2026-09-12「补齐缺失向量」）：与
+/// [resetVectors] 同样以「库内全量 ∪ jsonl」为嵌入源，但**不清空**现有
+/// vectors/chunk_state——断点检查天然跳过已嵌行，只补缺失/过期部分；
+/// 嵌入模型或维度与库内不一致时拒绝（StateError），提示走全量重建。
+///
 /// [embed] 三态：offline（无 key，不写向量）/ drill（确定性伪向量）/
 /// online（API 批量，429/超时退避降批、5xx 只退避、4xx 立即报错）。
 Future<IngestStats> ingestCorpus(
@@ -1360,6 +1365,7 @@ Future<IngestStats> ingestCorpus(
   String source = 'tree',
   bool pruneAbsent = false,
   bool resetVectors = false,
+  bool backfillVectors = false,
   bool preserveDeckSource = false,
   Map<(String, String), ({String? filePath, String? fileMd5})> deckFiles =
       const {},
@@ -1381,10 +1387,10 @@ Future<IngestStats> ingestCorpus(
   final dim = embed.effectiveDim;
 
   final (rows, badLines) = loadChunksJsonl(inputPath);
-  // 0 行：仅 resetVectors=true 时允许走库内自嵌（见 ②'）；否则维持
-  // 原契约抛错（正常 ingest 必须有 jsonl 源行——两个上游调用点
+  // 0 行：resetVectors/backfillVectors=true 时允许走库内自嵌（见 ②'）；
+  // 否则维持原契约抛错（正常 ingest 必须有 jsonl 源行——两个上游调用点
   // buildCorpus/worker 均有 0-chunks 守卫，此抛错为直接调用方的兜底）。
-  if (rows.isEmpty && !resetVectors) {
+  if (rows.isEmpty && !resetVectors && !backfillVectors) {
     throw StateError('chunks.jsonl 无有效行（坏行 $badLines）：$inputPath');
   }
   final stats = IngestStats(
@@ -1410,6 +1416,24 @@ Future<IngestStats> ingestCorpus(
         db.execute('DELETE FROM chunk_state');
       });
       onProgress('已按 resetVectors 清空向量与 checkpoint');
+    } else if (backfillVectors) {
+      // 增量补齐：现有向量保留（新批按 ⑥ 的 curMax 口径与存量统一 scale），
+      // 但嵌入配置必须与库内一致——否则新旧向量两个嵌入空间混检。
+      if (oldModel != null &&
+          oldModel.isNotEmpty &&
+          oldModel.toLowerCase() != model.toLowerCase()) {
+        throw StateError(
+          '嵌入模型与库内不一致（库内 $oldModel，当前 $model）：'
+          '增量补齐拒绝混嵌，请用「重建全部向量」全量重建',
+        );
+      }
+      if (oldDim != null && oldDim.isNotEmpty && oldDim != '$dim') {
+        throw StateError(
+          '嵌入维度与库内不一致（库内 $oldDim，当前 $dim）：'
+          '增量补齐拒绝混嵌，请用「重建全部向量」全量重建',
+        );
+      }
+      onProgress('增量补齐：保留现有向量，仅嵌入缺失部分');
     } else if (oldModel != null &&
         oldModel.isNotEmpty &&
         oldModel.toLowerCase() != model.toLowerCase()) {
@@ -1437,9 +1461,11 @@ Future<IngestStats> ingestCorpus(
     // jsonl 新行使 upsert 生效、text 以合并集为准，⑥ 向量全量重嵌——**chunks
     // 保留、仅向量重建**（与 0-chunks 早退语义区分：库内自嵌 ≠ 新增语料）。
     var rowsEff = rows;
-    if (resetVectors) {
+    if (resetVectors || backfillVectors) {
       // 无 oldModel（全新空库）也无妨：fromDb 空 → 合并后仍只有 jsonl 行，
-      // 行为退化为正常 ingest；库内有 chunks 时必然重建库内全量。
+      // 行为退化为正常 ingest；库内有 chunks 时必然覆盖库内全量。
+      // resetVectors → 全量重嵌；backfillVectors → 同一嵌入源集，仅由 ⑤
+      // 断点检查筛出缺失部分嵌入。
       final fromDb = <String, Map<String, Object?>>{}; // key=chunk_id 去重
       for (final r in db.select(
         'SELECT chunk_id, subject_id, ppt_id, deck, page_start, page_end, '
@@ -1479,8 +1505,11 @@ Future<IngestStats> ingestCorpus(
         // progress 消息透出）
         if (fromDb.isNotEmpty) {
           onProgress(
-            '彻底重建：按库内 ${merged.length} chunks 全量重新嵌入'
-            '（合并 jsonl ${rows.length} + 库内 ${fromDb.length}）',
+            resetVectors
+                ? '彻底重建：按库内 ${merged.length} chunks 全量重新嵌入'
+                      '（合并 jsonl ${rows.length} + 库内 ${fromDb.length}）'
+                : '增量补齐：按库内 ${merged.length} chunks 检查缺失'
+                      '（合并 jsonl ${rows.length} + 库内 ${fromDb.length}）',
           );
         }
       }

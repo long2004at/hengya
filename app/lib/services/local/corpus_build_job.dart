@@ -76,6 +76,7 @@ this.maxFileMb,
     this.docxMaxFileMb,
     this.forceFull = false,
     this.resetVectors = false,
+    this.backfillVectors = false,
   });
 
   /// 语料树根目录（第一层子目录名 = 科目短码；xxx-textbook / xxx-exam /
@@ -126,6 +127,12 @@ final bool forceFull;
   /// chunk_state 后按当前嵌入配置全量重嵌。语义 = 覆盖层：0-chunks 时
   /// 不再早退，转走 ingestCorpus 的库内自嵌（incoming 树空也可重嵌）。
   final bool resetVectors;
+
+  /// 增量补齐（2026-09-12「补齐缺失向量」按钮）：与 [resetVectors] 同样以
+  /// 「库内全量 ∪ jsonl」为嵌入源、0-chunks 不早退，但不清空现有向量——
+  /// 断点检查天然跳过已嵌行，只补缺失部分。模型/维度与库内不一致时
+  /// ingestCorpus 拒绝（报错走全量重建）。
+  final bool backfillVectors;
 }
 
 // ------------------------------------------------------------- 结果 ----
@@ -310,10 +317,12 @@ void corpusBuildWorkerEntry(IsolateWorkerBoot boot) {
       }
     }
 
-// 0 chunks：非 resetVectors 直接 return（与 buildCorpus 同款告警路径；
-    // 仅大纲入库除外）。resetVectors=true → 不早退：转 ingestCorpus
-    //（其库内自嵌从 chunks 表读全部行重新嵌入——incoming 空树也重嵌）。
-    if (ex.chunks == 0 && !req.resetVectors) {
+// 0 chunks：非 resetVectors/backfillVectors 直接 return（与 buildCorpus
+    // 同款告警路径；仅大纲入库除外）。resetVectors=true → 不早退：转
+    // ingestCorpus（其库内自嵌从 chunks 表读全部行重新嵌入——incoming 空树
+    // 也重嵌）。backfillVectors=true → 同不早退（库内自嵌 + 断点检查只补
+    // 缺失向量——incoming 空树也可补齐）。
+    if (ex.chunks == 0 && !req.resetVectors && !req.backfillVectors) {
       if (ex.outlineFiles.isEmpty) {
         notes.add(
           '抽取结果 0 chunks——检查 ${req.inputPath} 下是否放了 '
@@ -358,7 +367,8 @@ final ing = await ingestCorpus(
       source: 'tree',
       pruneAbsent: true,
       resetVectors: req.resetVectors,
-      preserveDeckSource: req.resetVectors,
+      backfillVectors: req.backfillVectors,
+      preserveDeckSource: req.resetVectors || req.backfillVectors,
       progress: (m) => relay('ingest', m),
     );
     ctx.emit(

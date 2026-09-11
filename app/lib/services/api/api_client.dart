@@ -804,14 +804,17 @@ class ApiClient {
   /// embedding key 有无自动选路；[mode] 显式指定仅测试/演练用，如 'drill'）。
   /// [resetVectors]=true → 强制向量全量重建（2026-09-11「重建全部向量」：
   /// 清空 vectors + checkpoint 后按当前配置全量重嵌；incoming 无源文件时
-  /// 走库内自嵌）。单飞守卫：运行中重复触发 → triggered=false + running=true。
+  /// 走库内自嵌）。[backfillVectors]=true → 增量补齐（2026-09-12「补齐缺失
+  /// 向量」：保留现有向量，断点检查只嵌缺失部分；模型/维度不符被拒）。
+  /// 单飞守卫：运行中重复触发 → triggered=false + running=true。
   /// 进度经 `LocalBackend.instance.corpusBuildState` 流订阅（local 专用旁路
   /// ——请求/响应通道装不下 Stream）。
   Future<CorpusBuildTriggerResult> triggerCorpusBuild(
-      {String? mode, bool resetVectors = false}) async {
+      {String? mode, bool resetVectors = false, bool backfillVectors = false}) async {
     final body = <String, dynamic>{
       if (mode != null && mode.isNotEmpty) 'mode': mode,
       if (resetVectors) 'resetVectors': true,
+      if (backfillVectors) 'backfillVectors': true,
     };
     return CorpusBuildTriggerResult.fromJson(
       await _postJson('/api/v1/corpus/build', body),

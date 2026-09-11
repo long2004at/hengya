@@ -790,6 +790,133 @@ void main() {
       db2.dispose();
     }
   });
+
+  // ------------------------------------------------- 9. backfillVectors 增量补齐 ----
+  // 2026-09-12「补齐缺失向量」验收（不依赖私有语料）：与 resetVectors 同样
+  // 以「库内全量 ∪ jsonl」为嵌入源，但**不清空**现有向量——断点检查
+  // （chunk_state + vectors 双确认）跳过已嵌行，只嵌缺失部分；模型不一致
+  // 时拒绝（StateError）。场景：库内 2 chunk，先正常 ingest 嵌入 jsonl
+  // 独有的 1 行，再 backfill → resumed=1（跳过不重嵌）、embedded=1（补齐
+  // 库内独有行），已嵌行向量与 checkpoint 时间戳原样保留。
+  test('backfillVectors 增量补齐：保留已嵌行只补缺失，模型不一致拒绝', () async {
+    final dir = '${root.path}/backfillVec';
+    Directory(dir).createSync(recursive: true);
+    final dbPath = '$dir/corpus.db';
+    final jsonlPath = '$dir/chunks.jsonl';
+
+    // 直接建 schema + 预置「库内有 chunk_b 但 jsonl 无该行」（模拟语料包导入）
+    final db = openCorpusDb(dbPath);
+    try {
+      db.execute(
+        'CREATE TABLE IF NOT EXISTS chunks(chunk_id TEXT PRIMARY KEY, '
+        'subject_id TEXT, ppt_id TEXT, deck TEXT, page_start INTEGER, '
+        'page_end INTEGER, title TEXT, text TEXT, source_type TEXT, '
+        'file_date TEXT)',
+      );
+      db.execute(
+        'INSERT INTO chunks(chunk_id, subject_id, ppt_id, deck, '
+        'title, text, source_type) VALUES '
+        '(\'oms:a:p1\',\'oms\',\'a\',\'a\',\'t1\',\'库内行甲\',\'ppt\'),'
+        '(\'oms:b:p1\',\'oms\',\'b\',\'b\',\'t2\',\'库内行乙\',\'ppt\')',
+      );
+    } finally {
+      db.dispose();
+    }
+
+    // jsonl 只有 1 行（oms:a:p1，与库内同 id、text 不同=最新抽取内容）
+    File(jsonlPath).writeAsStringSync(
+      '{"chunk_id":"oms:a:p1","subject_id":"oms","ppt_id":"a","deck":"a",'
+      '"page_start":1,"page_end":1,"title":"t1new","text":"jsonl新内容",'
+      '"source_type":"ppt","file_date":""}\n',
+      encoding: utf8,
+    );
+
+    // 第一轮：正常 ingest（非 backfill）→ 只嵌 jsonl 行 chunk_a
+    final ing1 = await ingestCorpus(
+      dbPath,
+      jsonlPath,
+      embed: const CorpusEmbedConfig.drill(),
+    );
+    expect(ing1.pending, 1);
+    expect(ing1.embedded, 1);
+
+    final db1 = openCorpusDb(dbPath);
+    Uint8List vecA1;
+    double tsA1;
+    try {
+      expect(_count(db1, 'vectors'), 1);
+      final r = db1
+          .select("SELECT vec, ts FROM vectors v JOIN chunk_state s "
+              "ON s.chunk_id = v.chunk_id WHERE v.chunk_id='oms:a:p1'")
+          .first;
+      vecA1 = r.columnAt(0) as Uint8List;
+      tsA1 = (r.columnAt(1) as num).toDouble();
+    } finally {
+      db1.dispose();
+    }
+
+    // 第二轮：backfillVectors=true → 库内全量进源集，断点检查跳过已嵌的 a，
+    // 只补库内独有行 b；现有向量与 checkpoint 不被触碰
+    final ing2 = await ingestCorpus(
+      dbPath,
+      jsonlPath,
+      embed: const CorpusEmbedConfig.drill(),
+      backfillVectors: true,
+      preserveDeckSource: true,
+    );
+    expect(ing2.resumed, 1, reason: '已嵌行必须被断点检查跳过（不重嵌不计费）');
+    expect(ing2.pending, 1);
+    expect(ing2.embedded, 1, reason: '只嵌缺失的库内独有行');
+
+    final db2 = openCorpusDb(dbPath);
+    try {
+      expect(_count(db2, 'vectors'), 2);
+      expect(_count(db2, 'vec_chunks'), 2, reason: '镜像同步补齐');
+      final r = db2
+          .select("SELECT vec, ts FROM vectors v JOIN chunk_state s "
+              "ON s.chunk_id = v.chunk_id WHERE v.chunk_id='oms:a:p1'")
+          .first;
+      expect((r.columnAt(1) as num).toDouble(), tsA1,
+          reason: '已嵌行 chunk_state 时间戳原样保留');
+      final vecA2 = r.columnAt(0) as Uint8List;
+      expect(vecA2.length, vecA1.length);
+      expect(
+        db2
+            .select("SELECT count(*) FROM vectors WHERE chunk_id='oms:b:p1'")
+            .first
+            .columnAt(0),
+        1,
+        reason: '缺失行已补嵌',
+      );
+      final tB = db2
+          .select("SELECT text FROM chunks WHERE chunk_id='oms:b:p1'")
+          .first
+          .columnAt(0);
+      expect(tB, '库内行乙', reason: '库内独有行不得被补齐流程剪除');
+    } finally {
+      db2.dispose();
+    }
+
+    // 嵌入模型与库内不一致 → 拒绝混嵌（提示走「重建全部向量」）
+    final db3 = openCorpusDb(dbPath);
+    try {
+      db3.execute(
+        "UPDATE meta SET value='other-embedder' WHERE key='embedding_model'",
+      );
+    } finally {
+      db3.dispose();
+    }
+    await expectLater(
+      ingestCorpus(
+        dbPath,
+        jsonlPath,
+        embed: const CorpusEmbedConfig.drill(),
+        backfillVectors: true,
+        preserveDeckSource: true,
+      ),
+      throwsStateError,
+    );
+  });
 }
 
 // ------------------------------------------------------------ helpers ----

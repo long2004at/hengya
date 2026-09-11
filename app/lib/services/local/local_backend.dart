@@ -1106,6 +1106,7 @@ final aiPut = RegExp(
     }
 final explicit = _str(m['mode']).trim().toLowerCase();
     final resetVectors = m['resetVectors'] == true;
+    final backfillVectors = m['backfillVectors'] == true;
     final (autoMode, autoKey, autoModel, autoBase) = _selectBuildMode(db);
     final CorpusEmbedMode mode;
     switch (explicit) {
@@ -1140,6 +1141,8 @@ final explicit = _str(m['mode']).trim().toLowerCase();
       // 2026-09-11「重建全部向量」：清空向量后全量重嵌（incoming 无源文件
       // 时走库内自嵌——从 chunks 表读全部行重建）
       resetVectors: resetVectors,
+      // 2026-09-12「补齐缺失向量」：保留现有向量，断点检查只补缺失部分
+      backfillVectors: backfillVectors,
     );
     _corpusBuildActive = true;
     _lastBuildMode = mode.name;
@@ -1155,7 +1158,9 @@ final explicit = _str(m['mode']).trim().toLowerCase();
       'ok': true,
       'triggered': true,
       'mode': mode.name,
-'note': resetVectors
+'note': backfillVectors
+          ? '已在后台开始补齐缺失向量（保留现有向量，只嵌缺失部分，消耗少量 API 额度）'
+          : resetVectors
           ? '已在后台开始重建全部向量（清空后全量重嵌，消耗少量 API 额度）'
           : mode == CorpusEmbedMode.online
               ? '已在后台开始建库（在线嵌入，消耗少量 API 额度）'
