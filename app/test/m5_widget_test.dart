@@ -401,8 +401,15 @@ void main() {
   testWidgets('重排序编辑层（未配置态）：预填 SiliconFlow 默认端点+模型，保存三字段入 PUT',
       (tester) async {
     router.rerankerCfg = null; // 旧服务器响应缺 reranker 节点 → 未配置态
-    await pumpSettings(tester);
-    expect(find.text('地址：—'), findsOneWidget); // 卡片空态占位
+await pumpSettings(tester);
+    // 卡片空态占位（收窄到重排序卡内部——备用生卡 LLM 未配置时也有「地址：—」）
+    expect(
+      find.descendant(
+        of: find.widgetWithText(Card, '重排序模型'),
+        matching: find.text('地址：—'),
+      ),
+      findsOneWidget,
+    );
 
     await tester.tap(find.text('重排序模型'));
     await tester.pumpAndSettle();
