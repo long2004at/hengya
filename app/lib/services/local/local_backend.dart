@@ -289,11 +289,14 @@ class LocalBackend {
       return _corpusBuildView(db);
     }
 
-    // /pipeline/weekly（自动周扫计时状态：节流时间戳 + 到期判定）
+    // /pipeline/weekly（自动周扫计时状态：节流时间戳 + 到期判定；清除后
+    // settings 存的是空串——对外归一为 null，「从未跑过」单一表示）
     if (path == '/pipeline/weekly') {
       final lastRunAt = db.settingGet(kWeeklyScanSettingKey);
       return {
-        'lastRunAt': lastRunAt,
+        'lastRunAt': (lastRunAt == null || lastRunAt.isEmpty)
+            ? null
+            : lastRunAt,
         'intervalDays': kWeeklyScanInterval.inDays,
         'due': weeklyScanDue(lastRunAt, DateTime.now()),
       };
