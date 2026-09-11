@@ -1,4 +1,5 @@
-// 应用内更新 · 设置页区块 UI smoke 测试（batch3 node1）
+// 应用内更新 · 关于页（AboutPage）区块 UI smoke 测试（batch3 node1；v0.1.9
+// 应用内更新区块自设置页迁入 AboutPage，测试随之改打「关于页」）
 // ============================================================================
 //
 // testWidgets 假异步纪律全套（同 corpus_build_panel_test.dart）：
@@ -17,6 +18,7 @@ import 'dart:convert' as convert;
 import 'dart:ffi' as ffi;
 import 'dart:io';
 
+import 'package:hengya/pages/about_page.dart';
 import 'package:hengya/pages/settings_page.dart';
 import 'package:hengya/services/api/api_client.dart';
 import 'package:hengya/services/local/local_backend.dart';
@@ -32,7 +34,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows) {
     sqlite_open.open.overrideForAll(
-        () => ffi.DynamicLibrary.open(File('test/sqlite3.dll').absolute.path));
+      () => ffi.DynamicLibrary.open(File('test/sqlite3.dll').absolute.path),
+    );
   }
 
   late Directory tmp;
@@ -88,6 +91,19 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
   }
 
+  /// 打开关于页（v0.1.9 应用内更新区块迁入地）并等首屏异步加载落地。
+  /// 视口调高：头部卡 + 版本更新卡在折叠线以下时会被 ListView 惰性裁剪。
+  Future<void> openAbout(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(800, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const MaterialApp(home: AboutPage()));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
   /// 点击「检查更新」后泵到状态落地
   Future<void> tapCheckAndSettle(WidgetTester tester) async {
     await tester.tap(find.text(UpdateMessages.checkButton));
@@ -105,7 +121,8 @@ void main() {
     String notes = '修复若干问题',
   }) async {
     const apk = 'heng-1.7.0+15-local-release.apk';
-    const sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const sha256 =
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     final payload = fx.canonicalPayload(
       versionName: versionName,
       versionCode: versionCode,
@@ -127,14 +144,20 @@ void main() {
 
   testWidgets('更新区块渲染：版本行 / 源输入框 / 检查按钮', (tester) async {
     await boot();
-    await openSettings(tester);
+    await openAbout(tester);
 
-    expect(find.text('应用内更新'), findsOneWidget); // 分组标题
+    expect(find.text('版本更新'), findsOneWidget); // 分组标题
     expect(find.text('检查新版本'), findsOneWidget); // 区块主行
     expect(find.textContaining('当前版本 v1.6.2+14'), findsOneWidget); // 版本号
     expect(find.text(UpdateMessages.sourceLabel), findsOneWidget); // 输入框标签
-    expect(find.text(UpdateMessages.overseasLineButton), findsOneWidget); // 海外线路按钮
-    expect(find.text(UpdateMessages.domesticLineButton), findsOneWidget); // 国内线路按钮
+    expect(
+      find.text(UpdateMessages.overseasLineButton),
+      findsOneWidget,
+    ); // 海外线路按钮
+    expect(
+      find.text(UpdateMessages.domesticLineButton),
+      findsOneWidget,
+    ); // 国内线路按钮
     // 新装（db 未设置源）→ 输入框预填 GitHub 默认源（hint 仅空时可见，不再断言）
     final field = tester.widget<TextField>(find.byType(TextField));
     expect(field.controller!.text, UpdateService.githubSourceUrl);
@@ -146,7 +169,7 @@ void main() {
 
   testWidgets('清空源（国内线路）后点检查 → 「请先填写更新源」', (tester) async {
     await boot();
-    await openSettings(tester);
+    await openAbout(tester);
 
     await tester.tap(find.text(UpdateMessages.domesticLineButton)); // 清空预填
     await tester.pump();
@@ -159,10 +182,12 @@ void main() {
     await boot();
     UpdateService.debugFetchOverride = (url) async =>
         await manifestJson(versionName: '1.6.2+14', versionCode: 14);
-    await openSettings(tester);
+    await openAbout(tester);
 
     await tester.enterText(
-        find.byType(TextField), 'http://127.0.0.1:9999/heng-token/latest.json');
+      find.byType(TextField),
+      'http://127.0.0.1:9999/heng-token/latest.json',
+    );
     await tapCheckAndSettle(tester);
 
     expect(find.text(UpdateMessages.upToDate('1.6.2+14')), findsOneWidget);
@@ -170,29 +195,44 @@ void main() {
     expect(find.text(UpdateMessages.downloadButton), findsNothing);
   });
 
-  testWidgets('fake 检查：versionCode 更大 → 发现新版本（notes + 大小 + 下载按钮）', (tester) async {
+  testWidgets('fake 检查：versionCode 更大 → 发现新版本（notes + 大小 + 下载按钮）', (
+    tester,
+  ) async {
     await boot();
     UpdateService.debugFetchOverride = (url) async => await manifestJson();
-    await openSettings(tester);
+    await openAbout(tester);
 
     await tester.enterText(
-        find.byType(TextField), 'http://127.0.0.1:9999/heng-token/latest.json');
+      find.byType(TextField),
+      'http://127.0.0.1:9999/heng-token/latest.json',
+    );
     await tapCheckAndSettle(tester);
 
-    expect(find.text(UpdateMessages.foundNew('1.7.0+15')), findsOneWidget);
+    // AboutPage 把 foundNew 与 sizeOf 合并进同一 Text → 用 textContaining
+    expect(
+      find.textContaining(UpdateMessages.foundNew('1.7.0+15')),
+      findsOneWidget,
+    );
     expect(find.text('修复若干问题'), findsOneWidget); // notes
-    expect(find.text('大小 1.2 MB'), findsOneWidget); // 1234567 B → 1.2 MB
-    expect(find.widgetWithText(FilledButton, UpdateMessages.downloadButton),
-        findsOneWidget); // 页面他处还有 FilledButton，按文本收敛到下载按钮
+    expect(
+      find.textContaining('大小 1.2 MB'),
+      findsOneWidget,
+    ); // 1234567 B → 1.2 MB
+    expect(
+      find.widgetWithText(FilledButton, UpdateMessages.downloadButton),
+      findsOneWidget,
+    ); // 页面他处还有 FilledButton，按文本收敛到下载按钮
   });
 
   testWidgets('fake 检查：源抛错 → 网络失败文案', (tester) async {
     await boot();
     UpdateService.debugFetchOverride = (url) async => throw StateError('boom');
-    await openSettings(tester);
+    await openAbout(tester);
 
     await tester.enterText(
-        find.byType(TextField), 'http://127.0.0.1:9999/heng-token/latest.json');
+      find.byType(TextField),
+      'http://127.0.0.1:9999/heng-token/latest.json',
+    );
     await tapCheckAndSettle(tester);
 
     expect(find.text(UpdateMessages.unreachable), findsOneWidget);
@@ -202,7 +242,7 @@ void main() {
     await boot();
     UpdateService.debugFetchOverride = (url) async =>
         await manifestJson(versionName: '1.6.2+14', versionCode: 14);
-    await openSettings(tester);
+    await openAbout(tester);
 
     const url = 'http://47.98.1.2:8080/heng-abc123/latest.json';
     await tester.enterText(find.byType(TextField), url);
@@ -214,17 +254,19 @@ void main() {
 
     // 重开设置页 → 回显
     await tester.pumpWidget(const SizedBox());
-    await openSettings(tester);
+    await openAbout(tester);
     final field = tester.widget<TextField>(find.byType(TextField));
     expect(field.controller!.text, url);
   });
 
   testWidgets('海外线路：输入任意值后一键填回 GitHub 默认源并落库', (tester) async {
     await boot();
-    await openSettings(tester);
+    await openAbout(tester);
 
     await tester.enterText(
-        find.byType(TextField), 'http://example.com/other/latest.json');
+      find.byType(TextField),
+      'http://example.com/other/latest.json',
+    );
     await tester.tap(find.text(UpdateMessages.overseasLineButton));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
@@ -234,12 +276,14 @@ void main() {
     // 一键填入即落库（db settings update.source）
     final db = await LocalBackend.instance.sharedDb;
     expect(
-        db.settingGet(UpdateService.sourceKey), UpdateService.githubSourceUrl);
+      db.settingGet(UpdateService.sourceKey),
+      UpdateService.githubSourceUrl,
+    );
   });
 
   testWidgets('国内线路：清空输入框并聚焦（不预设任何 URL）', (tester) async {
     await boot();
-    await openSettings(tester);
+    await openAbout(tester);
 
     await tester.tap(find.text(UpdateMessages.domesticLineButton));
     await tester.pump();
@@ -247,5 +291,26 @@ void main() {
     final field = tester.widget<TextField>(find.byType(TextField));
     expect(field.controller!.text, ''); // 不预设 URL（ECS 直链不入 APK）
     expect(field.focusNode!.hasFocus, isTrue); // 聚焦待手动粘贴
+  });
+
+  testWidgets('设置页「恒牙」行 → 打开关于页（版本更新 / 诊断 / 存储）', (tester) async {
+    await boot();
+    await openSettings(tester);
+
+    // 「恒牙」行在设置页长 ListView 深处 → 滚动到可见
+    await tester.scrollUntilVisible(
+      find.widgetWithText(ListTile, '恒牙'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.widgetWithText(ListTile, '恒牙'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // 关于页三区块均落地
+    expect(find.text('版本更新'), findsOneWidget);
+    expect(find.text('检查新版本'), findsOneWidget);
+    expect(find.text('清除缓存'), findsOneWidget);
+    expect(find.text('日志'), findsOneWidget);
   });
 }
