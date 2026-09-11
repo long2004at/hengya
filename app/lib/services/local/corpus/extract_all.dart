@@ -1380,7 +1380,7 @@ Future<IngestStats> ingestCorpus(
   final model = embed.effectiveModel;
   final dim = embed.effectiveDim;
 
-final (rows, badLines) = loadChunksJsonl(inputPath);
+  final (rows, badLines) = loadChunksJsonl(inputPath);
   // 0 行：仅 resetVectors=true 时允许走库内自嵌（见 ②'）；否则维持
   // 原契约抛错（正常 ingest 必须有 jsonl 源行——两个上游调用点
   // buildCorpus/worker 均有 0-chunks 守卫，此抛错为直接调用方的兜底）。
@@ -1426,16 +1426,21 @@ final (rows, badLines) = loadChunksJsonl(inputPath);
       onProgress('维度切换（$oldDim → $dim）：向量全量重建');
     }
 
-    // ②' 库内自嵌（2026-09-11 强制重建语义）：resetVectors=true 且
-    // chunks.jsonl 无行（incoming 树为空——典型：导入语料包后库里有
-    // chunks 但本机无源文件）→ 从库内 chunks 表读出全部行作为嵌入源，
-    // 向量按当前 embedding 配置全量重建。rows 由此非空，流过
-    // ③ deck 幂等 / ④ upsert 时 ON CONFLICT 全命中、text 原样，
-    // ⑥ 向量全量重嵌——**chunks 保留、仅向量重建**（与 0-chunks 早退
-    // 语义区分：库内自嵌 ≠ 新增语料，prune 不会剪除任何 deck）。
+    // ②' 库内自嵌（2026-09-11 强制重建语义 v2「彻底重建」）：resetVectors=true
+    // → 恒从库内 chunks 表读出全部行，与 jsonl 行合并作为嵌入源，向量按当前
+    // embedding 配置全量重建。v1 缺陷：原条件 `rows.isEmpty && resetVectors`
+    // 只有 chunks.jsonl 为空（incoming 无文件）才读库内行——一旦本机手动上传
+    // 过课件（chunks.jsonl 非空），语料包导入的 chunks（在库、不在 jsonl）
+    // 被排除出重建范围，「重建全部向量」只重算了手动课件。v2 语义：重建 =
+    // 库内全量 ∪ jsonl 新行（chunk_id 去重、jsonl 优先——新抽取覆盖旧内容）。
+    // rows 由此非空，流过 ③ deck 幂等 / ④ upsert 时 ON CONFLICT 全命中或
+    // jsonl 新行使 upsert 生效、text 以合并集为准，⑥ 向量全量重嵌——**chunks
+    // 保留、仅向量重建**（与 0-chunks 早退语义区分：库内自嵌 ≠ 新增语料）。
     var rowsEff = rows;
-    if (rows.isEmpty && resetVectors && oldModel != null) {
-      final fromDb = <Map<String, Object?>>[];
+    if (resetVectors) {
+      // 无 oldModel（全新空库）也无妨：fromDb 空 → 合并后仍只有 jsonl 行，
+      // 行为退化为正常 ingest；库内有 chunks 时必然重建库内全量。
+      final fromDb = <String, Map<String, Object?>>{}; // key=chunk_id 去重
       for (final r in db.select(
         'SELECT chunk_id, subject_id, ppt_id, deck, page_start, page_end, '
         'title, text, source_type, file_date FROM chunks',
@@ -1443,7 +1448,7 @@ final (rows, badLines) = loadChunksJsonl(inputPath);
         final cid = '${r['chunk_id']}';
         final text = '${r['text']}';
         if (cid.isEmpty || text.isEmpty) continue;
-        fromDb.add({
+        fromDb[cid] = {
           'chunk_id': cid,
           'subject_id': '${r['subject_id'] ?? 'unknown'}',
           'ppt_id': '${r['ppt_id'] ?? cid}',
@@ -1456,13 +1461,28 @@ final (rows, badLines) = loadChunksJsonl(inputPath);
           'text': text,
           'source_type': '${r['source_type'] ?? 'ppt'}',
           'file_date': '${r['file_date'] ?? ''}',
-        });
+        };
       }
-if (fromDb.isNotEmpty) {
-        rowsEff = fromDb;
-        // stats.rows 保持 jsonl 行数（final 字段；0 = incoming 无源文件的
-        // 诚实语义——库内自嵌行数经 progress 消息透出）
-        onProgress('库内自嵌：incoming 树为空，按库内 ${rowsEff.length} chunks 重新嵌入');
+      if (fromDb.isNotEmpty || rows.isNotEmpty) {
+        final merged = <Map<String, Object?>>[];
+        final seen = <String>{};
+        // jsonl 行优先（新抽取的最新内容），库内独有行并入
+        for (final r in rows) {
+          merged.add(r);
+          seen.add('${r['chunk_id']}');
+        }
+        for (final e in fromDb.entries) {
+          if (!seen.contains(e.key)) merged.add(e.value);
+        }
+        rowsEff = merged;
+        // stats.rows 保持 jsonl 行数（final 字段诚实语义——库内合并行数经
+        // progress 消息透出）
+        if (fromDb.isNotEmpty) {
+          onProgress(
+            '彻底重建：按库内 ${merged.length} chunks 全量重新嵌入'
+            '（合并 jsonl ${rows.length} + 库内 ${fromDb.length}）',
+          );
+        }
       }
     }
 
@@ -1544,7 +1564,7 @@ if (fromDb.isNotEmpty) {
         'text=excluded.text, source_type=excluded.source_type, '
         'file_date=excluded.file_date',
       );
-try {
+      try {
         for (final r in rowsEff) {
           up.execute([for (final f in kChunkFields) r[f]]);
         }
@@ -1590,7 +1610,7 @@ try {
       for (final r in db.select('SELECT chunk_id FROM vectors'))
         '${r.columnAt(0)}',
     };
-final pending = <(Map<String, Object?>, String)>[];
+    final pending = <(Map<String, Object?>, String)>[];
     for (final r in rowsEff) {
       final cid = '${r['chunk_id']}';
       final cMd5 = contentMd5(model, contentOf(r));

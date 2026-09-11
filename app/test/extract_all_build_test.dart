@@ -28,8 +28,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:hengya/services/local/corpus/extract_all.dart';
-import 'package:hengya/services/local/corpus/search_api.dart'
-    show kEmbedModel;
+import 'package:hengya/services/local/corpus/search_api.dart' show kEmbedModel;
 import 'package:hengya/services/local/corpus/search_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/open.dart' as sqlite_open;
@@ -38,8 +37,7 @@ import 'package:sqlite3/sqlite3.dart';
 // —— 金样源文件（CWD=app/；与 extract_pptx_golden_test / extract_pdf_smoke_test 同源）——
 const srcOmsPptx =
     '../content/ppt_raw/oms/(2.1.2)--第二章口腔颌面外科基本操作与基础知识 (1).pptx';
-const srcExamPdf =
-    '../content/ppt_raw/exam/试卷与模拟题/2023年口腔助理医师试题（网友回忆版）.pdf';
+const srcExamPdf = '../content/ppt_raw/exam/试卷与模拟题/2023年口腔助理医师试题（网友回忆版）.pdf';
 const srcOtherExamPdf = '../content/ppt_raw/exam/修复类专题/4.牙列缺失.pdf';
 const examPdfName = '2023年口腔助理医师试题（网友回忆版）.pdf';
 
@@ -55,9 +53,9 @@ List<String> goldenLines(String path) => File(path)
     .toList();
 
 List<Map<String, Object?>> jsonlLinesAsMaps(String path) => [
-      for (final l in goldenLines(path))
-        (jsonDecode(l) as Map<String, dynamic>).cast<String, Object?>(),
-    ];
+  for (final l in goldenLines(path))
+    (jsonDecode(l) as Map<String, dynamic>).cast<String, Object?>(),
+];
 
 /// skip-guard：公开仓库不含 content/ 与金样（课程语料，版权原因）。
 /// 依赖真实源文件的用例在缺料环境自动跳过（同 search_engine_test 守卫纪律）。
@@ -110,8 +108,11 @@ void main() {
     expect(pyRound(2.6), 3);
     expect(pyRound(-1.5), -2);
     // 量化：clamp(round(v/scale), -127, 127)，小端 int8
-    expect(signedInt8(quantizeWithScale([1.0, -2.0, 300.0], 1.0)),
-        [1, -2, 127]);
+    expect(signedInt8(quantizeWithScale([1.0, -2.0, 300.0], 1.0)), [
+      1,
+      -2,
+      127,
+    ]);
     expect(signedInt8(quantizeWithScale([0.5, -1.0], 0.5)), [1, -2]);
     // 镜像归一：零向量 → null（skip 同口径）
     final n = vec0Normalize(Int8List.fromList([3, 4]))!;
@@ -135,227 +136,300 @@ void main() {
 
   // --------------------------------------------- 1. 抽取 → 金样逐字节 ----
 
-  test('extractAllCorpus：树扫描分派三抽取器 → chunks.jsonl 与金样逐字节一致',
-      () async {
-    if (!corpusSourcesPresent()) {
-      // ignore: avoid_print
-      print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
-      return;
-    }
-    final ex = extractAllCorpus(treeA, '$corpusA/chunks.jsonl');
-    expect(ex.errors, isEmpty, reason: '抽取失败：${ex.errors}');
-    expect(ex.skippedBig, isEmpty);
-    expect(ex.decksTotal, 2);
-    expect(ex.changed, 2);
-    expect(ex.unchanged, 0);
-    expect(ex.removed, 0);
-    expect(ex.chunks, 111); // 92 (oms pptx) + 19 (exam pdf)
-    expect(ex.bySubject, {'exam': 1, 'oms': 1});
+  test(
+    'extractAllCorpus：树扫描分派三抽取器 → chunks.jsonl 与金样逐字节一致',
+    () async {
+      if (!corpusSourcesPresent()) {
+        // ignore: avoid_print
+        print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
+        return;
+      }
+      final ex = extractAllCorpus(treeA, '$corpusA/chunks.jsonl');
+      expect(ex.errors, isEmpty, reason: '抽取失败：${ex.errors}');
+      expect(ex.skippedBig, isEmpty);
+      expect(ex.decksTotal, 2);
+      expect(ex.changed, 2);
+      expect(ex.unchanged, 0);
+      expect(ex.removed, 0);
+      expect(ex.chunks, 111); // 92 (oms pptx) + 19 (exam pdf)
+      expect(ex.bySubject, {'exam': 1, 'oms': 1});
 
-    final out = File('$corpusA/chunks.jsonl')
-        .readAsStringSync(encoding: utf8)
-        .split('\n')
-        .where((l) => l.isNotEmpty)
-        .toList();
-    expect(out.length, 111);
-    // 按 deck 切片（行序 = 扫描序：exam < oms；deck 内 = 抽取序 = 金样序）
-    final examLines = [
-      for (final l in out)
-        if ((jsonDecode(l) as Map)['subject_id'] == 'exam') l,
-    ];
-    final omsLines = [
-      for (final l in out)
-        if ((jsonDecode(l) as Map)['subject_id'] == 'oms') l,
-    ];
-    expect(examLines.length, 19);
-    expect(omsLines.length, 92);
-    expect('${examLines.join('\n')}\n', '${goldenLines(goldenExam).join('\n')}\n',
-        reason: 'exam PDF 19 chunks 与金样不一致');
-    expect('${omsLines.join('\n')}\n', '${goldenLines(goldenOms).join('\n')}\n',
-        reason: 'oms pptx 92 chunks 与金样不一致');
-    // manifest 原子落盘 + 键 = 相对 posix 路径
-    final manifest =
-        jsonDecode(File('$corpusA/chunks.jsonl.manifest.json').readAsStringSync())
-            as Map<String, dynamic>;
-    expect(manifest['version'], 1);
-    final files = (manifest['files'] as Map<String, dynamic>).keys.toList();
-    expect(files, contains('exam/试卷与模拟题/$examPdfName'));
-    expect(files, contains('oms/${pyNameOf(srcOmsPptx)}'));
-    // 教材源才写 toc sidecar；本树无教材 → toc 目录不产生
-    expect(Directory('$corpusA/toc').existsSync(), isFalse);
-  }, timeout: const Timeout(Duration(minutes: 5)));
+      final out = File('$corpusA/chunks.jsonl')
+          .readAsStringSync(encoding: utf8)
+          .split('\n')
+          .where((l) => l.isNotEmpty)
+          .toList();
+      expect(out.length, 111);
+      // 按 deck 切片（行序 = 扫描序：exam < oms；deck 内 = 抽取序 = 金样序）
+      final examLines = [
+        for (final l in out)
+          if ((jsonDecode(l) as Map)['subject_id'] == 'exam') l,
+      ];
+      final omsLines = [
+        for (final l in out)
+          if ((jsonDecode(l) as Map)['subject_id'] == 'oms') l,
+      ];
+      expect(examLines.length, 19);
+      expect(omsLines.length, 92);
+      expect(
+        '${examLines.join('\n')}\n',
+        '${goldenLines(goldenExam).join('\n')}\n',
+        reason: 'exam PDF 19 chunks 与金样不一致',
+      );
+      expect(
+        '${omsLines.join('\n')}\n',
+        '${goldenLines(goldenOms).join('\n')}\n',
+        reason: 'oms pptx 92 chunks 与金样不一致',
+      );
+      // manifest 原子落盘 + 键 = 相对 posix 路径
+      final manifest =
+          jsonDecode(
+                File('$corpusA/chunks.jsonl.manifest.json').readAsStringSync(),
+              )
+              as Map<String, dynamic>;
+      expect(manifest['version'], 1);
+      final files = (manifest['files'] as Map<String, dynamic>).keys.toList();
+      expect(files, contains('exam/试卷与模拟题/$examPdfName'));
+      expect(files, contains('oms/${pyNameOf(srcOmsPptx)}'));
+      // 教材源才写 toc sidecar；本树无教材 → toc 目录不产生
+      expect(Directory('$corpusA/toc').existsSync(), isFalse);
+    },
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
 
   // ------------------------------------------------- 2. 建库 → 契约 ----
 
-  test('ingestCorpus（drill）：schema/行数/关键列与金样一致 + 镜像/FTS/meta',
-      () async {
-    if (!corpusSourcesPresent()) {
-      // ignore: avoid_print
-      print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
-      return;
-    }
-    final ing = await ingestCorpus('$corpusA/corpus.db', '$corpusA/chunks.jsonl',
-        embed: const CorpusEmbedConfig.drill());
-    expect(ing.rows, 111);
-    expect(ing.badLines, 0);
-    expect(ing.pending, 111);
-    expect(ing.embedded, 111);
-    expect(ing.resumed, 0);
-    expect(ing.prunedStale, 0);
-    expect(ing.prunedAbsent, 0);
-    expect(ing.batches, greaterThanOrEqualTo(1));
-    expect(ing.vec0['ok'], isTrue, reason: '镜像重建失败：${ing.vec0}');
-    expect(ing.scale, greaterThan(0));
-
-    final db = sqlite3.open('$corpusA/corpus.db');
-    try {
-      // schema 契约逐列（corpus_schema.sql 基准）
-      expect(
-          [for (final r in db.select('PRAGMA table_info("chunks")')) '${r.columnAt(1)}'],
-          kChunkFields);
-      expect(
-          [for (final r in db.select('PRAGMA table_info("vectors")')) '${r.columnAt(1)}'],
-          ['chunk_id', 'dim', 'vec', 'scale']);
-      expect(
-          [for (final r in db.select('PRAGMA table_info("chunk_state")')) '${r.columnAt(1)}'],
-          ['chunk_id', 'content_md5', 'model', 'ts']);
-      expect(
-          [for (final r in db.select('PRAGMA table_info("deck_state")')) '${r.columnAt(1)}'],
-          ['subject_id', 'ppt_id', 'source', 'file_path', 'file_md5',
-           'chunk_count', 'updated_at']);
-
-      // 行数：chunks/vectors/chunk_state/FTS/镜像
-      expect(_count(db, 'chunks'), 111);
-      expect(_count(db, 'vectors'), 111);
-      expect(_count(db, 'chunk_state'), 111);
-      expect(_count(db, 'chunks_fts'), 111);
-      expect(_count(db, kVec0Table), 111);
-      expect(_count(db, 'deck_state'), 2);
-
-      // 关键列：与两份金样逐字段一致（111 行 × 10 字段）
-      final golden = <String, Map<String, Object?>>{};
-      for (final m
-          in jsonlLinesAsMaps(goldenOms).followedBy(jsonlLinesAsMaps(goldenExam))) {
-        golden['${m['chunk_id']}'] = m;
+  test(
+    'ingestCorpus（drill）：schema/行数/关键列与金样一致 + 镜像/FTS/meta',
+    () async {
+      if (!corpusSourcesPresent()) {
+        // ignore: avoid_print
+        print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
+        return;
       }
-      expect(golden.length, 111);
-      final rows = db.select(
-          'SELECT chunk_id, subject_id, ppt_id, deck, page_start, page_end, '
-          'title, text, source_type, file_date FROM chunks');
-      expect(rows.length, 111);
-      for (final r in rows) {
-        final g = golden['${r.columnAt(0)}'];
-        expect(g, isNotNull, reason: '库内多出金样外 chunk：${r.columnAt(0)}');
+      final ing = await ingestCorpus(
+        '$corpusA/corpus.db',
+        '$corpusA/chunks.jsonl',
+        embed: const CorpusEmbedConfig.drill(),
+      );
+      expect(ing.rows, 111);
+      expect(ing.badLines, 0);
+      expect(ing.pending, 111);
+      expect(ing.embedded, 111);
+      expect(ing.resumed, 0);
+      expect(ing.prunedStale, 0);
+      expect(ing.prunedAbsent, 0);
+      expect(ing.batches, greaterThanOrEqualTo(1));
+      expect(ing.vec0['ok'], isTrue, reason: '镜像重建失败：${ing.vec0}');
+      expect(ing.scale, greaterThan(0));
+
+      final db = sqlite3.open('$corpusA/corpus.db');
+      try {
+        // schema 契约逐列（corpus_schema.sql 基准）
+        expect([
+          for (final r in db.select('PRAGMA table_info("chunks")'))
+            '${r.columnAt(1)}',
+        ], kChunkFields);
         expect(
-            ['${r.columnAt(1)}', '${r.columnAt(2)}', '${r.columnAt(3)}',
-             r.columnAt(4), r.columnAt(5), '${r.columnAt(6)}', '${r.columnAt(7)}',
-             '${r.columnAt(8)}', '${r.columnAt(9)}'],
-            [g!['subject_id'], g['ppt_id'], g['deck'], g['page_start'],
-             g['page_end'], g['title'], g['text'], g['source_type'],
-             g['file_date']],
-            reason: 'chunk ${r.columnAt(0)} 字段与金样不一致');
+          [
+            for (final r in db.select('PRAGMA table_info("vectors")'))
+              '${r.columnAt(1)}',
+          ],
+          ['chunk_id', 'dim', 'vec', 'scale'],
+        );
+        expect(
+          [
+            for (final r in db.select('PRAGMA table_info("chunk_state")'))
+              '${r.columnAt(1)}',
+          ],
+          ['chunk_id', 'content_md5', 'model', 'ts'],
+        );
+        expect(
+          [
+            for (final r in db.select('PRAGMA table_info("deck_state")'))
+              '${r.columnAt(1)}',
+          ],
+          [
+            'subject_id',
+            'ppt_id',
+            'source',
+            'file_path',
+            'file_md5',
+            'chunk_count',
+            'updated_at',
+          ],
+        );
+
+        // 行数：chunks/vectors/chunk_state/FTS/镜像
+        expect(_count(db, 'chunks'), 111);
+        expect(_count(db, 'vectors'), 111);
+        expect(_count(db, 'chunk_state'), 111);
+        expect(_count(db, 'chunks_fts'), 111);
+        expect(_count(db, kVec0Table), 111);
+        expect(_count(db, 'deck_state'), 2);
+
+        // 关键列：与两份金样逐字段一致（111 行 × 10 字段）
+        final golden = <String, Map<String, Object?>>{};
+        for (final m in jsonlLinesAsMaps(
+          goldenOms,
+        ).followedBy(jsonlLinesAsMaps(goldenExam))) {
+          golden['${m['chunk_id']}'] = m;
+        }
+        expect(golden.length, 111);
+        final rows = db.select(
+          'SELECT chunk_id, subject_id, ppt_id, deck, page_start, page_end, '
+          'title, text, source_type, file_date FROM chunks',
+        );
+        expect(rows.length, 111);
+        for (final r in rows) {
+          final g = golden['${r.columnAt(0)}'];
+          expect(g, isNotNull, reason: '库内多出金样外 chunk：${r.columnAt(0)}');
+          expect(
+            [
+              '${r.columnAt(1)}',
+              '${r.columnAt(2)}',
+              '${r.columnAt(3)}',
+              r.columnAt(4),
+              r.columnAt(5),
+              '${r.columnAt(6)}',
+              '${r.columnAt(7)}',
+              '${r.columnAt(8)}',
+              '${r.columnAt(9)}',
+            ],
+            [
+              g!['subject_id'],
+              g['ppt_id'],
+              g['deck'],
+              g['page_start'],
+              g['page_end'],
+              g['title'],
+              g['text'],
+              g['source_type'],
+              g['file_date'],
+            ],
+            reason: 'chunk ${r.columnAt(0)} 字段与金样不一致',
+          );
+        }
+
+        // vectors：int8×1024、每库一 scale、BLOB 长度 = dim
+        final scales = <double>{};
+        for (final r in db.select('SELECT dim, vec, scale FROM vectors')) {
+          expect(r.columnAt(0), 1024);
+          expect((r.columnAt(1) as Uint8List).length, 1024);
+          scales.add((r.columnAt(2) as num).toDouble());
+        }
+        expect(scales.length, 1, reason: '每库一 scale 破坏：$scales');
+
+        // vec_chunks 镜像：float32 4096B/行 + 归一化（自点积 = 1）
+        final first = db.select('SELECT v FROM $kVec0Table LIMIT 1').first;
+        final blob = first.columnAt(0) as Uint8List;
+        expect(blob.length, 4096);
+        final f = Float32List.view(
+          blob.buffer,
+          blob.offsetInBytes,
+          blob.lengthInBytes ~/ 4,
+        );
+        var n2 = 0.0;
+        for (final x in f) {
+          n2 += x * x;
+        }
+        expect(n2, closeTo(1.0, 1e-5), reason: '镜像向量未归一化');
+
+        final meta = <String, String>{};
+        for (final r in db.select('SELECT key, value FROM meta')) {
+          meta['${r.columnAt(0)}'] = '${r.columnAt(1)}';
+        }
+        expect(meta['embedding_model'], kLocalEmbedModel);
+        expect(meta['embedding_dim'], '1024');
+        expect(meta['fts_mode'], 'fts5_trigram');
+        expect(meta['corpus_kind'], 'dryrun-ingest');
+        expect(meta['vec0_dim'], '1024');
+        expect(meta['vec0_rows'], '111');
+        expect(meta['vec0_version'], 'dart-native-blob');
+        expect(meta['built_at'], isNotNull);
+        expect(meta['updated_at'], isNotNull);
+        expect(meta['quant_scale'], scales.first.toString());
+        expect(meta['last_ingest'], isNotNull);
+
+        // FTS 功能：金样文本三元组可命中其 chunk_id
+        final g0 = jsonlLinesAsMaps(goldenOms).first;
+        final m = RegExp(r'[\u4e00-\u9fff]{4}').firstMatch('${g0['text']}')!;
+        final ftsHit = db.select(
+          'SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH ?',
+          [m[0]!],
+        );
+        expect(
+          ftsHit.map((r) => '${r.columnAt(0)}'),
+          contains('${g0['chunk_id']}'),
+        );
+
+        // deck_state：tree 来源 + chunk_count
+        final decks = {
+          for (final r in db.select(
+            'SELECT subject_id, ppt_id, source, chunk_count FROM deck_state',
+          ))
+            ('${r.columnAt(0)}', '${r.columnAt(1)}'): (
+              source: '${r.columnAt(2)}',
+              count: r.columnAt(3) as int,
+            ),
+        };
+        expect(decks.length, 2);
+        expect(decks[('exam', pyStemOf(examPdfName))]!.source, 'tree');
+        expect(decks[('exam', pyStemOf(examPdfName))]!.count, 19);
+        expect(decks[('oms', pyStemOf(pyNameOf(srcOmsPptx)))]!.count, 92);
+      } finally {
+        db.dispose();
       }
-
-      // vectors：int8×1024、每库一 scale、BLOB 长度 = dim
-      final scales = <double>{};
-      for (final r in db.select('SELECT dim, vec, scale FROM vectors')) {
-        expect(r.columnAt(0), 1024);
-        expect((r.columnAt(1) as Uint8List).length, 1024);
-        scales.add((r.columnAt(2) as num).toDouble());
-      }
-      expect(scales.length, 1, reason: '每库一 scale 破坏：$scales');
-
-      // vec_chunks 镜像：float32 4096B/行 + 归一化（自点积 = 1）
-      final first =
-          db.select('SELECT v FROM $kVec0Table LIMIT 1').first;
-      final blob = first.columnAt(0) as Uint8List;
-      expect(blob.length, 4096);
-      final f = Float32List.view(
-          blob.buffer, blob.offsetInBytes, blob.lengthInBytes ~/ 4);
-      var n2 = 0.0;
-      for (final x in f) {
-        n2 += x * x;
-      }
-      expect(n2, closeTo(1.0, 1e-5), reason: '镜像向量未归一化');
-
-      final meta = <String, String>{};
-      for (final r in db.select('SELECT key, value FROM meta')) {
-        meta['${r.columnAt(0)}'] = '${r.columnAt(1)}';
-      }
-      expect(meta['embedding_model'], kLocalEmbedModel);
-      expect(meta['embedding_dim'], '1024');
-      expect(meta['fts_mode'], 'fts5_trigram');
-      expect(meta['corpus_kind'], 'dryrun-ingest');
-      expect(meta['vec0_dim'], '1024');
-      expect(meta['vec0_rows'], '111');
-      expect(meta['vec0_version'], 'dart-native-blob');
-      expect(meta['built_at'], isNotNull);
-      expect(meta['updated_at'], isNotNull);
-      expect(meta['quant_scale'], scales.first.toString());
-      expect(meta['last_ingest'], isNotNull);
-
-      // FTS 功能：金样文本三元组可命中其 chunk_id
-      final g0 = jsonlLinesAsMaps(goldenOms).first;
-      final m = RegExp(r'[\u4e00-\u9fff]{4}').firstMatch('${g0['text']}')!;
-      final ftsHit = db.select(
-          'SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH ?', [m[0]!]);
-      expect(ftsHit.map((r) => '${r.columnAt(0)}'),
-          contains('${g0['chunk_id']}'));
-
-      // deck_state：tree 来源 + chunk_count
-      final decks = {
-        for (final r in db.select(
-            'SELECT subject_id, ppt_id, source, chunk_count FROM deck_state'))
-          ('${r.columnAt(0)}', '${r.columnAt(1)}'): (
-            source: '${r.columnAt(2)}',
-            count: r.columnAt(3) as int,
-          ),
-      };
-      expect(decks.length, 2);
-      expect(decks[('exam', pyStemOf(examPdfName))]!.source, 'tree');
-      expect(decks[('exam', pyStemOf(examPdfName))]!.count, 19);
-      expect(decks[('oms', pyStemOf(pyNameOf(srcOmsPptx)))]!.count, 92);
-    } finally {
-      db.dispose();
-    }
-  }, timeout: const Timeout(Duration(minutes: 5)));
+    },
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
 
   // ----------------------------------------------------- 3. 幂等收敛 ----
 
-  test('幂等：重跑 extract/ingest 全收敛（跳过/续传/计数不变）', () async {
-    if (!corpusSourcesPresent()) {
-      // ignore: avoid_print
-      print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
-      return;
-    }
-    final before = File('$corpusA/chunks.jsonl').readAsBytesSync();
-    final ex2 = extractAllCorpus(treeA, '$corpusA/chunks.jsonl');
-    expect(ex2.changed, 0, reason: 'manifest 快速路径失效：重抽了文件');
-    expect(ex2.unchanged, 2);
-    expect(ex2.removed, 0);
-    expect(ex2.chunks, 111);
-    expect(File('$corpusA/chunks.jsonl').readAsBytesSync(), before,
-        reason: '重跑后 chunks.jsonl 字节级漂移');
+  test(
+    '幂等：重跑 extract/ingest 全收敛（跳过/续传/计数不变）',
+    () async {
+      if (!corpusSourcesPresent()) {
+        // ignore: avoid_print
+        print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
+        return;
+      }
+      final before = File('$corpusA/chunks.jsonl').readAsBytesSync();
+      final ex2 = extractAllCorpus(treeA, '$corpusA/chunks.jsonl');
+      expect(ex2.changed, 0, reason: 'manifest 快速路径失效：重抽了文件');
+      expect(ex2.unchanged, 2);
+      expect(ex2.removed, 0);
+      expect(ex2.chunks, 111);
+      expect(
+        File('$corpusA/chunks.jsonl').readAsBytesSync(),
+        before,
+        reason: '重跑后 chunks.jsonl 字节级漂移',
+      );
 
-    final ing2 = await ingestCorpus('$corpusA/corpus.db', '$corpusA/chunks.jsonl',
-        embed: const CorpusEmbedConfig.drill());
-    expect(ing2.rows, 111);
-    expect(ing2.pending, 0);
-    expect(ing2.resumed, 111, reason: 'chunk_state 续传失效：重复嵌入');
-    expect(ing2.embedded, 0);
-    expect(ing2.prunedStale, 0);
-    expect(ing2.prunedAbsent, 0);
+      final ing2 = await ingestCorpus(
+        '$corpusA/corpus.db',
+        '$corpusA/chunks.jsonl',
+        embed: const CorpusEmbedConfig.drill(),
+      );
+      expect(ing2.rows, 111);
+      expect(ing2.pending, 0);
+      expect(ing2.resumed, 111, reason: 'chunk_state 续传失效：重复嵌入');
+      expect(ing2.embedded, 0);
+      expect(ing2.prunedStale, 0);
+      expect(ing2.prunedAbsent, 0);
 
-    final db = sqlite3.open('$corpusA/corpus.db');
-    try {
-      expect(_count(db, 'chunks'), 111);
-      expect(_count(db, 'vectors'), 111);
-      expect(_count(db, kVec0Table), 111);
-      expect(_count(db, 'chunks_fts'), 111);
-    } finally {
-      db.dispose();
-    }
-  }, timeout: const Timeout(Duration(minutes: 5)));
+      final db = sqlite3.open('$corpusA/corpus.db');
+      try {
+        expect(_count(db, 'chunks'), 111);
+        expect(_count(db, 'vectors'), 111);
+        expect(_count(db, kVec0Table), 111);
+        expect(_count(db, 'chunks_fts'), 111);
+      } finally {
+        db.dispose();
+      }
+    },
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
 
   // ------------------------------------------- 4. 离线检索冒烟 + 两态等价 ----
 
@@ -373,8 +447,13 @@ void main() {
 
     final db = sqlite3.open('$corpusA/corpus.db');
     try {
-      final res =
-          await corpusSearch(db, query, k: 5, offline: true, rerank: false);
+      final res = await corpusSearch(
+        db,
+        query,
+        k: 5,
+        offline: true,
+        rerank: false,
+      );
       final hits = (res['results'] as List).cast<Map<String, Object?>>();
       expect(hits, isNotEmpty, reason: '离线检索零命中');
       expect(
@@ -383,21 +462,31 @@ void main() {
         reason: '金样来源 chunk 未进 top-3（query=$query）',
       );
       final notes = (res['notes'] as List).join('\n');
-      expect(notes, contains('vec0 距离全扫'),
-          reason: '镜像点积路未被消费（notes：$notes）');
+      expect(notes, contains('vec0 距离全扫'), reason: '镜像点积路未被消费（notes：$notes）');
 
       // 两态等价：vec0 off（int8 流式回退）与 on（镜像）同结果集 + 分数容差
-      final res2 = await corpusSearch(db, query,
-          k: 5, offline: true, rerank: false, vec0: false);
+      final res2 = await corpusSearch(
+        db,
+        query,
+        k: 5,
+        offline: true,
+        rerank: false,
+        vec0: false,
+      );
       final hits2 = (res2['results'] as List).cast<Map<String, Object?>>();
-      expect(hits2.map((h) => '${h['chunk_id']}'),
-          hits.map((h) => '${h['chunk_id']}'),
-          reason: '镜像/流式两态结果集不一致');
+      expect(
+        hits2.map((h) => '${h['chunk_id']}'),
+        hits.map((h) => '${h['chunk_id']}'),
+        reason: '镜像/流式两态结果集不一致',
+      );
       final byId = {for (final h in hits) '${h['chunk_id']}': h};
       for (final h2 in hits2) {
         final h1 = byId['${h2['chunk_id']}']!;
-        expect(((h2['vec'] as num) - (h1['vec'] as num)).abs(), lessThan(1e-3),
-            reason: 'cos 两态漂移超容差：${h2['chunk_id']}');
+        expect(
+          ((h2['vec'] as num) - (h1['vec'] as num)).abs(),
+          lessThan(1e-3),
+          reason: 'cos 两态漂移超容差：${h2['chunk_id']}',
+        );
       }
       expect((res2['notes'] as List).join('\n'), contains('流式扫描'));
     } finally {
@@ -447,10 +536,17 @@ void main() {
     final overlap = oldIds.intersection(newExamIds).length;
     final expectPrune = 19 - overlap;
 
-    final ing3 = await ingestCorpus('$corpusA/corpus.db', '$corpusA/chunks.jsonl',
-        embed: const CorpusEmbedConfig.drill(), pruneAbsent: true);
-    expect(ing3.prunedStale, expectPrune,
-        reason: 'deck 删旧插新剪除数不符（overlap=$overlap）');
+    final ing3 = await ingestCorpus(
+      '$corpusA/corpus.db',
+      '$corpusA/chunks.jsonl',
+      embed: const CorpusEmbedConfig.drill(),
+      pruneAbsent: true,
+    );
+    expect(
+      ing3.prunedStale,
+      expectPrune,
+      reason: 'deck 删旧插新剪除数不符（overlap=$overlap）',
+    );
     expect(ing3.resumed, 92, reason: 'oms deck 未变却重嵌');
     expect(ing3.embedded, newCount, reason: '换版 deck 应全量重嵌');
 
@@ -462,8 +558,11 @@ void main() {
       expect(_count(db, 'chunks_fts'), 92 + newCount);
       // 旧版独有 chunk_id 已全部消失
       for (final id in oldIds.difference(newExamIds)) {
-        expect(db.select('SELECT 1 FROM chunks WHERE chunk_id=?', [id]), isEmpty,
-            reason: '旧版 chunk 未删净：$id');
+        expect(
+          db.select('SELECT 1 FROM chunks WHERE chunk_id=?', [id]),
+          isEmpty,
+          reason: '旧版 chunk 未删净：$id',
+        );
       }
     } finally {
       db.dispose();
@@ -475,8 +574,12 @@ void main() {
     expect(ex4.removed, 1);
     expect(ex4.changed, 0);
     expect(ex4.chunks, 92);
-    final ing4 = await ingestCorpus('$corpusA/corpus.db', '$corpusA/chunks.jsonl',
-        embed: const CorpusEmbedConfig.drill(), pruneAbsent: true);
+    final ing4 = await ingestCorpus(
+      '$corpusA/corpus.db',
+      '$corpusA/chunks.jsonl',
+      embed: const CorpusEmbedConfig.drill(),
+      pruneAbsent: true,
+    );
     expect(ing4.prunedAbsent, newCount, reason: '树外 deck 剪除计数不符');
     expect(ing4.rows, 92);
 
@@ -529,8 +632,11 @@ void main() {
     for (final l in deck2) {
       final r = jsonDecode(l) as Map<String, dynamic>;
       expect(r['ppt_id'], 'x-2');
-      expect('${r['chunk_id']}', startsWith('exam:x-2:'),
-          reason: 'chunk_id 前缀替换失败（拆分后缀 -sN 应保留）');
+      expect(
+        '${r['chunk_id']}',
+        startsWith('exam:x-2:'),
+        reason: 'chunk_id 前缀替换失败（拆分后缀 -sN 应保留）',
+      );
     }
     // 前缀替换逐行等价：deck2 = deck1 换 ppt_id/chunk_id 前缀（其余字段同）
     for (var i = 0; i < deck1.length; i++) {
@@ -544,53 +650,146 @@ void main() {
 
   // -------------------------------------------------- 7. offline 建库 ----
 
-  test('offline 建库：无 key 不写向量 → 词面单路检索命中', () async {
-    if (!corpusSourcesPresent()) {
-      // ignore: avoid_print
-      print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
-      return;
-    }
-    final ing = await ingestCorpus('$corpusB/corpus.db', '$corpusB/chunks.jsonl',
-        embed: const CorpusEmbedConfig.offline());
-    final total = ing.rows;
-    expect(total, greaterThan(0));
-    expect(ing.embedded, 0);
-    expect(ing.resumed, 0);
-    expect(ing.vec0['ok'], isFalse, reason: '无向量行时镜像不应 ok');
+  test(
+    'offline 建库：无 key 不写向量 → 词面单路检索命中',
+    () async {
+      if (!corpusSourcesPresent()) {
+        // ignore: avoid_print
+        print('SKIP: 私有语料缺失（content/ 不在公开仓库）');
+        return;
+      }
+      final ing = await ingestCorpus(
+        '$corpusB/corpus.db',
+        '$corpusB/chunks.jsonl',
+        embed: const CorpusEmbedConfig.offline(),
+      );
+      final total = ing.rows;
+      expect(total, greaterThan(0));
+      expect(ing.embedded, 0);
+      expect(ing.resumed, 0);
+      expect(ing.vec0['ok'], isFalse, reason: '无向量行时镜像不应 ok');
 
-    final db = sqlite3.open('$corpusB/corpus.db');
+      final db = sqlite3.open('$corpusB/corpus.db');
+      try {
+        expect(_count(db, 'chunks'), total);
+        expect(_count(db, 'vectors'), 0);
+        expect(_count(db, 'chunks_fts'), total);
+        expect(_count(db, kVec0Table), -1, reason: '镜像表应保持删除');
+        final meta = <String, String>{};
+        for (final r in db.select('SELECT key, value FROM meta')) {
+          meta['${r.columnAt(0)}'] = '${r.columnAt(1)}';
+        }
+        expect(
+          meta['embedding_model'],
+          kEmbedModel,
+          reason: 'offline 也按目标模型口径写 meta（后续在线补嵌收敛）',
+        );
+        expect(meta['embedding_dim'], '1024');
+        expect(meta['fts_mode'], 'fts5_trigram');
+        expect(meta['corpus_kind'], 'offline-ingest');
+        expect(meta.containsKey('vec0_dim'), isFalse);
+
+        // 词面单路检索：offline 查询嵌入与库内 Qwen meta 互斥 → 向量路拦截
+        final g = RegExp(
+          r'[\u4e00-\u9fff]{6}',
+        ).firstMatch(File('$corpusB/chunks.jsonl').readAsStringSync())!;
+        final res = await corpusSearch(
+          db,
+          g[0]!,
+          k: 5,
+          offline: true,
+          rerank: false,
+        );
+        final hits = (res['results'] as List).cast<Map<String, Object?>>();
+        expect(hits, isNotEmpty, reason: '词面单路应命中非空');
+        final notes = (res['notes'] as List).join('\n');
+        expect(notes, contains('嵌入空间不兼容'), reason: '模型互斥未拦截向量路');
+        for (final h in hits) {
+          expect((h['vec'] as num) == 0, isTrue);
+        }
+      } finally {
+        db.dispose();
+      }
+    },
+    timeout: const Timeout(Duration(minutes: 5)),
+  );
+
+  // ------------------------------------------------- 8. resetVectors 彻底重建 ----
+  // v0.1.10 修复验收（不依赖私有语料）：「重建全部向量」= 库内全量 ∪ jsonl
+  // 新行（chunk_id 去重、jsonl 优先）。v1 缺陷：jsonl 非空时只重建 jsonl 行，
+  // 库内语料包导入的 chunks（不在 jsonl）被排除。本用例直接构造「库内 2 chunk
+  // + jsonl 1 chunk（同 id 覆盖）」场景：resetVectors=true 后 pending=2，
+  // vectors 全量重嵌、旧向量清空后不复现、jsonl 行内容优先。
+  test('resetVectors 彻底重建：库内全量 ∪ jsonl 新行合并，非 jsonl 行也重嵌', () async {
+    final dir = '${root.path}/resetVec';
+    Directory(dir).createSync(recursive: true);
+    final dbPath = '$dir/corpus.db';
+    final jsonlPath = '$dir/chunks.jsonl';
+
+    // 直接建 schema + 预置「库内有 chunk_b 但 jsonl 无该行」（模拟语料包导入）
+    final db = openCorpusDb(dbPath);
     try {
-      expect(_count(db, 'chunks'), total);
-      expect(_count(db, 'vectors'), 0);
-      expect(_count(db, 'chunks_fts'), total);
-      expect(_count(db, kVec0Table), -1, reason: '镜像表应保持删除');
-      final meta = <String, String>{};
-      for (final r in db.select('SELECT key, value FROM meta')) {
-        meta['${r.columnAt(0)}'] = '${r.columnAt(1)}';
-      }
-      expect(meta['embedding_model'], kEmbedModel,
-          reason: 'offline 也按目标模型口径写 meta（后续在线补嵌收敛）');
-      expect(meta['embedding_dim'], '1024');
-      expect(meta['fts_mode'], 'fts5_trigram');
-      expect(meta['corpus_kind'], 'offline-ingest');
-      expect(meta.containsKey('vec0_dim'), isFalse);
-
-      // 词面单路检索：offline 查询嵌入与库内 Qwen meta 互斥 → 向量路拦截
-      final g = RegExp(r'[\u4e00-\u9fff]{6}')
-          .firstMatch(File('$corpusB/chunks.jsonl').readAsStringSync())!;
-      final res =
-          await corpusSearch(db, g[0]!, k: 5, offline: true, rerank: false);
-      final hits = (res['results'] as List).cast<Map<String, Object?>>();
-      expect(hits, isNotEmpty, reason: '词面单路应命中非空');
-      final notes = (res['notes'] as List).join('\n');
-      expect(notes, contains('嵌入空间不兼容'), reason: '模型互斥未拦截向量路');
-      for (final h in hits) {
-        expect((h['vec'] as num) == 0, isTrue);
-      }
+      db.execute(
+        'CREATE TABLE IF NOT EXISTS chunks(chunk_id TEXT PRIMARY KEY, '
+        'subject_id TEXT, ppt_id TEXT, deck TEXT, page_start INTEGER, '
+        'page_end INTEGER, title TEXT, text TEXT, source_type TEXT, '
+        'file_date TEXT)',
+      );
+      db.execute(
+        'INSERT INTO chunks(chunk_id, subject_id, ppt_id, deck, '
+        'title, text, source_type) VALUES '
+        '(\'oms:a:p1\',\'oms\',\'a\',\'a\',\'t1\',\'库内行甲\',\'ppt\'),'
+        '(\'oms:b:p1\',\'oms\',\'b\',\'b\',\'t2\',\'库内行乙\',\'ppt\')',
+      );
     } finally {
       db.dispose();
     }
-  }, timeout: const Timeout(Duration(minutes: 5)));
+
+    // jsonl 只有 1 行（oms:a:p1，与库内同 id 但 text 不同=最新抽取内容）
+    File(jsonlPath).writeAsStringSync(
+      '{"chunk_id":"oms:a:p1","subject_id":"oms","ppt_id":"a","deck":"a",'
+      '"page_start":1,"page_end":1,"title":"t1new","text":"jsonl新内容",'
+      '"source_type":"ppt","file_date":""}\n',
+      encoding: utf8,
+    );
+
+    final ing = await ingestCorpus(
+      dbPath,
+      jsonlPath,
+      embed: const CorpusEmbedConfig.drill(),
+      resetVectors: true,
+      preserveDeckSource: true,
+    );
+    // 库内 2 行全部进入重建（jsonl 1 + 库内独有 1 → 合并 2）
+    expect(ing.pending, 2, reason: 'resetVectors 必须重建库内全量而非仅 jsonl 行');
+    expect(ing.embedded, 2);
+    expect(ing.resumed, 0);
+
+    final db2 = openCorpusDb(dbPath);
+    try {
+      expect(_count(db2, 'vectors'), 2);
+      // 同 id 行以 jsonl 新内容为准（upsert 生效）
+      final t = db2
+          .select("SELECT text FROM chunks WHERE chunk_id='oms:a:p1'")
+          .first
+          .columnAt(0);
+      expect(t, 'jsonl新内容');
+      final tB = db2
+          .select("SELECT text FROM chunks WHERE chunk_id='oms:b:p1'")
+          .first
+          .columnAt(0);
+      expect(tB, '库内行乙', reason: '库内独有行不得被重建流程剪除');
+      // deck_state 双 deck 均在（未误剪树内/库内行）
+      expect(
+        db2.select('SELECT count(*) FROM deck_state').first.columnAt(0),
+        2,
+      );
+      // FTS/镜像均重建且含库内独有行
+      expect(_count(db2, 'vec_chunks'), 2);
+    } finally {
+      db2.dispose();
+    }
+  });
 }
 
 // ------------------------------------------------------------ helpers ----
