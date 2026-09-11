@@ -25,7 +25,11 @@ import 'package:hengya/services/local/corpus/run_engine.dart'
     show RunOptions, SearchException;
 import 'package:hengya/services/local/corpus/run_llm.dart' show LlmException;
 import 'package:hengya/services/local/corpus/search_api.dart'
-    show kEmbedApiUrl, normalizeEmbedEndpoint;
+    show
+        kEmbedApiUrl,
+        kRerankApiUrl,
+        kRerankModelDefault,
+        normalizeEmbedEndpoint;
 import 'package:hengya/services/local/db.dart';
 import 'package:hengya/services/local/local_backend.dart';
 import 'package:hengya/services/local/pipeline_runner.dart';
@@ -673,10 +677,37 @@ void main() {
     db.settingSet('embedding.instructQuery', '1');
     expect(assembleEmbedConfig(db, apiKey: key)!.queryInstruct, isNull);
 
-    // 端到端：闭包装配形态不受影响（embed 注入 + 真实 model 透传）
+// 端到端：闭包装配形态不受影响（embed 注入 + 真实 model 透传）
     final wired = assembleEmbedder(db, apiKey: key);
     expect(wired.embed, isNotNull);
     expect(wired.embedModel, 'Qwen/Qwen3-VL-Embedding-8B');
+  });
+
+  test('reranker 两形态兼容：assembleEmbedConfig 装配 settings reranker.baseUrl', () async {
+    // 2026-09-11 修复：修复前 rerankUrl 恒走默认 kRerankApiUrl，用户设置页配的
+    // reranker.baseUrl/model 对运行时检索重排不生效。现统一经
+    // normalizeRerankEndpoint 规范化（基址 …/v1 → 补 /rerank）+ 透传 model。
+    final db = await openDb();
+    addTearDown(db.close);
+    const key = 'sk-embed-test-123456';
+    db.settingSet('embedding.model', 'Qwen/Qwen3-VL-Embedding-8B');
+
+    // 缺省：reranker 未配置 → 回退默认端点 + 默认模型
+    final def = assembleEmbedConfig(db, apiKey: key);
+    expect(def!.rerankUrl, kRerankApiUrl);
+    expect(def.rerankModel, kRerankModelDefault);
+
+    // 基址形态（…/v1，用户实际填的 404 根因）→ 自动补 /rerank
+    db.settingSet('reranker.baseUrl', 'https://api.siliconflow.cn/v1');
+    db.settingSet('reranker.model', 'Qwen/Qwen3-Reranker-4B');
+    final base = assembleEmbedConfig(db, apiKey: key);
+    expect(base!.rerankUrl, 'https://api.siliconflow.cn/v1/rerank');
+    expect(base.rerankModel, 'Qwen/Qwen3-Reranker-4B');
+
+    // 完整端点形态 → 原样（幂等不重复补）
+    db.settingSet('reranker.baseUrl', 'https://api.siliconflow.cn/v1/rerank');
+    final full = assembleEmbedConfig(db, apiKey: key);
+    expect(full!.rerankUrl, 'https://api.siliconflow.cn/v1/rerank');
   });
 
   test('#8 查询嵌入异常 → 降级词面单路出真结果 + notes 标注（不炸穿）', () async {

@@ -43,10 +43,14 @@ void main() {
 
   // ------------------------------------------------------ 造包工具 ----
 
-  /// 最小合成 corpus.db（chunks/meta/outline_entries；model 为空串 =
-  /// offline 建库形态，不写 meta.embedding_model）。
+/// 最小合成 corpus.db（chunks/meta/outline_entries；model 为空串 =
+  /// offline 建库形态，不写 meta.embedding_model）。[deckState] 非空时建
+  /// deck_state 表并插入 (subject_id, ppt_id, source) 行——供"导入后
+  /// source 打 package 标记"测试（bug 修复：pruneAbsent 不再剪包 deck）。
   void buildMiniCorpusDb(String path,
-      {String model = 'TestEmbedModel', int chunkCount = 2}) {
+      {String model = 'TestEmbedModel',
+      int chunkCount = 2,
+      List<(String, String, String)> deckState = const []}) {
     // 同名旧件先删（同测试内多次造包时路径复用）
     final old = File(path);
     if (old.existsSync()) old.deleteSync();
@@ -63,6 +67,21 @@ void main() {
       'level TEXT, part TEXT, subject TEXT, subject_name TEXT,'
       ' unit TEXT, subtopic TEXT)',
     );
+    if (deckState.isNotEmpty) {
+      db.execute(
+        'CREATE TABLE deck_state ('
+        'subject_id TEXT NOT NULL, ppt_id TEXT NOT NULL, '
+        "source TEXT NOT NULL DEFAULT 'tree', file_path TEXT, file_md5 TEXT, "
+        'chunk_count INTEGER NOT NULL DEFAULT 0, updated_at TEXT, '
+        'PRIMARY KEY (subject_id, ppt_id))',
+      );
+      for (final (subj, ppt, src) in deckState) {
+        db.execute(
+          'INSERT INTO deck_state VALUES (?, ?, ?, NULL, NULL, 0, NULL)',
+          [subj, ppt, src],
+        );
+      }
+    }
     if (model.isNotEmpty) {
       db.execute("INSERT INTO meta VALUES ('embedding_model', ?)", [model]);
       db.execute("INSERT INTO meta VALUES ('embedding_dim', '1024')");
@@ -103,7 +122,7 @@ void main() {
   /// 造测试包 zip。[flat]=true 走无 corpus/ 前缀布局；[rootManifest]=true
   /// 时 manifest 放根级且名 'manifest'（宽容解析验收）；[withCorpusDb]=false
   /// 造缺件包。
-  String buildPackageZip({
+String buildPackageZip({
     String model = 'TestEmbedModel',
     String appMinVersion = '1.0.0',
     bool flat = false,
@@ -111,9 +130,10 @@ void main() {
     bool withCorpusDb = true,
     Map<String, Object> pkgOverride = const {},
     Map<String, String> extra = const {},
+    List<(String, String, String)> deckState = const [],
   }) {
     final dbPath = '${tmp.path}/pkg-corpus.db';
-    buildMiniCorpusDb(dbPath, model: model);
+    buildMiniCorpusDb(dbPath, model: model, deckState: deckState);
     String p(String rel) => flat ? rel : 'corpus/$rel';
     final arc = Archive();
     if (withCorpusDb) {
@@ -354,9 +374,38 @@ final minHigh = buildPackageZip(appMinVersion: '99.0.0');
       expect((oms['chapters'] as List), isEmpty);
       expect(oms['textbook'], isNull, reason: 'ppt-only 科目无罗盘占位');
       expect(progressEntryOf(prog, 'derm'), isNotNull);
-      // 临时目录自清
+// 临时目录自清
       expect(tmpDirs(dataDir.path).where((p) => p.contains('.import-tmp')),
           isEmpty);
+    });
+
+    test('包 deck 豁免标记：导入后 deck_state.source 全部改 package（不剪除）',
+        () async {
+      // 2026-09-11 bug 修复：包库 deck_source 原为 'tree'，而建库
+      // pruneAbsent 只剪 source='tree' 且不在本机 incoming 树的 deck——
+      // 导入后再建库会把包内全部 deck 当"树外"剪掉（实证 13 科全灭）。
+      // 导入后应统一标记为 'package'（prune 豁免）。
+      final dataDir = Directory('${tmp.path}/pkgdecks')..createSync();
+      final zip = buildPackageZip(deckState: const [
+        ('endo', 'ppt-endo-1', 'tree'),
+        ('derm', 'ppt-derm-1', 'tree'),
+      ]);
+      final r = await mgr.importPackage(dataDir.path, zip);
+      expect(r.backupPath, isNull);
+
+      final db = sqlite3.open('${dataDir.path}/corpus/corpus.db');
+      try {
+        final rows = db.select(
+          'SELECT subject_id, ppt_id, source FROM deck_state ORDER BY subject_id',
+        );
+        expect(rows.length, 2);
+        for (final row in rows) {
+          expect(row['source'], 'package',
+              reason: '导入后包 deck 必须标记 package（建库 prune 豁免）');
+        }
+      } finally {
+        db.dispose();
+      }
     });
 
     test('根级 manifest 宽容映射成 extract_manifest.json', () async {

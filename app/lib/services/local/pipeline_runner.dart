@@ -124,7 +124,12 @@ import 'corpus/run_llm.dart'
         LlmFailoverEvent,
         failoverLlmChatFn;
 import 'corpus/search_api.dart'
-    show SiliconFlowConfig, normalizeEmbedEndpoint, siliconFlowEmbedder;
+    show
+        SiliconFlowConfig,
+        kRerankModelDefault,
+        normalizeEmbedEndpoint,
+        normalizeRerankEndpoint,
+        siliconFlowEmbedder;
 import 'corpus/search_engine.dart' show EmbedQueryFn, corpusSearch;
 import 'db.dart';
 import 'isolate_runner.dart';
@@ -1304,8 +1309,10 @@ SiliconFlowConfig? assembleEmbedConfig(Db db, {String? apiKey}) {
   if (key.isEmpty || model.isEmpty) {
     return null;
   }
-  final baseUrl = db.settingGet('embedding.baseUrl') ?? '';
+final baseUrl = db.settingGet('embedding.baseUrl') ?? '';
   final instructOff = (db.settingGet('embedding.instructQuery') ?? '') == '0';
+  final rerankBase = db.settingGet('reranker.baseUrl') ?? '';
+  final rerankModel = db.settingGet('reranker.model') ?? '';
   return SiliconFlowConfig(
     apiKey: key,
     // #6①（2026-09-07）：settings 存基址形态（…/v1）与完整端点形态
@@ -1317,6 +1324,12 @@ SiliconFlowConfig? assembleEmbedConfig(Db db, {String? apiKey}) {
     embedBaseUrl: normalizeEmbedEndpoint(baseUrl),
     embedModel: model,
     queryInstruct: instructOff ? '' : null,
+    // 2026-09-11：reranker 同样两形态兼容（对齐 embed——基址 …/v1 经
+    // normalizeRerankEndpoint 补 /rerank；空回退默认端点）。修复前本字段
+    // 恒走默认 kRerankApiUrl → 用户设置页配的 reranker.baseUrl/model 对
+    // 运行时检索重排完全不生效（只影响设置页测试连接展示）。
+    rerankUrl: normalizeRerankEndpoint(rerankBase),
+    rerankModel: rerankModel.isEmpty ? kRerankModelDefault : rerankModel,
   );
 }
 

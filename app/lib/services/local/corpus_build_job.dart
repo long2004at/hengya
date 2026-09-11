@@ -71,10 +71,11 @@ class CorpusBuildRequest {
     this.baseUrl,
     this.dim,
     this.batch = kDefaultBatch,
-    this.maxFileMb,
+this.maxFileMb,
     this.pdfMaxFileMb,
     this.docxMaxFileMb,
     this.forceFull = false,
+    this.resetVectors = false,
   });
 
   /// 语料树根目录（第一层子目录名 = 科目短码；xxx-textbook / xxx-exam /
@@ -119,7 +120,12 @@ class CorpusBuildRequest {
   final int? docxMaxFileMb;
 
   /// true → 无视 manifest 增量全量重抽。
-  final bool forceFull;
+final bool forceFull;
+
+  /// 强制向量全量重建（2026-09-11「重建全部向量」按钮）：清空 vectors +
+  /// chunk_state 后按当前嵌入配置全量重嵌。语义 = 覆盖层：0-chunks 时
+  /// 不再早退，转走 ingestCorpus 的库内自嵌（incoming 树空也可重嵌）。
+  final bool resetVectors;
 }
 
 // ------------------------------------------------------------- 结果 ----
@@ -304,8 +310,10 @@ void corpusBuildWorkerEntry(IsolateWorkerBoot boot) {
       }
     }
 
-    // 0 chunks：不 ingest（与 buildCorpus 同款告警路径；仅大纲入库除外）
-    if (ex.chunks == 0) {
+// 0 chunks：非 resetVectors 直接 return（与 buildCorpus 同款告警路径；
+    // 仅大纲入库除外）。resetVectors=true → 不早退：转 ingestCorpus
+    //（其库内自嵌从 chunks 表读全部行重新嵌入——incoming 空树也重嵌）。
+    if (ex.chunks == 0 && !req.resetVectors) {
       if (ex.outlineFiles.isEmpty) {
         notes.add(
           '抽取结果 0 chunks——检查 ${req.inputPath} 下是否放了 '
@@ -342,13 +350,14 @@ void corpusBuildWorkerEntry(IsolateWorkerBoot boot) {
     }
 
     ctx.checkCancelled();
-    final ing = await ingestCorpus(
+final ing = await ingestCorpus(
       req.corpusDbPath,
       chunksJsonlPath,
       embed: embed,
       batchSize: req.batch,
       source: 'tree',
       pruneAbsent: true,
+      resetVectors: req.resetVectors,
       progress: (m) => relay('ingest', m),
     );
     ctx.emit(

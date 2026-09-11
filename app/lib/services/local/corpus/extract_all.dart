@@ -1376,8 +1376,11 @@ Future<IngestStats> ingestCorpus(
   final model = embed.effectiveModel;
   final dim = embed.effectiveDim;
 
-  final (rows, badLines) = loadChunksJsonl(inputPath);
-  if (rows.isEmpty) {
+final (rows, badLines) = loadChunksJsonl(inputPath);
+  // 0 行：仅 resetVectors=true 时允许走库内自嵌（见 ②'）；否则维持
+  // 原契约抛错（正常 ingest 必须有 jsonl 源行——两个上游调用点
+  // buildCorpus/worker 均有 0-chunks 守卫，此抛错为直接调用方的兜底）。
+  if (rows.isEmpty && !resetVectors) {
     throw StateError('chunks.jsonl 无有效行（坏行 $badLines）：$inputPath');
   }
   final stats = IngestStats(
@@ -1419,9 +1422,49 @@ Future<IngestStats> ingestCorpus(
       onProgress('维度切换（$oldDim → $dim）：向量全量重建');
     }
 
+    // ②' 库内自嵌（2026-09-11 强制重建语义）：resetVectors=true 且
+    // chunks.jsonl 无行（incoming 树为空——典型：导入语料包后库里有
+    // chunks 但本机无源文件）→ 从库内 chunks 表读出全部行作为嵌入源，
+    // 向量按当前 embedding 配置全量重建。rows 由此非空，流过
+    // ③ deck 幂等 / ④ upsert 时 ON CONFLICT 全命中、text 原样，
+    // ⑥ 向量全量重嵌——**chunks 保留、仅向量重建**（与 0-chunks 早退
+    // 语义区分：库内自嵌 ≠ 新增语料，prune 不会剪除任何 deck）。
+    var rowsEff = rows;
+    if (rows.isEmpty && resetVectors && oldModel != null) {
+      final fromDb = <Map<String, Object?>>[];
+      for (final r in db.select(
+        'SELECT chunk_id, subject_id, ppt_id, deck, page_start, page_end, '
+        'title, text, source_type, file_date FROM chunks',
+      )) {
+        final cid = '${r['chunk_id']}';
+        final text = '${r['text']}';
+        if (cid.isEmpty || text.isEmpty) continue;
+        fromDb.add({
+          'chunk_id': cid,
+          'subject_id': '${r['subject_id'] ?? 'unknown'}',
+          'ppt_id': '${r['ppt_id'] ?? cid}',
+          'deck': '${r['deck'] ?? ''}'.isEmpty
+              ? '${r['ppt_id'] ?? cid}'
+              : '${r['deck']}',
+          'page_start': r['page_start'] as int? ?? 0,
+          'page_end': r['page_end'] as int? ?? 0,
+          'title': '${r['title'] ?? ''}',
+          'text': text,
+          'source_type': '${r['source_type'] ?? 'ppt'}',
+          'file_date': '${r['file_date'] ?? ''}',
+        });
+      }
+if (fromDb.isNotEmpty) {
+        rowsEff = fromDb;
+        // stats.rows 保持 jsonl 行数（final 字段；0 = incoming 无源文件的
+        // 诚实语义——库内自嵌行数经 progress 消息透出）
+        onProgress('库内自嵌：incoming 树为空，按库内 ${rowsEff.length} chunks 重新嵌入');
+      }
+    }
+
     // ③ deck 幂等：jsonl 内 deck 的陈旧 chunk 删除 + 可选树外 deck 剪除
     final decks = <(String, String), List<Map<String, Object?>>>{};
-    for (final r in rows) {
+    for (final r in rowsEff) {
       decks
           .putIfAbsent(('${r['subject_id']}', '${r['ppt_id']}'), () => [])
           .add(r);
@@ -1497,8 +1540,8 @@ Future<IngestStats> ingestCorpus(
         'text=excluded.text, source_type=excluded.source_type, '
         'file_date=excluded.file_date',
       );
-      try {
-        for (final r in rows) {
+try {
+        for (final r in rowsEff) {
           up.execute([for (final f in kChunkFields) r[f]]);
         }
       } finally {
@@ -1541,8 +1584,8 @@ Future<IngestStats> ingestCorpus(
       for (final r in db.select('SELECT chunk_id FROM vectors'))
         '${r.columnAt(0)}',
     };
-    final pending = <(Map<String, Object?>, String)>[];
-    for (final r in rows) {
+final pending = <(Map<String, Object?>, String)>[];
+    for (final r in rowsEff) {
       final cid = '${r['chunk_id']}';
       final cMd5 = contentMd5(model, contentOf(r));
       if (done[cid] == cMd5 && haveVec.contains(cid)) {

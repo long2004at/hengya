@@ -2325,8 +2325,74 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
         ],
       ),
     );
-    if (go != true) return;
+if (go != true) return;
     await _start();
+  }
+
+  /// 「重建全部向量」确认（2026-09-11 强制重建入口）：清空现有向量 +
+  /// checkpoint 后按当前 embedding 配置全量重嵌。incoming 无待处理文件
+  /// 也能重建（库内自嵌——从 chunks 表读全部行重算；导入语料包场景）。
+  Future<void> _confirmAndResetVectors() async {
+    final st = _st;
+    if (st == null || _busyTrigger) return;
+    final modeLabel = _modeLabel(st);
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dlgCtx) => AlertDialog(
+        title: const Text('重建全部向量？'),
+        content: Text(
+          '将清空现有向量并全部重新嵌入（$modeLabel），'
+          '语料文本与卡片不受影响。\n\n'
+          '适用场景：导入语料包后向量模型不一致、检索不出结果、'
+          '或向量疑似损坏。\n'
+          '${st.modePreview == 'online' ? '\n在线嵌入会消耗少量 API 额度。' : ''}\n'
+          '后台运行，期间可正常使用 App、可离开本页。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dlgCtx, true),
+            child: const Text('重建'),
+          ),
+        ],
+      ),
+    );
+    if (go != true) return;
+    await _startResetVectors();
+  }
+
+  /// 触发强制重建（resetVectors=true）
+  Future<void> _startResetVectors() async {
+    if (_busyTrigger) return;
+    setState(() => _busyTrigger = true);
+    try {
+      final res = await ApiClient.instance
+          .triggerCorpusBuild(resetVectors: true);
+      if (!mounted) return;
+      if (res.triggered) {
+        TopToast.show(
+          context,
+          res.note ?? '已在后台开始重建向量',
+          type: TopToastType.success,
+        );
+      } else {
+        TopToast.show(
+          context,
+          res.note ?? '建库已在进行中',
+          type: TopToastType.info,
+        );
+      }
+      await _load();
+    } on ApiException catch (e) {
+      if (mounted) {
+        TopToast.show(context, '触发失败：${e.message}', type: TopToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _busyTrigger = false);
+    }
   }
 
   Future<void> _start() async {
@@ -2535,7 +2601,7 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
           _summaryView(scheme, st.result!),
           const SizedBox(height: 10),
         ],
-        // ---- 开始建库（待处理为空时禁用——构建语义 = 消费待处理队列） ----
+// ---- 开始建库（待处理为空时禁用——构建语义 = 消费待处理队列） ----
         SizedBox(
           width: double.infinity,
           child: FilledButton.icon(
@@ -2544,6 +2610,17 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
                 : _confirmAndStart,
             icon: const Icon(Icons.construction_rounded, size: 18),
             label: Text(_busyTrigger ? '启动中…' : '开始建库'),
+          ),
+        ),
+        // ---- 重建全部向量（2026-09-11 强制重建；无待处理也可用——
+        // 导入语料包后向量不符/检索无结果的修复入口，库内自嵌） ----
+        const SizedBox(height: 6),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _busyTrigger ? null : _confirmAndResetVectors,
+            icon: const Icon(Icons.refresh_rounded, size: 18),
+            label: Text(_busyTrigger ? '启动中…' : '重建全部向量'),
           ),
         ),
       ],

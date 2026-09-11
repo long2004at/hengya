@@ -486,8 +486,14 @@ packageBytes: f.lengthSync(),
             '本机向量模型「$cur」与语料包「${summary.modelName}」不一致，'
                 '向量检索路将不可用（词面检索不受影响；可在 AI 服务配置中改一致）';
       }
-      final (progressCreated, progressSynced) =
+final (progressCreated, progressSynced) =
           _syncProgress(corpusDir.path, summary.subjects);
+      // ④ 包 deck 豁免剪除（2026-09-11 bug 修复）：包库 deck_state.source
+      // 原为 'tree'（建包时写入），而 ingestCorpus 的 pruneAbsent 恰好只剪
+      // source='tree' 且不在本机 incoming 树的 deck——导入后再建库会把包内
+      // 全部 deck 当"树外"剪掉（实证：13 科/7869 块被剪到只剩手动课件）。
+      // 统一改成 'package' → prune 天然豁免（包库与 incoming 树无关联）。
+      _markPackageDecks(corpusDir.path);
       db.bumpDataVersion();
       return CorpusImportResult(
         summary: summary,
@@ -644,6 +650,31 @@ packageBytes: f.lengthSync(),
         f.copySync(dest.path);
         backed.add(rel);
       }
+    }
+}
+
+  /// 包库 deck 豁免标记（2026-09-11 bug 修复）：把 corpus.db 的
+  /// deck_state.source 从 'tree' 改为 'package'。原因：ingestCorpus 的
+  /// pruneAbsent 只剪 source='tree' 且不在本机 incoming 树的 deck——包库
+  /// 的源文件从不进 incoming（导入仅落 corpus.db/toc/manifest），导入后再
+  /// 触发建库会把全部包 deck 当"树外"剪除（实证：13 科全灭只剩手动课件）。
+  /// 'package' 标记使 prune 天然豁免。仅改 source 列，不碰 chunks/向量/
+  /// 其他字段；库已损坏/无 deck_state 表 → 静默跳过（不阻断导入成功）。
+  void _markPackageDecks(String corpusDir) {
+    try {
+      final dbFile = File('$corpusDir/$_corpusDbName');
+      if (!dbFile.existsSync()) return;
+      final db = sqlite3.open(dbFile.path);
+      try {
+        db.execute(
+          "UPDATE deck_state SET source='package' WHERE source='tree'",
+        );
+      } finally {
+        db.dispose();
+      }
+    } catch (_) {
+      // 打不开/缺表 → 保留原状；后续建库 prune 会按旧语义混淆（最坏回退
+      // 到剪除）——但导入本身已成功，标记为 best-effort，不阻断。
     }
   }
 

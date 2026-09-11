@@ -52,6 +52,7 @@ import 'corpus/progress_db.dart'
         setSubjectChapters,
         skippedChaptersOf,
         tocSidecarSubjects;
+import 'corpus/search_api.dart' show normalizeRerankEndpoint;
 import 'corpus_build_job.dart';
 import 'db.dart';
 import 'isolate_runner.dart';
@@ -1043,7 +1044,8 @@ final aiPut = RegExp(
         ..._corpusBuildStateView(),
       };
     }
-    final explicit = _str(m['mode']).trim().toLowerCase();
+final explicit = _str(m['mode']).trim().toLowerCase();
+    final resetVectors = m['resetVectors'] == true;
     final (autoMode, autoKey, autoModel, autoBase) = _selectBuildMode(db);
     final CorpusEmbedMode mode;
     switch (explicit) {
@@ -1072,9 +1074,12 @@ final aiPut = RegExp(
       corpusDbPath: '$_corpusDir/corpus.db',
       mode: mode,
       // key 只在 online 进参数；offline 不写向量、drill 忽略——都不携带
-      apiKey: mode == CorpusEmbedMode.online ? autoKey : null,
+apiKey: mode == CorpusEmbedMode.online ? autoKey : null,
       model: autoModel, // offline/online 落 meta.embedding_model；drill 强制本地款
       baseUrl: mode == CorpusEmbedMode.online ? autoBase : null,
+      // 2026-09-11「重建全部向量」：清空向量后全量重嵌（incoming 无源文件
+      // 时走库内自嵌——从 chunks 表读全部行重建）
+      resetVectors: resetVectors,
     );
     _corpusBuildActive = true;
     _lastBuildMode = mode.name;
@@ -1090,9 +1095,11 @@ final aiPut = RegExp(
       'ok': true,
       'triggered': true,
       'mode': mode.name,
-      'note': mode == CorpusEmbedMode.online
-          ? '已在后台开始建库（在线嵌入，消耗少量 API 额度）'
-          : '已在后台开始建库（后台运行，期间可正常使用 App）',
+'note': resetVectors
+          ? '已在后台开始重建全部向量（清空后全量重嵌，消耗少量 API 额度）'
+          : mode == CorpusEmbedMode.online
+              ? '已在后台开始建库（在线嵌入，消耗少量 API 额度）'
+              : '已在后台开始建库（后台运行，期间可正常使用 App）',
     };
   }
 
@@ -1341,11 +1348,15 @@ final aiPut = RegExp(
     }
     final t0 = DateTime.now();
     try {
-      // reranker：经 [rerankProbeOverride]（测试注入）或 [_rerankProbeReal]
+// reranker：经 [rerankProbeOverride]（测试注入）或 [_rerankProbeReal]
       //（真 HttpClient）发最小探测——不与 llm/embedding 共享 client，便于 mock
       if (svc == 'reranker') {
+        // 基址→完整端点补全（对齐 embedding 的 normalize 先例，2026-09-11）：
+        // settings 存基址形态（…/v1）时直接 POST …/v1 恒 404（SiliconFlow
+        // 根路径无路由）——统一经 normalizeRerankEndpoint 规范成 /v1/rerank。
+        final probeUrl = normalizeRerankEndpoint(baseUrl);
         final probe = rerankProbeOverride ?? _rerankProbeReal;
-        final r = await probe(baseUrl, apiKey, model);
+        final r = await probe(probeUrl, apiKey, model);
         var ok = r.status == 200;
         var message = '连接正常';
         if (ok) {
