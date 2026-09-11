@@ -55,6 +55,7 @@ import 'corpus/progress_db.dart'
 import 'corpus/search_api.dart' show normalizeRerankEndpoint;
 import 'corpus_build_job.dart';
 import 'db.dart';
+import 'app_log.dart';
 import 'isolate_runner.dart';
 
 class LocalBackend {
@@ -1074,7 +1075,7 @@ final explicit = _str(m['mode']).trim().toLowerCase();
       corpusDbPath: '$_corpusDir/corpus.db',
       mode: mode,
       // key 只在 online 进参数；offline 不写向量、drill 忽略——都不携带
-apiKey: mode == CorpusEmbedMode.online ? autoKey : null,
+      apiKey: mode == CorpusEmbedMode.online ? autoKey : null,
       model: autoModel, // offline/online 落 meta.embedding_model；drill 强制本地款
       baseUrl: mode == CorpusEmbedMode.online ? autoBase : null,
       // 2026-09-11「重建全部向量」：清空向量后全量重嵌（incoming 无源文件
@@ -1125,9 +1126,18 @@ apiKey: mode == CorpusEmbedMode.online ? autoKey : null,
         return;
       }
     }
-    final sub = progress.listen((e) {
+final sub = progress.listen((e) {
       _lastBuildEvent = e;
       _emitCorpusBuildState();
+      // worker 日志事件（stage='log' 经 wire 回流）→ AppLog（worker 内
+      // AppLog 无 dataDir 不落盘，必须经事件回流；见 isolate_runner.dart）
+      if (e.stage == 'log') {
+        AppLog.instance.log(
+          _buildLogLevel(e.level) ?? AppLogLevel.debug,
+          (e.tag == null || e.tag!.isEmpty) ? 'corpus-build' : e.tag!,
+          e.message,
+        );
+      }
     });
     try {
       _lastBuildResult = await done;
@@ -1138,15 +1148,32 @@ apiKey: mode == CorpusEmbedMode.online ? autoKey : null,
       _initCompassFromToc();
     } on IsolateCancelledException {
       _lastBuildCancelled = true;
+      AppLog.instance.log(
+          AppLogLevel.warn, 'corpus-build', '建库已取消（收件箱保留）；上次结果键归零');
     } on IsolateJobException catch (e) {
       _lastBuildError = e.message; // 不含 key（上游协议守卫）；堆栈不进 UI 帧
+      // 关键失败如实落 AppLog（嵌入 API 连续失败中止等 worker 错误文本）
+      AppLog.instance.log(
+          AppLogLevel.error, 'corpus-build', '建库失败：${e.message}');
     } catch (e) {
       _lastBuildError = '$e';
+      AppLog.instance.log(
+          AppLogLevel.error, 'corpus-build', '建库失败：$e');
     } finally {
       unawaited(sub.cancel());
       _finishCorpusBuildJob();
     }
   }
+
+  /// wire 级别字符串 → AppLog 级别（未知值回退 debug，防御性；与
+  /// pipeline_runner 侧 _logLevelByName 同款映射，保持日志级口径一致）。
+  static AppLogLevel? _buildLogLevel(String? level) => switch (level) {
+        'debug' => AppLogLevel.debug,
+        'info' => AppLogLevel.info,
+        'warn' => AppLogLevel.warn,
+        'error' => AppLogLevel.error,
+        _ => null,
+      };
 
   void _finishCorpusBuildJob() {
     _corpusBuildActive = false;

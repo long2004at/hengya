@@ -26,6 +26,7 @@ import 'package:hengya/services/local/corpus/extract_all.dart'
     show CorpusEmbedMode;
 import 'package:hengya/services/local/corpus/search_engine.dart'
     show corpusSearch, kVec0Table;
+import 'package:hengya/services/local/app_log.dart';
 import 'package:hengya/services/local/corpus_build_job.dart';
 import 'package:hengya/services/local/isolate_runner.dart';
 import 'package:hengya/services/local/local_backend.dart';
@@ -69,6 +70,20 @@ void _loopWorkerEntry(IsolateWorkerBoot boot) {
       ctx.emit(IsolateProgressEvent(stage: 'loop', message: 'tick ${i++}'));
       await Future<void>.delayed(const Duration(milliseconds: 5));
     }
+  });
+}
+
+/// 日志回流（node-1）：worker 内经 ctx.log 发 info/warn/error 三级日志事件
+/// + 1 条普通进度事件收尾（验证 stage='log' 与普通进度混杂时的 wire 解码）。
+/// worker isolate 内 AppLog 无 dataDir 不落盘——日志必须经事件回流主 isolate，
+/// 主侧按 stage=='log' 语义写 AppLog（见 isolate_runner.dart 文件头）。
+void _logWorkerEntry(IsolateWorkerBoot boot) {
+  isolateWorkerRun(boot, (ctx) async {
+    ctx.log('info', 'weekly', '周扫装配完成（worker 内日志事件）');
+    ctx.log('warn', 'weekly', '周扫检索降级（废弃章节）：corpus.db 缺 -exam 镜像');
+    ctx.log('error', 'llm', '周扫 LLM 失败：模拟周扫宕机');
+    ctx.emit(IsolateProgressEvent(stage: 'done', message: '日志事件已发完'));
+    return <String, Object?>{'ok': true};
   });
 }
 
@@ -280,6 +295,61 @@ void main() {
     // worker 运行位已释放
     expect(IsolateRunner.instance.isRunning(pipelineCatchupJobId), isFalse);
   }, timeout: const Timeout(Duration(minutes: 5)));
+
+  test('日志回流（node-1）：worker ctx.log → wire 解码 → 主 isolate 落盘 AppLog 可读回',
+      () async {
+    await LocalBackend.instance.resetForTest();
+    LocalBackend.instance.init(tmp.path); // dataDir 就位：AppLog 落盘点成立
+
+    final handle = await IsolateRunner.instance.start<Map<String, Object?>>(
+      jobId: 'log-echo-test',
+      workerEntry: _logWorkerEntry,
+    );
+    final events = <IsolateProgressEvent>[];
+    final sub = handle.progress.listen(events.add);
+    final result = await handle.done;
+    // done 与流事件送达存在微任务差——等待 drain 后再断言
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    await sub.cancel();
+
+    expect(result['ok'], true);
+    // ① wire 协议：stage='log' 事件带 level/tag 回传；普通进度事件不受污染
+    final logs = events.where((e) => e.stage == 'log').toList();
+    expect(logs.length, 3, reason: 'worker 发 3 条日志事件');
+    expect(events.every((e) => e.level == null || e.stage == 'log'), isTrue,
+        reason: 'level/tag 仅 log 事件携带（协议守卫）');
+    expect(
+      logs.map((e) => '${e.level}/${e.tag}').toSet(),
+      {'info/weekly', 'warn/weekly', 'error/llm'},
+    );
+
+    // ② 主 isolate 侧按 stage=='log' 语义写 AppLog（与 local_backend
+    //    _buildLogLevel / pipeline_runner _logWorkerEvent 同款映射）
+    for (final e in logs) {
+      AppLog.instance.log(
+        switch (e.level) {
+          'warn' => AppLogLevel.warn,
+          'error' => AppLogLevel.error,
+          _ => AppLogLevel.info,
+        },
+        (e.tag == null || e.tag!.isEmpty) ? 'corpus-build' : e.tag!,
+        e.message,
+      );
+    }
+final tail = await AppLog.instance.readTail(maxLines: 50);
+    expect(tail, contains('[info] [weekly] 周扫装配完成（worker 内日志事件）'),
+        reason: 'info 日志已落盘（行格式 level/tag 齐全）');
+    expect(
+      tail,
+      contains('[warn] [weekly] 周扫检索降级（废弃章节）：corpus.db 缺 -exam 镜像'),
+    );
+    expect(tail, contains('[error] [llm] 周扫 LLM 失败：模拟周扫宕机'));
+
+    // ③ 落盘文件在 dataDir/logs/ 下（非仅内存）
+    final logFile =
+        File('${tmp.path}/logs/app-${DateTime.now().toIso8601String().substring(0, 10).replaceAll('-', '')}.log');
+    expect(logFile.existsSync(), isTrue, reason: '日志文件已落盘');
+  });
 }
 
 // ------------------------------------------------------------ helpers ----

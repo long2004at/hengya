@@ -18,6 +18,7 @@
 // 说明：message 可含换行（堆栈等），首行可经 [AppLogEntry.fromLine] 解析，
 // 其余行为原始续行。
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -111,8 +112,11 @@ class AppLog {
       if (file.existsSync() && file.lengthSync() >= kMaxFileBytes) {
         _rotate(dir, base);
       }
+      // 2026-09-11 fix：原 '$line\n'.codeUnits 按 UTF-16 落盘，readTail/
+      // readAsLines（UTF-8）解码失败 → 日志页/读回恒空——改 utf8.encode
+      //（文件头注释即声明文本行；readTail 与 AppLogEntry.fromLine 均为 UTF-8）
       File('${dir.path}/$base.log').writeAsBytesSync(
-        '$line\n'.codeUnits,
+        utf8.encode('$line\n'),
         mode: FileMode.append,
         flush: true,
       );

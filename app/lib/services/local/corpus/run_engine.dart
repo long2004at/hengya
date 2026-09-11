@@ -1539,6 +1539,14 @@ Future<Map<String, Object?>> runWeekly({
   /// 节点⑤（B2）：技能五站专题（isSkill=true，见 exam_topics.dart）。
   /// 豁免「已学章」门控：逐专题按 subject=<code> 直检真题库。
   List<ExamTopic> skillTopics = const [],
+
+  /// 可选日志回调（默认空实现——不变更既有调用签名的必选性）。供上游在
+  /// worker isolate 装配处注入日志通道（ctx.log → 主 isolate 写 AppLog）；
+  /// 主 isolate 直跑/测试可传 null，行为零变化。[level] ∈
+  /// {'debug','info','warn','error'}（与 AppLog 级别同名同值）；[tag] 短
+  /// 来源标签（weekly / llm）。仅追加描述性文案——绝不携带 key/敏感值。
+  /// 本回调与 notes_ 并行：last_run.json 的 notes 行为完全不变。
+  void Function(String level, String tag, String message)? onLog,
 }) async {
   final notes_ = List<String>.of(notes); // 默认参可为 const []，须拷贝可变副本
   var chapterList = chapters;
@@ -1577,6 +1585,7 @@ Future<Map<String, Object?>> runWeekly({
       }
     } on SearchException catch (e) {
       notes_.add('周扫检索降级（$chapter）：$e');
+      onLog?.call('warn', 'weekly', '周扫检索降级（$chapter）：$e');
     }
   }
   // ①b 节点⑤（B2 拍板）：技能五站豁免「已学章」门控——逐专题按短码直检
@@ -1616,6 +1625,7 @@ Future<Map<String, Object?>> runWeekly({
       }
     } on SearchException catch (e) {
       notes_.add('技能专题检索降级（${topic.name}）：$e');
+      onLog?.call('warn', 'weekly', '技能专题检索降级（${topic.name}）：$e');
     }
   }
   // ② 科目均衡 + 配额（round-robin，总量 ≤ min(cap, send_cap)）
@@ -1725,8 +1735,9 @@ Future<Map<String, Object?>> runWeekly({
             skillCardCount[skillCode] = n;
           }
           cards.add(card);
-        } on CardException catch (e) {
+    } on CardException catch (e) {
           notes_.add('周扫单卡归一化跳过：$e');
+          onLog?.call('warn', 'weekly', '周扫单卡归一化跳过：$e');
         }
       }
       if (examMetaFallbacks > 0) {
@@ -1734,6 +1745,7 @@ Future<Map<String, Object?>> runWeekly({
       }
     } on LlmException catch (e) {
       llmErr = e.toString();
+      onLog?.call('error', 'llm', '周扫 LLM 失败：$e');
     }
   }
   // ③ import（幂等；dry-run 只落草稿——由调用方归档）
@@ -1745,9 +1757,13 @@ Future<Map<String, Object?>> runWeekly({
       imported = r.inserted;
       skippedN = r.skipped;
     } else {
-      importErr = (r.error ?? '').length > 200
+      final errText = (r.error ?? '').length > 200
           ? r.error!.substring(0, 200)
           : r.error;
+      importErr = errText;
+      if (errText != null) {
+        onLog?.call('error', 'weekly', '周扫导入失败：$errText');
+      }
     }
   }
   final bySubjCards = <String, int>{};

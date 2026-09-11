@@ -131,6 +131,7 @@ import 'corpus/search_api.dart'
         normalizeRerankEndpoint,
         siliconFlowEmbedder;
 import 'corpus/search_engine.dart' show EmbedQueryFn, corpusSearch;
+import 'app_log.dart';
 import 'db.dart';
 import 'isolate_runner.dart';
 import 'local_backend.dart';
@@ -1165,6 +1166,10 @@ Future<Map<String, Object?>> runWeeklyScan({
   /// 节点⑤：降级/兜底 note 收集（runWeekly 原地追加——检索降级、单卡跳过、
   /// 技能超额截断、examMeta 兜底等；随周扫结果块入 last_run.json）。
   List<String> notes = const [],
+
+  /// 可选日志回调（透传 runWeekly；worker 装配处注入 ctx.log → 主 isolate
+  /// 写 AppLog，见 runWeekly.onLog 契约）。
+  void Function(String level, String tag, String message)? onLog,
 }) async {
   final subjectNames = <String, String>{
     for (final s in deps.db.subjectRows())
@@ -1179,6 +1184,7 @@ Future<Map<String, Object?>> runWeeklyScan({
     opts: opts,
     port: deps.port,
     notes: notes,
+    onLog: onLog,
     skillTopics: [for (final t in kExamTopics) if (t.isSkill) t],
   );
 }
@@ -1226,11 +1232,16 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
   RunOptions opts = const RunOptions(),
   DateTime? now,
   void Function(Map<String, Object?> event)? onWeeklyProgress,
+
+  /// 可选日志回调（透传 runWeeklyScan；worker 装配处注入 ctx.log → 主
+  /// isolate 写 AppLog；本函数另在节流/skipReason/完成分支补日志事件）。
+  void Function(String level, String tag, String message)? onLog,
 }) async {
   final t = now ?? DateTime.now();
   final db = deps.db;
   final prevIso = db.settingGet(kWeeklyScanSettingKey);
   if (!weeklyScanDue(prevIso, t)) {
+    onLog?.call('info', 'weekly', '真题周扫节流跳过（距上次 <7 天，不消费资源）');
     return {'ran': false, 'skipped': 'throttled', 'prevRunAt': prevIso};
   }
   onWeeklyProgress?.call(<String, Object?>{
@@ -1239,7 +1250,7 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
     'message': '真题周扫开始（距上次 ≥7 天自动触发）',
     'weekly': const <String, Object?>{'phase': 'start'},
   });
-  final res = await runWeeklyScan(deps: deps, opts: opts);
+  final res = await runWeeklyScan(deps: deps, opts: opts, onLog: onLog);
   // runWeekly 内部拷贝 notes（const 默认参防护）——真实 notes 随结果返回
   final notes = (res['notes'] as List?)?.cast<String>() ?? <String>[];
   final counts = res['counts'] is Map
@@ -1249,16 +1260,27 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
   String? skipReason;
   if (asInt(counts['afterBalance']) == 0) {
     skipReason = 'empty';
+    onLog?.call('info', 'weekly', '真题周扫静默跳过：零候选（empty）——不写时间戳待下次重试');
   } else if (res['llmError'] != null) {
     skipReason = 'llmError';
+    onLog?.call('error', 'llm', '真题周扫 LLM 失败：${res['llmError']}');
   } else if (res['importError'] != null) {
     skipReason = 'importError';
+    onLog?.call('error', 'weekly', '真题周扫导入失败：${res['importError']}');
   }
   final ran = skipReason == null;
   String? savedAt;
   if (ran && !opts.dryRun) {
     savedAt = nowIso();
     db.settingSet(kWeeklyScanSettingKey, savedAt);
+  }
+  if (ran) {
+    onLog?.call(
+      'info',
+      'weekly',
+      '真题周扫完成：候选 ${counts['afterBalance']}、出卡 ${counts['cards']}、'
+      '导入 ${counts['imported']}',
+    );
   }
   final out = <String, Object?>{
     'ran': ran,
@@ -1561,8 +1583,9 @@ final llmCfg = LlmConfig(
         );
       }
       account.notes.addAll(req.promptNotes);
-      // failover 装配：备用已配置 → 主备自动切换；否则纯主通道（行为零变化）。
-      // failover 事件记入 account.notes（流水线结果/设置页可见，Q4-A）。
+// failover 装配：备用已配置 → 主备自动切换；否则纯主通道（行为零变化）。
+      // failover 事件记入 account.notes（流水线结果/设置页可见，Q4-A），
+      // 同时经 ctx.log 回流主 isolate 写 AppLog（含服务名、不含 key）。
       final failoverEvents = <String>[];
       final llmChat = failoverLlmChatFn(
         primary: llmCfg,
@@ -1578,6 +1601,15 @@ final llmCfg = LlmConfig(
           };
           failoverEvents.add(msg);
           account.notes.add(msg);
+          ctx.log(
+            switch (event) {
+              LlmFailoverEvent.switchedToBackup => 'warn',
+              LlmFailoverEvent.switchedBackToPrimary => 'info',
+              LlmFailoverEvent.tripped => 'error',
+            },
+            'llm',
+            msg,
+          );
         },
       );
       final progressPath = '$dataDir/corpus/progress.json';
@@ -1641,6 +1673,8 @@ llmChat: llmChat,
               counts: event,
             ),
           ),
+          // 周扫内部日志（检索降级/LLM 失败/import 失败/节流/完成）→ 日志通道
+          onLog: (level, tag, message) => ctx.log(level, tag, message),
         );
       } catch (_) {
         // 周扫装配异常（如 settings 读写故障）：静默跳过——不写脏数据、
@@ -1730,15 +1764,28 @@ class PipelineRunner {
       _running = true;
       lastProgress = null; // 新轮开跑：上一轮缓存作废（事件逐帧自洽）
       var ok = false;
+      Object? runErr;
       try {
         ok = await _runOnce(dir, trigger: trigger);
-      } catch (_) {
-        ok = false; // 装配/编排异常：留标志，下次触发/启动再消费
+      } catch (e) {
+        ok = false;
+        runErr = e; // 装配/编排异常：留标志，下次触发/启动再消费
       } finally {
         _running = false;
       }
       if (ok) {
         _deleteMarker(dir);
+        _logPipelineDone(trigger);
+      } else {
+        // 失败/取消：如实落 AppLog（错误文本不含 key——worker 结果回传
+        // 与 AppLog 均有敏感值纪律；见 isolate_runner.dart 协议与 app_log.dart 头注释）
+        AppLog.instance.log(
+          AppLogLevel.error,
+          'pipeline',
+          runErr == null
+              ? '拆卡流水线未完成（trigger=$trigger）：runOnce 返回 false——标志保留待重试'
+              : '拆卡流水线失败（trigger=$trigger）：$runErr——标志保留待重试',
+        );
       }
     } finally {
       _spinning = false;
@@ -1753,6 +1800,52 @@ class PipelineRunner {
     try {
       File(markerPath(dataDir)).deleteSync();
     } catch (_) {}
+  }
+
+  // ---- 日志回流（worker → 主 isolate → AppLog）----
+
+  /// wire 级别字符串 → AppLog 级别（未知值回退 debug，防御性）。
+  static final Map<String, AppLogLevel> _logLevelByName = {
+    'debug': AppLogLevel.debug,
+    'info': AppLogLevel.info,
+    'warn': AppLogLevel.warn,
+    'error': AppLogLevel.error,
+  };
+
+  /// worker 日志事件（stage='log'，经 IsolateProgressEvent wire 回流）→
+  /// AppLog 落盘。worker isolate 内 AppLog 无 dataDir 不落盘，**所有**
+  /// worker 侧日志必须经此通道（见 isolate_runner.dart 文件头 + ctx.log）。
+  void _logWorkerEvent(IsolateProgressEvent e) {
+    if (e.stage != 'log') {
+      return;
+    }
+    AppLog.instance.log(
+      _logLevelByName[e.level] ?? AppLogLevel.debug,
+      (e.tag == null || e.tag!.isEmpty) ? 'pipeline' : e.tag!,
+      e.message,
+    );
+  }
+
+  /// 单轮成功收尾日志（主 isolate 侧；trigger + 关键计数）。
+  void _logPipelineDone(String trigger) {
+    final result = lastResult;
+    final counts = result != null && result['counts'] is Map
+        ? Map<String, Object?>.from(result['counts'] as Map)
+        : null;
+    final cardsMap = counts != null && counts['cards'] is Map
+        ? counts['cards'] as Map
+        : null;
+    final importMap = counts != null && counts['import'] is Map
+        ? counts['import'] as Map
+        : null;
+    AppLog.instance.log(
+      AppLogLevel.info,
+      'pipeline',
+      '拆卡流水线完成（trigger=$trigger）：收件箱 ${counts?['inbox'] ?? 0}、'
+      '关键词 ${counts?['keywordsProcessed'] ?? 0}、'
+      '出卡 ${cardsMap?['total'] ?? 0}、'
+      '导入 ${importMap?['inserted'] ?? 0}',
+    );
   }
 
   /// 单轮执行（P1-3 起六步编排在后台 isolate 跑）：
@@ -1784,7 +1877,7 @@ class PipelineRunner {
       args: PipelineCatchupRequest(
         dataDir: dataDir,
         prompts: prompts,
-aiKeys: {
+        aiKeys: {
           'embedding': LocalBackend.instance.aiKeyOf('embedding'),
           'llm': LocalBackend.instance.aiKeyOf('llm'),
           'llm_backup': LocalBackend.instance.aiKeyOf('llm_backup'),
@@ -1796,6 +1889,7 @@ aiKeys: {
     final sub = handle.progress.listen((e) {
       lastProgress = e; // #13：中途订阅者取当前快照用（见字段注释）
       _progressCtrl.add(e);
+      _logWorkerEvent(e); // worker 日志事件（stage='log'）→ AppLog
     });
     try {
       final result = await handle.done;

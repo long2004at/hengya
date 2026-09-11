@@ -44,6 +44,9 @@
 // worker → 主（单一 report 端口，FIFO 保序；结果经 Isolate.exit 送达）：
 //   {'kind':'ready','cmdPort':SendPort}
 //   {'kind':'progress','stage','message','counts'?}
+//     stage='log' 的日志事件额外带 'level'+'tag'（worker ctx.log → 主
+//     isolate 侧写 AppLog——worker 内 AppLog 无 dataDir 不落盘，日志必须
+//     经事件回流主 isolate，见文件头说明与 IsolateWorkerContext.log）。
 //   {'kind':'result','ok':true,'result':Object?}
 //   {'kind':'result','ok':false,'cancelled':bool,'message','stackTrace'?}
 // 主 → worker（ready 回传的 cmd 端口）：
@@ -68,28 +71,44 @@ import 'package:sqlite3/open.dart' as sqlite_open;
 /// [stage]/[message] 面向人读（可直接进日志行/UI）；[counts] 面向结构化
 /// 消费（键由各 job 定义并文档化，见 corpus_build_job.dart 进度协议）。
 /// job 侧纪律：**任何字段不得携带 key 等敏感值**。
+///
+/// 日志语义（本节点新增）：stage='log' 的事件 = worker 侧日志行，经进度流
+/// 回流主 isolate（worker 内 AppLog 无 dataDir 不落盘——见
+/// [IsolateWorkerContext.log]），主 isolate 订阅处写 AppLog。
 class IsolateProgressEvent {
   const IsolateProgressEvent({
     required this.stage,
     required this.message,
     this.counts,
+    this.level,
+    this.tag,
   });
 
   /// 阶段名（job 自定义：建库 'start'/'extract'/'ingest'/'done'；拆卡
-  /// 'catchup'）。
+  /// 'catchup'；日志事件固定 'log'）。
   final String stage;
 
-  /// 人读消息（中文，可直接展示）。
+  /// 人读消息（中文，可直接展示；log 事件 = 日志正文）。
   final String message;
 
   /// 可选结构化计数。
   final Map<String, Object?>? counts;
+
+  /// 仅 stage='log' 时有效：日志级别（'debug'|'info'|'warn'|'error'，与
+  /// AppLog 级别同名同值）；其余 stage 为 null。
+  final String? level;
+
+  /// 仅 stage='log' 时有效：日志来源短标签（pipeline / weekly / llm /
+  /// embedding）；其余 stage 为 null。
+  final String? tag;
 
   Map<String, Object?> toWire() => {
         'kind': 'progress',
         'stage': stage,
         'message': message,
         'counts': counts,
+        'level': level,
+        'tag': tag,
       };
 
   /// wire Map → 事件（主 isolate 侧解码）。
@@ -100,6 +119,8 @@ class IsolateProgressEvent {
       stage: '${w['stage']}',
       message: '${w['message']}',
       counts: rawCounts is Map ? Map<String, Object?>.from(rawCounts) : null,
+      level: w['level'] is String ? w['level'] as String : null,
+      tag: w['tag'] is String ? w['tag'] as String : null,
     );
   }
 }
@@ -190,8 +211,22 @@ class IsolateWorkerContext {
     }
   }
 
-  /// 发进度事件到主 isolate（FIFO 送达；消息务必不含敏感值）。
+  /// ??????? isolate?FIFO ??????????????
   void emit(IsolateProgressEvent event) => _report.send(event.toWire());
+
+  /// 发日志事件到主 isolate（stage='log' 语义，随进度流送达；主 isolate
+  /// 订阅处写 AppLog——worker 内 [AppLog] 无 dataDir 不落盘，只能经事件
+  /// 回流，见 wire 协议）。[level] 取值 'debug'|'info'|'warn'|'error'
+  /// （与 AppLog 级别同名同值）；[tag] 短来源标签（pipeline / weekly /
+  /// llm / embedding）。消息纪律同 [emit]：绝不携带 key/token/敏感值。
+  void log(String level, String tag, String message) => _report.send(
+        IsolateProgressEvent(
+          stage: 'log',
+          level: level,
+          tag: tag,
+          message: message,
+        ).toWire(),
+      );
 }
 
 // ----------------------------------------------------- worker 包装器 ----

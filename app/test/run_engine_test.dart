@@ -1980,6 +1980,59 @@ void main() {
     expect(resC['subtopics'], ['病因']);
     expect((resC['cards'] as List).first['subtopic'], '病因');
   });
+  test('日志回流（node-1）：runWeekly onLog 周扫检索降级→warn、LLM 失败→error 如实上报', () async {
+    // ① 检索降级：runSearch 抛 SearchException → onLog warn（weekly tag）
+    final logs1 = <String>[];
+    await runWeekly(
+      runSearch: (query, {subject, sourceType, k}) async {
+        throw const SearchException('模拟检索降级：corpus.db 缺失');
+      },
+      llmChat: (system, user, {tag = ''}) async => '{"cards": []}',
+      prompts: const {},
+      chapters: const [
+        {'subject': 'endo', 'subjectName': '牙体牙鼓病学', 'chapter': '麧病'},
+      ],
+      legalSubjects: const [{'id': 'endo', 'name': '牙体牙鼓病学'}],
+      opts: const RunOptions(),
+      onLog: (level, tag, message) => logs1.add('$level/$tag/$message'),
+    );
+    expect(
+      logs1.join('\n'),
+      contains('周扫检索降级（麧病）：'),
+      reason: '检索降级必须经 onLog 如实上报',
+    );
+    expect(logs1.first, startsWith('warn/weekly/'),
+        reason: '检索降级 = warn级、weekly tag');
+
+    // ② LLM 失败：检索有候选，llmChat 抛 LlmException → onLog error（llm tag）
+    final logs2 = <String>[];
+    await runWeekly(
+      runSearch: (query, {subject, sourceType, k}) async => searchOf({
+        'chunk_id': 'exam:g:q1',
+        'deck': '2021年执业医师资格考试',
+        'page_range': '1-1',
+        'title': '麧病',
+        'source_type': 'exam',
+        'text': '模拟文本',
+        'score': 0.8,
+      }),
+      llmChat: (system, user, {tag = ''}) async {
+        throw const LlmException('模拟周扫 LLM 崩溃');
+      },
+      prompts: const {},
+      chapters: const [
+        {'subject': 'endo', 'subjectName': '牙体牙鼓病学', 'chapter': '麧病'},
+      ],
+      legalSubjects: const [{'id': 'endo', 'name': '牙体牙鼓病学'}],
+      opts: const RunOptions(dryRun: true),
+      onLog: (level, tag, message) => logs2.add('$level/$tag/$message'),
+    );
+    expect(logs2.any((e) => e.startsWith('error/llm/')), isTrue,
+        reason: 'LLM 失败必须经 onLog 以 error级、llm tag 上报');
+    expect(logs2.join('\n'), contains('周扫 LLM 失败'),
+        reason: '消息带上下文（不含 key）');
+  });
+
 }
 
 /// 记录仪 Port：全部调用入 log，行为可配置（测试消费闸矩阵）。
