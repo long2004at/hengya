@@ -56,3 +56,6 @@ desktop.ini
 # --- æµ‹è¯•æœŸ SQLite ä¼´ç”Ÿæ–‡ä»¶ ---
 app/test/fixtures/migration/*.db-wal
 app/test/fixtures/migration/*.db-shm
+
+# ÓïÁÏ°ü·Ö·¢Ä¿Â¼£¨100MB+ zip ²»Èë¿â£©
+update-dist/
