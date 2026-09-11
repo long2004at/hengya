@@ -1,5 +1,12 @@
 // 完整备份服务：全部数据即时合成，不依赖私有课件/生产快照。
 // 测试执行由主代理/CI 统一安排；Windows worker 的 DLL override 由 IsolateRunner 重放。
+
+// 文件级宽超时（默认单测 30s）：本文件是全仓最重的真 IO 用例群（zip 打包/
+// VACUUM 快照/恢复换库/回滚，单文件 1140 行），共享 CI runner 负载尖峰时
+// 单用例可被拖过 30s——同 commit 各轮挂的用例不同即此因（v0.1.14 run）。
+@Timeout(Duration(minutes: 10))
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
@@ -29,10 +36,6 @@ const _liveKey = 'SYNTHETIC-API-KEY-NOT-A-REAL-CREDENTIAL-987654321';
 const _deletedKey = 'SYNTHETIC-DELETED-KEY-HISTORY-123456789';
 const _privateUpdate = 'https://updates.invalid/private?token=SYNTHETIC-TOKEN';
 
-// 文件级宽超时（默认单测 30s）：本文件是全仓最重的真 IO 用例群（zip 打包/
-// VACUUM 快照/恢复换库/回滚，单文件 1140 行），共享 CI runner 负载尖峰时
-// 单用例可被拖过 30s——同 commit 各轮挂的用例不同即此因（v0.1.14 run）。
-@Timeout(Duration(minutes: 10))
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows) {
