@@ -38,6 +38,11 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _syncing = false;
   bool _checking = false;
   bool _triggering = false; // 强制拆卡触发中（防重复点击）
+  bool _weeklyTriggering = false; // 手动真题周扫触发中（防重复点击）
+
+  /// 自动周扫计时状态（local 模式加载；GET /pipeline/weekly）。
+  WeeklyScanStatus? _weeklyStatus;
+  bool _weeklyStatusLoading = false;
 
   bool? _serverOk; // null = 未检测
 
@@ -56,6 +61,7 @@ class _SettingsPageState extends State<SettingsPage> {
     super.initState();
     _loadAll();
     _loadCorpus();
+    if (currentBackendMode == BackendMode.local) _loadWeeklyStatus();
   }
 
   @override
@@ -313,6 +319,181 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // ---------------- 真题周扫（local 0.1.13+：手动触发 + 计时调整） ----------------
+
+  Future<void> _loadWeeklyStatus() async {
+    setState(() => _weeklyStatusLoading = true);
+    try {
+      final s = await ApiClient.instance.weeklyScanStatus();
+      if (!mounted) return;
+      setState(() => _weeklyStatus = s);
+    } on ApiException {
+      // 旧版本后端无此路由：状态行显示不支持提示，入口仍可见（点击再报错）
+    } finally {
+      if (mounted) setState(() => _weeklyStatusLoading = false);
+    }
+  }
+
+  /// 「自动周扫计时」状态行文案（从未跑 / 已到期 / 距到期剩余天数）。
+  String get _weeklyScheduleText {
+    if (_weeklyStatusLoading && _weeklyStatus == null) return '读取中…';
+    final s = _weeklyStatus;
+    if (s == null) return '当前版本不支持（需 0.1.13+）';
+    final last = s.lastRunAt;
+    if (last == null || last.isEmpty) {
+      return '从未自动扫描——下次拆卡收尾即会执行';
+    }
+    final t = DateTime.tryParse(last);
+    if (t == null) return '时间戳异常——点击调整可修复';
+    if (s.due) {
+      return '已到期（上次：${_fmtDateTime(t)}）——下次拆卡收尾自动执行';
+    }
+    final remain = t.add(Duration(days: s.intervalDays)).difference(
+          DateTime.now(),
+        );
+    return '上次：${_fmtDateTime(t)}；约 ${remain.inDays + 1} 天后到期';
+  }
+
+  /// 手动真题周扫：先弹确认，确认后 POST /api/v1/pipeline/weekly，
+  /// 结果一律 TopToast。weekly-only 单轮（不跑拆卡/回炉/罗盘），不受
+  /// 自动路径 7 天节流限制，也不写节流时间戳（两路节奏独立）。
+  Future<void> _confirmWeeklyScan() async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dlgCtx) => AlertDialog(
+        title: const Text('立即真题周扫？'),
+        content: const Text(
+          '扫描已学章节与技能专题的真题语料，AI 出题进待审池。\n\n'
+          '需已配置生卡 LLM 与真题语料；真题卡按「科目-年份-题号」幂等去重，'
+          '重复扫描不会出重复卡。\n\n'
+          '手动扫描不影响自动周扫的 7 天节奏（时间戳不变动）。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dlgCtx, true),
+            child: const Text('立即扫描'),
+          ),
+        ],
+      ),
+    );
+    if (go != true || _weeklyTriggering) return;
+    setState(() => _weeklyTriggering = true);
+    try {
+      final res = await ApiClient.instance.triggerWeeklyScan();
+      if (!mounted) return;
+      if (res.triggered) {
+        TopToast.show(
+          context,
+          '已触发，真题周扫后台运行中',
+          type: TopToastType.success,
+          stayDuration: kToastStayImportant,
+        );
+      } else {
+        TopToast.show(context, res.note ?? '已有任务排队中', type: TopToastType.info);
+      }
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(
+        context,
+        e.statusCode == 404
+            ? '手动真题周扫仅本地模式支持（需 0.1.13+）'
+            : e.statusCode == 409
+            ? '拆卡流水线运行中，请稍后再试'
+            : '触发失败：${e.message}',
+        type: TopToastType.error,
+        stayDuration: const Duration(milliseconds: 1800),
+      );
+    } finally {
+      if (mounted) setState(() => _weeklyTriggering = false);
+    }
+  }
+
+  /// 「自动周扫计时」调整对话框：清除（立即到期）/ 推迟 7 天（设为现在）/
+  /// 自定义时间（日期+时间选择器任意设定）。
+  Future<void> _editWeeklySchedule() async {
+    final status = _weeklyStatus;
+    if (status == null) {
+      TopToast.show(context, '当前版本不支持调整（需 0.1.13+）', type: TopToastType.error);
+      return;
+    }
+    final action = await showDialog<String>(
+      context: context,
+      builder: (dlgCtx) => AlertDialog(
+        title: const Text('调整自动周扫计时'),
+        content: Text(_weeklyScheduleText),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx, 'due'),
+            child: const Text('立即到期'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx, 'postpone'),
+            child: const Text('推迟 7 天'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx, 'custom'),
+            child: const Text('自定义时间'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (action == null || !mounted) return;
+    String? value;
+    switch (action) {
+      case 'due':
+        value = null;
+        break;
+      case 'postpone':
+        value = DateTime.now().toIso8601String();
+        break;
+      case 'custom':
+        final now = DateTime.now();
+        final date = await showDatePicker(
+          context: context,
+          initialDate: now,
+          firstDate: now.subtract(const Duration(days: 365)),
+          lastDate: now.add(const Duration(days: 365)),
+        );
+        if (date == null || !mounted) return;
+        final time = await showTimePicker(
+          context: context,
+          initialTime: TimeOfDay.fromDateTime(now),
+        );
+        if (time == null || !mounted) return;
+        value = DateTime(
+          date.year,
+          date.month,
+          date.day,
+          time.hour,
+          time.minute,
+        ).toIso8601String();
+        break;
+      default:
+        return;
+    }
+    try {
+      final res = await ApiClient.instance.setWeeklyScanSchedule(value);
+      if (!mounted) return;
+      setState(() => _weeklyStatus = res);
+      TopToast.show(
+        context,
+        res.note ?? (res.due ? '已调整——自动周扫已到期' : '已调整'),
+        type: TopToastType.success,
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(context, '调整失败：${e.message}', type: TopToastType.error);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -444,26 +625,74 @@ class _SettingsPageState extends State<SettingsPage> {
           Card(
             elevation: 0,
             color: scheme.surfaceContainerLow,
-            child: ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-              title: const Text(
-                '强制开始拆卡 / 改卡',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-              subtitle: Text(
-                currentBackendMode == BackendMode.local
-                    ? '让本机立刻跑一轮流水线：拆收件箱关键词、重造回炉卡、推进学习罗盘'
-                    : '让服务器立刻跑一轮流水线（当前影子模式只出草稿，消耗少量 AI 额度）',
-                style: const TextStyle(fontSize: 12),
-              ),
-              trailing: _triggering
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.play_circle_outline),
-              onTap: _triggering ? null : _confirmForceRun,
+            child: Column(
+              children: [
+                ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text(
+                    '强制开始拆卡 / 改卡',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: Text(
+                    currentBackendMode == BackendMode.local
+                        ? '让本机立刻跑一轮流水线：拆收件箱关键词、重造回炉卡、推进学习罗盘'
+                        : '让服务器立刻跑一轮流水线（当前影子模式只出草稿，消耗少量 AI 额度）',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  trailing: _triggering
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.play_circle_outline),
+                  onTap: _triggering ? null : _confirmForceRun,
+                ),
+                const Divider(height: 1, indent: 16, endIndent: 16),
+                ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text(
+                    '立即真题周扫',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: Text(
+                    currentBackendMode == BackendMode.local
+                        ? '扫描已学章节的真题语料，AI 出题进待审池；不影响自动周扫节奏'
+                        : '手动真题周扫仅本地模式支持',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  trailing: _weeklyTriggering
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.quiz_outlined),
+                  onTap: _weeklyTriggering ? null : _confirmWeeklyScan,
+                ),
+                if (currentBackendMode == BackendMode.local) ...[
+                  const Divider(height: 1, indent: 16, endIndent: 16),
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                    title: const Text(
+                      '自动周扫计时',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Text(
+                      _weeklyScheduleText,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: _weeklyStatusLoading
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.schedule_outlined),
+                    onTap: _editWeeklySchedule,
+                  ),
+                ],
+              ],
             ),
           ),
 

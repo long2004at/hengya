@@ -19,6 +19,7 @@
 //   6. 拆卡 job 真实链：PipelineRunner.consumeForceRun（无 override）→
 //      spawn worker → worker 内自开 hengya.db/corpus → 空收件箱零出卡 +
 //      last_run.json 落盘 + 标志删除 + 进度转发
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
@@ -294,6 +295,66 @@ void main() {
 
     // worker 运行位已释放
     expect(IsolateRunner.instance.isRunning(pipelineCatchupJobId), isFalse);
+  }, timeout: const Timeout(Duration(minutes: 5)));
+
+  test('手动真题周扫真实链：consumeWeeklyRun → weeklyOnly 只跑周扫不跑 catchup + last_run.json 合并写入',
+      () async {
+    await LocalBackend.instance.resetForTest();
+    LocalBackend.instance.init(tmp.path);
+    Directory('${tmp.path}/corpus').createSync(recursive: true);
+    // 预置上一轮 catchup 终态帧——合并写入必须保留（不整份覆盖）
+    File('${tmp.path}/corpus/last_run.json').writeAsStringSync(
+      jsonEncode({
+        'meta': {'trigger': 'manual'},
+        'queue': {'total': 3},
+        'counts': {'inbox': 1},
+      }),
+    );
+
+    final events = <IsolateProgressEvent>[];
+    final sub = PipelineRunner.instance.progress.listen(events.add);
+    try {
+      await PipelineRunner.instance.consumeWeeklyRun();
+    } finally {
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await sub.cancel();
+    }
+
+    // weekly-only 结果：无 catchup 帧，只有 weekly 块（空库 → 零候选静默跳过）
+    expect(PipelineRunner.instance.lastResult, isNotNull);
+    final result = PipelineRunner.instance.lastResult!;
+    expect(result.containsKey('counts'), isFalse, reason: 'weeklyOnly 不跑六步总编排');
+    expect(result.containsKey('queue'), isFalse);
+    final weekly = result['weekly'] as Map<String, Object?>;
+    expect(weekly['ran'], false);
+    expect(weekly['skipped'], 'empty', reason: '空库零候选 → 空态静默跳过');
+
+    // 进度协议：stage='weekly' 事件全程上报（start/done），无 catchup 帧
+    final weeklyMsgs =
+        events.where((e) => e.stage == 'weekly').map((e) => e.message).toList();
+    expect(weeklyMsgs.first, contains('真题周扫开始'));
+    expect(events.where((e) => e.stage == 'catchup'), isEmpty,
+        reason: 'weeklyOnly 轮不发 catchup 帧');
+
+    // 存档合并：上一轮 catchup 的 meta/queue/counts 保留，仅刷新 weekly 键
+    final saved = jsonDecode(
+      File('${tmp.path}/corpus/last_run.json').readAsStringSync(),
+    ) as Map<String, Object?>;
+    expect((saved['meta'] as Map)['trigger'], 'manual',
+        reason: '上一轮 catchup 终态帧保留');
+    expect((saved['queue'] as Map)['total'], 3);
+    expect((saved['weekly'] as Map)['skipped'], 'empty');
+
+    // 手动轮不写自动周扫节流时间戳（两路节奏独立）
+    final check = sqlite3.open('${tmp.path}/hengya.db');
+    final rows = check.select(
+      "SELECT value FROM settings WHERE key = 'pipeline.lastWeeklyScanAt'",
+    );
+    expect(rows, isEmpty, reason: '手动周扫不写自动周扫节流时间戳');
+    check.dispose();
+
+    // worker 运行位已释放
+    expect(IsolateRunner.instance.isRunning(pipelineWeeklyJobId), isFalse);
   }, timeout: const Timeout(Duration(minutes: 5)));
 
   test('日志回流（node-1）：worker ctx.log → wire 解码 → 主 isolate 落盘 AppLog 可读回',

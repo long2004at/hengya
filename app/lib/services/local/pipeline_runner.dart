@@ -156,6 +156,11 @@ const String kPipelineTriggerManual = 'manual';
 const String kPipelineTriggerStartup = 'startup';
 const String kPipelineTriggerScheduled = 'scheduled';
 
+/// 手动真题周扫（/pipeline/weekly 直接后台消费；不走 .force_run 标志——
+/// 与 catchup 共用 [_spinning] 单飞互斥）。weekly-only 轮不写周扫节流
+/// 时间戳：手动与自动两路节奏完全独立。
+const String kPipelineTriggerWeekly = 'weekly-manual';
+
 // ------------------------------------------------------------- 注入束 ----
 
 /// 六步总编排注入束（App 实装与测试 fake 各装配各的）。
@@ -1215,6 +1220,9 @@ bool weeklyScanDue(String? lastRunIso, DateTime now) {
 ///
 /// 节流：settings 表 [kWeeklyScanSettingKey] 时间戳距 [now]（缺省墙钟，测试
 /// 注入）≥[kWeeklyScanInterval] 才跑；否则静默返回 skipped='throttled'。
+/// [force]（手动周扫）绕过节流检查——但同样**不写**时间戳（见下），手动
+/// 与自动两路节奏完全独立；手动无候选时的空态/LLM/import 失败语义与
+/// 自动路径一致，只是不进入「下次 catchup 重试」的隐式约定。
 ///
 /// 静默跳过（空态，不写时间戳——下次 catchup 自然重试）：候选为 0（罗盘
 /// 无已学正文章命中且无技能专题候选，含本机无 -exam 真题语料树的检索降级）
@@ -1222,7 +1230,8 @@ bool weeklyScanDue(String? lastRunIso, DateTime now) {
 ///
 /// 时间戳写入条件 = 周扫有意义地完成（候选 >0 且 LLM/import 无错；dry-run
 /// 不写）：LLM/import 失败不计时（下次 catchup 重试——真题卡幂等 id 天然
-/// 防重）；候选 0 不计时（重试只花本地检索，无 LLM 成本）。
+/// 防重）；候选 0 不计时（重试只花本地检索，无 LLM 成本）；[force] 手动轮
+/// 恒不写（避免手动操作挪动自动路径的 7 天节流锚点）。
 ///
 /// 进度：[onWeeklyProgress] 收 {type: weekly_start|weekly_done, ts, message,
 /// weekly} 事件（worker 侧包成 IsolateProgressEvent(stage:'weekly')）。
@@ -1232,6 +1241,10 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
   required PipelineDeps deps,
   RunOptions opts = const RunOptions(),
   DateTime? now,
+
+  /// 手动周扫（[kPipelineTriggerWeekly] 路径传 true）：绕过 7 天节流检查、
+  /// 恒不写节流时间戳（两路独立）；其余空态/失败语义与自动路径一致。
+  bool force = false,
   void Function(Map<String, Object?> event)? onWeeklyProgress,
 
   /// 可选日志回调（透传 runWeeklyScan；worker 装配处注入 ctx.log → 主
@@ -1241,14 +1254,14 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
   final t = now ?? DateTime.now();
   final db = deps.db;
   final prevIso = db.settingGet(kWeeklyScanSettingKey);
-  if (!weeklyScanDue(prevIso, t)) {
+  if (!force && !weeklyScanDue(prevIso, t)) {
     onLog?.call('info', 'weekly', '真题周扫节流跳过（距上次 <7 天，不消费资源）');
     return {'ran': false, 'skipped': 'throttled', 'prevRunAt': prevIso};
   }
   onWeeklyProgress?.call(<String, Object?>{
     'type': 'weekly_start',
     'ts': nowIso(),
-    'message': '真题周扫开始（距上次 ≥7 天自动触发）',
+    'message': force ? '真题周扫开始（手动触发）' : '真题周扫开始（距上次 ≥7 天自动触发）',
     'weekly': const <String, Object?>{'phase': 'start'},
   });
   final res = await runWeeklyScan(deps: deps, opts: opts, onLog: onLog);
@@ -1271,7 +1284,8 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
   }
   final ran = skipReason == null;
   String? savedAt;
-  if (ran && !opts.dryRun) {
+  // 手动轮（force）恒不写节流时间戳——手动与自动两路节奏完全独立。
+  if (ran && !opts.dryRun && !force) {
     savedAt = nowIso();
     db.settingSet(kWeeklyScanSettingKey, savedAt);
   }
@@ -1462,6 +1476,9 @@ Future<(Map<String, String>, List<String>)> loadPromptsAsset() async {
 /// 拆卡流水线 job 的 IsolateRunner 单飞键。
 const String pipelineCatchupJobId = 'pipeline-catchup';
 
+/// 手动真题周扫（weekly-only）job 的 IsolateRunner 单飞键。
+const String pipelineWeeklyJobId = 'pipeline-weekly';
+
 /// 拆卡流水线 job 请求（主 → worker；字段全部可跨 isolate）。
 ///
 /// 提示词模板由主 isolate 经 rootBundle 预读后传入——平台通道仅主
@@ -1473,6 +1490,7 @@ class PipelineCatchupRequest {
     required this.aiKeys,
     required this.promptNotes,
     this.trigger = kPipelineTriggerManual,
+    this.weeklyOnly = false,
   });
 
   /// 数据根目录（hengya.db 与 corpus/ 挂其下——与 LocalBackend.init 同源）。
@@ -1494,6 +1512,11 @@ class PipelineCatchupRequest {
   /// #13：触发来源（kPipelineTrigger*；[PipelineRunner.consumeForceRun]
   /// 的 trigger 参数透传 → runCatchup → 进度事件与 last_run.json meta）。
   final String trigger;
+
+  /// 手动真题周扫（weekly-only 轮）：true 时 worker 跳过六步总编排
+  /// [runCatchup]，装配同一套 deps 后直接跑 [runWeeklyAfterCatchup]
+  /// （force=true：绕节流、不写时间戳）。结果仍落在顶层 'weekly' 键。
+  final bool weeklyOnly;
 }
 
 /// 拆卡流水线 worker 入口（Isolate.spawn 顶层函数；[PipelineRunner._runOnce]
@@ -1507,6 +1530,12 @@ class PipelineCatchupRequest {
 void pipelineCatchupWorkerEntry(IsolateWorkerBoot boot) {
   isolateWorkerRun(boot, (ctx) async {
     final req = boot.args! as PipelineCatchupRequest;
+    if (req.weeklyOnly) {
+      // 手动周扫（weekly-only）：进度全程由 runWeeklyAfterCatchup 的
+      // onWeeklyProgress 以 stage='weekly' 上报（start/done），无需
+      // catchup 帧包装；结果（顶层 'weekly' 键）原样回传主 isolate 存档。
+      return _runCatchupInWorker(req, ctx);
+    }
     ctx.emit(
       const IsolateProgressEvent(
         stage: 'catchup',
@@ -1657,16 +1686,21 @@ llmChat: llmChat,
           ),
         ),
       );
-      final result = await runCatchup(trigger: req.trigger, deps: catchupDeps);
-      // ── 节点⑤（B1 拍板）：catchup 成功收尾后 ≥7 天自动真题周扫 ──
+      // weekly-only（手动周扫）：跳过六步总编排，只跑周扫——deps 装配链
+      // 与 catchup 完全同源；force=true 绕节流、不写时间戳（两路独立）。
+      // 自动路径：catchup 成功收尾后 ≥7 天自动真题周扫（节点⑤ B1 拍板），
       // 同一 deps 复用（progressData 为本轮推进后的最新内存态）；进度事件
       // 以 stage='weekly' 独立上报（与 'catchup' 阶段区分）；周扫结果块并入
       // 结果顶层 'weekly' 键（随 last_run.json 存档，统计页面板消费）。
       // 节流/空态/失败语义见 [runWeeklyAfterCatchup]——任何分支都不抛
       // （周扫是 catchup 的 opportunistic 追加，绝不影响主轮成败）。
+      final result = req.weeklyOnly
+          ? <String, Object?>{}
+          : await runCatchup(trigger: req.trigger, deps: catchupDeps);
       try {
         result['weekly'] = await runWeeklyAfterCatchup(
           deps: catchupDeps,
+          force: req.weeklyOnly,
           onWeeklyProgress: (event) => ctx.emit(
             IsolateProgressEvent(
               stage: 'weekly',
@@ -1794,6 +1828,44 @@ class PipelineRunner {
     }
   }
 
+  /// 手动真题周扫消费入口（/pipeline/weekly → weeklyKick）：无 .force_run
+  /// 标志语义，直接后台执行 weekly-only 单轮。守卫复用 [_spinning]——与
+  /// catchup 天然互斥（运行中/维护锁期间静默返回，语义=忽略）；成功日志
+  /// 由 worker 侧 onLog（'真题周扫完成…'）回流 AppLog 承担，此处只补失败。
+  /// 本方法绝不抛（kick 侧 unawaited 安全）。
+  Future<void> consumeWeeklyRun() async {
+    if (_spinning || DataMaintenance.busy) {
+      // 完整备份/恢复期间不启动会写主库（settings）与知识库检索的 worker。
+      return;
+    }
+    final dir = LocalBackend.instance.dataDir;
+    if (dir == null) return;
+    _spinning = true;
+    try {
+      _running = true;
+      lastProgress = null; // 新轮开跑：上一轮缓存作废（事件逐帧自洽）
+      var ok = false;
+      Object? runErr;
+      try {
+        ok = await _runWeeklyOnce(dir);
+      } catch (e) {
+        ok = false;
+        runErr = e;
+      } finally {
+        _running = false;
+      }
+      if (!ok) {
+        AppLog.instance.log(
+          AppLogLevel.error,
+          'weekly',
+          '手动真题周扫失败：$runErr',
+        );
+      }
+    } finally {
+      _spinning = false;
+    }
+  }
+
   bool _markerExists(String dataDir) => File(markerPath(dataDir)).existsSync();
 
   static String markerPath(String dataDir) => '$dataDir/corpus/$markerName';
@@ -1865,16 +1937,32 @@ class PipelineRunner {
     if (override != null) {
       return override(dataDir);
     }
-    // 平台通道仅主 isolate：提示词先读好随请求下发（文件头 ③）；
-    // AI key 同理——vault 缓存预热（main() 已接线，幂等兜底）后随请求
-    // 下发（安全修复 C）。预热失败不阻断：worker 以空 key 降级
-    //（LLM 未配置 → 关键词 failed 留补跑，契约 9）。
+    final result = await _spawnWorker(
+      dataDir,
+      weeklyOnly: false,
+      trigger: trigger,
+    );
+    lastResult = result;
+    lastRunAt = DateTime.now();
+    _persistLastRun(dataDir, result);
+    return true;
+  }
+
+  /// 后台 isolate 单轮装配（catchup 与手动周扫共用链）：预载 AI key
+  /// （vault 平台通道仅主 isolate，预热失败不阻断——worker 空 key 降级）
+  /// 与提示词（rootBundle 仅主 isolate）→ IsolateRunner spawn worker →
+  /// 订阅进度回流（lastProgress 缓存 / broadcast / AppLog）→ 等结果返回。
+  Future<Map<String, Object?>> _spawnWorker(
+    String dataDir, {
+    required bool weeklyOnly,
+    required String trigger,
+  }) async {
     try {
       await LocalBackend.instance.initAiKeys();
     } catch (_) {}
     final (prompts, promptNotes) = await loadPromptsAsset();
     final handle = await IsolateRunner.instance.start<Map<String, Object?>>(
-      jobId: pipelineCatchupJobId,
+      jobId: weeklyOnly ? pipelineWeeklyJobId : pipelineCatchupJobId,
       workerEntry: pipelineCatchupWorkerEntry,
       args: PipelineCatchupRequest(
         dataDir: dataDir,
@@ -1886,6 +1974,7 @@ class PipelineRunner {
         },
         promptNotes: promptNotes,
         trigger: trigger,
+        weeklyOnly: weeklyOnly,
       ),
     );
     final sub = handle.progress.listen((e) {
@@ -1894,14 +1983,25 @@ class PipelineRunner {
       _logWorkerEvent(e); // worker 日志事件（stage='log'）→ AppLog
     });
     try {
-      final result = await handle.done;
-      lastResult = result;
-      lastRunAt = DateTime.now();
-      _persistLastRun(dataDir, result);
-      return true;
+      return await handle.done;
     } finally {
       await sub.cancel();
     }
+  }
+
+  /// 手动真题周扫（weekly-only）单轮执行：装配链与 [_runOnce] 同源，仅
+  /// worker 侧跳过六步总编排直接跑周扫（force=true：绕节流、不写时间戳）。
+  /// 存档为合并写入（[_persistWeeklyRun]）——不冲掉上一轮 catchup 终态帧。
+  Future<bool> _runWeeklyOnce(String dataDir) async {
+    final result = await _spawnWorker(
+      dataDir,
+      weeklyOnly: true,
+      trigger: kPipelineTriggerWeekly,
+    );
+    lastResult = result;
+    lastRunAt = DateTime.now();
+    _persistWeeklyRun(dataDir, result);
+    return true;
   }
 
   /// 最近一次运行结果存档（原子写；每次覆盖——手机磁盘纪律）。
@@ -1915,5 +2015,34 @@ class PipelineRunner {
     } catch (_) {
       // 存档失败不影响流水线结果（下次运行覆盖）
     }
+  }
+
+  /// 手动周扫存档（合并写入）：last_run.json 是「每轮整份覆盖」的单文件
+  /// 契约，但 weekly-only 轮没有 catchup 的 meta/queue/counts——整份覆盖
+  /// 会冲掉统计页队列卡片依赖的上一轮终态帧。故读旧文件仅刷新顶层
+  /// 'weekly' 键；旧档缺失/损坏/无 weekly 结果时退回整份写入（周扫结果
+  /// 自洽），绝不因存档炸轮。
+  void _persistWeeklyRun(String dataDir, Map<String, Object?> result) {
+    final weekly = result['weekly'];
+    if (weekly == null) {
+      _persistLastRun(dataDir, result);
+      return;
+    }
+    Map<String, Object?> merged = result;
+    try {
+      final prevFile = File('$dataDir/corpus/last_run.json');
+      if (prevFile.existsSync()) {
+        final prev = jsonDecode(prevFile.readAsStringSync());
+        if (prev is Map) {
+          merged = {
+            ...Map<String, Object?>.from(prev),
+            'weekly': weekly,
+          };
+        }
+      }
+    } catch (_) {
+      merged = result;
+    }
+    _persistLastRun(dataDir, merged);
   }
 }

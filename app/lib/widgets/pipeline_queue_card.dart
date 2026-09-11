@@ -52,6 +52,7 @@ import '../services/local/pipeline_runner.dart'
         kPipelineTriggerManual,
         kPipelineTriggerScheduled,
         kPipelineTriggerStartup,
+        kPipelineTriggerWeekly,
         PipelineRunner;
 
 /// 队列面板数据源抽象：生产 = PipelineRunner（事件流/最近事件/运行位）+
@@ -276,6 +277,7 @@ class _PipelineQueueCardState extends State<PipelineQueueCard> {
     kPipelineTriggerManual => '手动触发',
     kPipelineTriggerStartup => '启动补跑',
     kPipelineTriggerScheduled => '定时 22:55',
+    kPipelineTriggerWeekly => '手动周扫',
     _ => t.isEmpty ? '未知来源' : t,
   };
 

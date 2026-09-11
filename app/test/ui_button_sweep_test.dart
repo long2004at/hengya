@@ -453,6 +453,8 @@ void main() {
           //（恒牙行转入显式导航段，避免 sweep 隐式漫游拉长收敛）。
           '恒牙', // 显式导航段处理（点入 AboutPage 后锚点失效需 back 收敛）
           '上传课件', // file_selector 平台通道（真机验证项）
+          '立即真题周扫', // 显式断言段处理（weeklyKick 注入 no-op + 触发气泡）
+          '自动周扫计时', // 显式断言段处理（调整对话框，避开日期选择器漫游）
         });
     expect(settingsTaps, greaterThan(3),
         reason: '设置页迁走提醒/数据管理/AI 区块后应仍点到拆卡/语料/关于等行');
@@ -549,6 +551,54 @@ void main() {
         reason: '触发后确认框必须关闭');
     await tester.pump(const Duration(milliseconds: 600));
     // 返回统计页（sweep 可能已点掉设置页自身返回键——有栈才弹，否则已在统计页）
+    await backIfPushed(tester);
+    await settle(tester);
+
+    // —— ⑥b 手动真题周扫：确认对话框 → 立即扫描 → 触发气泡（weeklyKick 注入
+    // no-op——真实 worker 链由 isolate_runner_test 专项覆盖）；自动周扫计时
+    // 调整对话框同段覆盖：推迟 7 天 → 状态行刷新为未到期，立即到期 → 清除气泡
+    if (!tester.any(find.byType(SettingsPage))) {
+      await tester.ensureVisible(find.text('设置'));
+      await tester.tap(find.text('设置'), warnIfMissed: false);
+      await settle(tester);
+    }
+    LocalBackend.weeklyKick = () async {};
+    await tester.ensureVisible(find.textContaining('立即真题周扫'));
+    await tester.tap(find.textContaining('立即真题周扫'), warnIfMissed: false);
+    await settle(tester);
+    await tester.tap(find.text('立即扫描'), warnIfMissed: false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.any(find.text('已触发，真题周扫后台运行中')), isTrue,
+        reason: '手动周扫触发成功气泡');
+    await tester.pump(const Duration(milliseconds: 1700));
+    expect(tester.any(find.byWidgetPredicate((w) => w is Dialog)), isFalse,
+        reason: '触发后确认框必须关闭');
+    await tester.pump(const Duration(milliseconds: 600));
+    LocalBackend.weeklyKick = null;
+
+    await tester.ensureVisible(find.textContaining('自动周扫计时'));
+    await tester.tap(find.textContaining('自动周扫计时'), warnIfMissed: false);
+    await settle(tester);
+    await tester.tap(find.text('推迟 7 天'), warnIfMissed: false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(tester.any(find.byWidgetPredicate((w) => w is Dialog)), isFalse,
+        reason: '调整后对话框必须关闭');
+    expect(tester.any(find.textContaining('约 7 天后到期')), isTrue,
+        reason: '推迟后状态行刷新为未到期');
+    await tester.pump(const Duration(milliseconds: 1800)); // 气泡走完再继续
+    await tester.ensureVisible(find.textContaining('自动周扫计时'));
+    await tester.tap(find.textContaining('自动周扫计时'), warnIfMissed: false);
+    await settle(tester);
+    await tester.tap(find.text('立即到期'), warnIfMissed: false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.any(find.textContaining('已清除自动周扫计时')), isTrue,
+        reason: '清除计时确认气泡');
+    await tester.pump(const Duration(milliseconds: 2000));
+
+    // 返回统计页（⑦ 从底部导航继续）
     await backIfPushed(tester);
     await settle(tester);
 

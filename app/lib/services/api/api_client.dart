@@ -624,6 +624,31 @@ class ApiClient {
     return PipelineTriggerResult.fromJson(json);
   }
 
+  /// 手动真题周扫（local 0.1.13+：`POST /api/v1/pipeline/weekly`）——
+  /// weekly-only 单轮后台执行；自动周扫路径零影响。remote 模式下旧服务器
+  /// 无此路由 → 404（调用方提示仅本地模式支持）。
+  Future<PipelineTriggerResult> triggerWeeklyScan() async {
+    final json = await _postJson('/api/v1/pipeline/weekly', null);
+    return PipelineTriggerResult.fromJson(json);
+  }
+
+  /// 自动周扫计时状态（local 0.1.13+：`GET /api/v1/pipeline/weekly`）。
+  /// [lastRunAt] 为 null = 从未自动扫过（或已被清除）→ due=true。
+  Future<WeeklyScanStatus> weeklyScanStatus() async {
+    return WeeklyScanStatus.fromJson(
+      await _getJson('/api/v1/pipeline/weekly'),
+    );
+  }
+
+  /// 自动周扫节流时间戳自由调整（local 0.1.13+：`PUT /api/v1/pipeline/weekly`）。
+  /// [lastRunAt] 传 null/空 = 清除（下次拆卡收尾立即到期）；传 ISO 时间 =
+  /// 任意前调/后调。手动周扫不写此键（两路节奏独立）。
+  Future<WeeklyScanStatus> setWeeklyScanSchedule(String? lastRunAt) async {
+    return WeeklyScanStatus.fromJson(
+      await _putJson('/api/v1/pipeline/weekly', {'lastRunAt': lastRunAt}),
+    );
+  }
+
   // ---------------- 动态科目（M5：服务端科目目录 + 新建） ----------------
 
   /// 科目目录（含 dueCount）：内存缓存，[refresh]=true 强制重拉。
@@ -1148,6 +1173,39 @@ class PipelineTriggerResult {
       PipelineTriggerResult(
         ok: json['ok'] == true,
         triggered: json['triggered'] == true,
+        note: json['note'] as String?,
+      );
+}
+
+/// 自动周扫计时状态/调整结果（local 0.1.13+：`GET|PUT /api/v1/pipeline/weekly`）。
+class WeeklyScanStatus {
+  const WeeklyScanStatus({
+    required this.ok,
+    required this.due,
+    this.lastRunAt,
+    this.intervalDays = 7,
+    this.note,
+  });
+
+  final bool ok;
+
+  /// 上次自动周扫时间（ISO；null = 从未/已清除）。
+  final String? lastRunAt;
+
+  /// 自动周扫最小间隔（天；当前 7）。
+  final int intervalDays;
+
+  /// 距上次 ≥intervalDays（或从未跑过）= 到期——下次 catchup 收尾会自动扫。
+  final bool due;
+
+  final String? note;
+
+  factory WeeklyScanStatus.fromJson(Map<String, dynamic> json) =>
+      WeeklyScanStatus(
+        ok: json['ok'] != false,
+        lastRunAt: json['lastRunAt'] as String?,
+        intervalDays: (json['intervalDays'] as num?)?.toInt() ?? 7,
+        due: json['due'] == true,
         note: json['note'] as String?,
       );
 }

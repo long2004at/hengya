@@ -58,6 +58,12 @@ import 'data_maintenance.dart';
 import 'db.dart';
 import 'app_log.dart';
 import 'isolate_runner.dart';
+import 'pipeline_runner.dart'
+    show
+        PipelineRunner,
+        kWeeklyScanInterval,
+        kWeeklyScanSettingKey,
+        weeklyScanDue;
 
 class LocalBackend {
   LocalBackend._();
@@ -181,6 +187,11 @@ class LocalBackend {
   /// consumeForceRun 单飞自旋，重复 kick 无并发风险；本回调绝不抛。
   static Future<void> Function()? pipelineKick;
 
+  /// /pipeline/weekly（手动真题周扫）的后台执行回调：main() 装配
+  /// `PipelineRunner.instance.consumeWeeklyRun`。无标志文件语义——kick 即
+  /// 执行；weekly-only 轮与 catchup 共用 [_spinning] 单飞互斥；本回调绝不抛。
+  static Future<void> Function()? weeklyKick;
+
   // ---------------- 卡片导入（拆卡流水线入库） ----------------
 
   /// 批量导入卡片（对照 server `POST /cards/import` 语义：FlashCard.fromJson
@@ -276,6 +287,16 @@ class LocalBackend {
     // /corpus/build（App 内建库状态视图：运行态/模式选路/最近结果/待处理清单）
     if (path == '/corpus/build') {
       return _corpusBuildView(db);
+    }
+
+    // /pipeline/weekly（自动周扫计时状态：节流时间戳 + 到期判定）
+    if (path == '/pipeline/weekly') {
+      final lastRunAt = db.settingGet(kWeeklyScanSettingKey);
+      return {
+        'lastRunAt': lastRunAt,
+        'intervalDays': kWeeklyScanInterval.inDays,
+        'due': weeklyScanDue(lastRunAt, DateTime.now()),
+      };
     }
 
     // /cards/pending（server 裸数组 → {'list': [...]} 约定形状）
@@ -724,6 +745,11 @@ final aiTest = RegExp(
       return _triggerPipeline();
     }
 
+    // /pipeline/weekly（手动真题周扫 kickoff；weekly-only 单轮后台执行）
+    if (path == '/pipeline/weekly') {
+      return _triggerWeeklyScan();
+    }
+
     // /corpus/build（App 内建库触发；单飞守卫返回进行中状态而非报错）
     if (path == '/corpus/build') {
       return _triggerCorpusBuild(db, m);
@@ -837,6 +863,12 @@ final aiPut = RegExp(
         saveProgress(progressPath, data);
       }
       return {..._subjectChaptersView(id), 'ok': true, 'note': r.note};
+    }
+
+    // /pipeline/weekly（自动周扫节流时间戳自由调整；body
+    // {lastRunAt: ISO | null}——null/空 = 清除，下次 catchup 立即到期）
+    if (path == '/pipeline/weekly') {
+      return _setWeeklyScanSchedule(db, m);
     }
 
     throw ApiException(404, '本地模式不支持: $path');
@@ -1824,6 +1856,56 @@ if (svc == 'llm' || svc == 'llm_backup') {
     } on FileSystemException catch (e) {
       throw ApiException(500, '无法写入流水线触发标志: $e');
     }
+  }
+
+  /// /pipeline/weekly 真实现（手动真题周扫）：无 .force_run 标志语义——
+  /// 直接经 [weeklyKick] 后台执行 weekly-only 单轮。catchup 运行中 → 409
+  /// （consumeWeeklyRun 与 catchup 共用单飞，运行中 kick 会被静默忽略，
+  /// 这里显式 409 让 UI 如实反馈）；DataMaintenance 备份/恢复期间已在
+  /// _ensureDataAvailable 拒绝（409）。未装配（测试/CLI）→ 503。
+  Map<String, dynamic> _triggerWeeklyScan() {
+    final kick = weeklyKick;
+    if (kick == null) {
+      throw ApiException(503, '手动真题周扫未装配');
+    }
+    if (PipelineRunner.instance.running) {
+      throw ApiException(409, '拆卡流水线正在运行，请稍后再试');
+    }
+    unawaited(kick());
+    return {'ok': true, 'triggered': true, 'note': '已触发真题周扫（后台运行中）'};
+  }
+
+  /// PUT /pipeline/weekly：自动周扫节流时间戳自由调整。null/空串 = 清除
+  /// （weeklyScanDue 对坏值视为「从未跑过」→ 下次 catchup 立即到期）；
+  /// 合法 ISO = 任意前调/后调。手动周扫路径不写此键（两路节奏独立）。
+  Map<String, dynamic> _setWeeklyScanSchedule(Db db, Map<String, dynamic> m) {
+    if (!m.containsKey('lastRunAt')) {
+      throw ApiException(400, '缺少 lastRunAt 字段（ISO 时间字符串或 null）');
+    }
+    final v = m['lastRunAt'];
+    if (v == null || (v is String && v.trim().isEmpty)) {
+      db.settingSet(kWeeklyScanSettingKey, '');
+      return {
+        'ok': true,
+        'lastRunAt': null,
+        'due': true,
+        'note': '已清除自动周扫计时——下次拆卡收尾立即到期',
+      };
+    }
+    if (v is! String) {
+      throw ApiException(400, 'lastRunAt 必须是 ISO 时间字符串或 null');
+    }
+    final t = DateTime.tryParse(v.trim());
+    if (t == null) {
+      throw ApiException(400, 'lastRunAt 不是合法时间');
+    }
+    final iso = t.toIso8601String();
+    db.settingSet(kWeeklyScanSettingKey, iso);
+    return {
+      'ok': true,
+      'lastRunAt': iso,
+      'due': weeklyScanDue(iso, DateTime.now()),
+    };
   }
 
   // ---------------- 工具 ----------------

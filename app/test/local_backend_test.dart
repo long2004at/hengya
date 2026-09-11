@@ -810,6 +810,74 @@ void main() {
     );
   });
 
+  test('真题周扫路由：POST 未装配 503；GET 计时状态；PUT 清除/任意写入/非法 400', () async {
+    await boot();
+    final be = LocalBackend.instance;
+
+    // POST：weeklyKick 未装配（本文件不接线）→ 503 明确报错
+    expect(
+      () => be.post('/pipeline/weekly', null),
+      throwsA(
+        isA<ApiException>().having((e) => e.statusCode, 'statusCode', 503),
+      ),
+    );
+
+    // GET：初始状态——从未自动扫过 → due=true
+    final s1 = await be.get('/pipeline/weekly');
+    expect(s1['lastRunAt'], isNull);
+    expect(s1['intervalDays'], 7);
+    expect(s1['due'], true);
+
+    // PUT：任意 ISO 时间写入 → 回显；距 now <7 天 → due=false
+    final s2 = await be.put('/pipeline/weekly', {
+      'lastRunAt': DateTime.now().toIso8601String(),
+    });
+    expect(s2['ok'], true);
+    expect(s2['due'], false);
+    final s3 = await be.get('/pipeline/weekly');
+    expect(s3['lastRunAt'], isNotNull);
+    expect(s3['due'], false);
+
+    // PUT：null = 清除 → 立即到期
+    final s4 = await be.put('/pipeline/weekly', {'lastRunAt': null});
+    expect(s4['ok'], true);
+    expect(s4['due'], true);
+    final s5 = await be.get('/pipeline/weekly');
+    expect(s5['lastRunAt'], isNull);
+    expect(s5['due'], true);
+
+    // PUT：非法时间/类型/缺字段 → 400（绝不写脏值）
+    expect(
+      () => be.put('/pipeline/weekly', {'lastRunAt': 'not-a-date'}),
+      throwsA(
+        isA<ApiException>().having((e) => e.statusCode, 'statusCode', 400),
+      ),
+    );
+    expect(
+      () => be.put('/pipeline/weekly', {'lastRunAt': 123}),
+      throwsA(
+        isA<ApiException>().having((e) => e.statusCode, 'statusCode', 400),
+      ),
+    );
+    expect(
+      () => be.put('/pipeline/weekly', <String, dynamic>{}),
+      throwsA(
+        isA<ApiException>().having((e) => e.statusCode, 'statusCode', 400),
+      ),
+    );
+
+    // PUT 写入的值实际落 settings 表（GET/调度判定同源）
+    await be.put('/pipeline/weekly', {
+      'lastRunAt': '2026-01-01T00:00:00.000',
+    });
+    final db = await Db.open('${tmp.path}/hengya.db');
+    addTearDown(db.close);
+    expect(
+      db.settingGet('pipeline.lastWeeklyScanAt'),
+      '2026-01-01T00:00:00.000',
+    );
+  });
+
   test('通配守卫：/cards/search 不被 /cards/<id> 吞（具体路径优先）', () async {
     await boot();
     await seedCards();

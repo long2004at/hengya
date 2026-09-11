@@ -945,6 +945,76 @@ void main() {
     expect(llmCalls, 2);
   });
 
+  test('⑤ 周扫接线：force=true 手动轮——绕 7 天节流且恒不写时间戳（两路独立）', () async {
+    final db = await openDb();
+    addTearDown(db.close);
+    db.insertSubject(id: 'endo', name: '通史');
+
+    Future<Map<String, Object?>> runSearch(
+      String query, {
+      String? subject,
+      String? sourceType,
+      int? k,
+    }) async {
+      if (sourceType == 'exam') {
+        return {
+          'results': [
+            hit(
+              'exam:2022:2',
+              '2022年口腔执业医师资格试题（网友回忆版）',
+              '真题',
+              '3-4',
+              0.85,
+              sourceType: 'exam',
+            ),
+          ],
+        };
+      }
+      return {'results': <Object?>[]};
+    }
+
+    Future<String> llmChat(String system, String user, {String tag = ''}) async {
+      if (tag == 'weekly') {
+        return jsonEncode({
+          'cards': [
+            {
+              'subjectId': 'endo',
+              'type': 'basic',
+              'front': '手动周扫真题卡',
+              'back': '答案',
+              'evidenceChunkId': 'exam:2022:2',
+              'examMeta': {'year': '2022', 'no': '3'},
+            },
+          ],
+        });
+      }
+      throw LlmException('意外 tag: $tag');
+    }
+
+    final deps = PipelineDeps(
+      db: db,
+      runSearch: runSearch,
+      llmChat: llmChat,
+      prompts: const {},
+      progressData: endoProgress(),
+    );
+
+    // ① 刚写过时间戳（<7 天）：自动路径必节流，force 手动轮绕过且照常出卡
+    db.settingSet(kWeeklyScanSettingKey, DateTime.now().toIso8601String());
+    final r1 = await runWeeklyAfterCatchup(deps: deps, force: true);
+    expect(r1['ran'], true, reason: 'force 绕过 7 天节流');
+    expect(r1['cards'], 1);
+    expect(r1['lastRunAt'], isNull, reason: '手动轮不写节流时间戳');
+    final anchor = db.settingGet(kWeeklyScanSettingKey);
+    expect(anchor, isNotNull, reason: '原时间戳保留在 settings');
+
+    // ② 同一时间戳下自动路径仍节流——手动操作不挪动自动节奏
+    final r2 = await runWeeklyAfterCatchup(deps: deps);
+    expect(r2['ran'], false);
+    expect(r2['skipped'], 'throttled');
+    expect(db.settingGet(kWeeklyScanSettingKey), anchor);
+  });
+
   test('⑤ 周扫接线：空态静默跳过（无已学章命中且无技能候选）→ 不写时间戳可重试', () async {
     final db = await openDb();
     addTearDown(db.close);

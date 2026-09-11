@@ -82,6 +82,8 @@ Future<void> _mainImpl() async {
     DataManager.instance.autoBackupIfNeeded(support.path);
     // Phase 4：流水线后台执行接线（路由 kick + 启动消费遗留 .force_run）
     LocalBackend.pipelineKick = PipelineRunner.instance.consumeForceRun;
+    // 手动真题周扫（weekly-only）接线：/pipeline/weekly 直接后台消费
+    LocalBackend.weeklyKick = PipelineRunner.instance.consumeWeeklyRun;
     unawaited(
       PipelineRunner.instance.consumeForceRun(
         trigger: kPipelineTriggerStartup, // #13：启动消费遗留标志（非用户手动）

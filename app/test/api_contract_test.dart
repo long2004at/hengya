@@ -10,6 +10,9 @@
 //   POST /api/v1/subjects                       body {name, id?}
 //   GET  /api/v1/progress                       → {subjects:[...], updated_at}
 //   POST /api/v1/pipeline/trigger（0.4.1+）     → {ok, triggered, note}
+//   POST /api/v1/pipeline/weekly（0.1.13+）     → {ok, triggered, note}（手动真题周扫）
+//   GET  /api/v1/pipeline/weekly（0.1.13+）     → {lastRunAt, intervalDays, due}
+//   PUT  /api/v1/pipeline/weekly（0.1.13+）     body {lastRunAt: ISO|null}
 import 'dart:convert';
 import 'dart:io';
 
@@ -201,6 +204,32 @@ void main() {
                 'note': '已触发，约 1 分钟内开跑',
               })
             : jsonEncode({'ok': true, 'triggered': false, 'note': '已有任务排队中'}),
+      );
+    } else if (path == '/api/v1/pipeline/weekly' &&
+        req.method == 'POST') {
+      res.write(
+        jsonEncode({'ok': true, 'triggered': true, 'note': '已触发真题周扫（后台运行中）'}),
+      );
+    } else if (path == '/api/v1/pipeline/weekly' && req.method == 'GET') {
+      res.write(
+        jsonEncode({
+          'lastRunAt': '2026-09-07T08:00:00.000',
+          'intervalDays': 7,
+          'due': false,
+        }),
+      );
+    } else if (path == '/api/v1/pipeline/weekly' && req.method == 'PUT') {
+      final decoded = jsonDecode(body) as Map<String, dynamic>;
+      final v = decoded['lastRunAt'];
+      res.write(
+        v == null
+            ? jsonEncode({
+                'ok': true,
+                'lastRunAt': null,
+                'due': true,
+                'note': '已清除自动周扫计时——下次拆卡收尾立即到期',
+              })
+            : jsonEncode({'ok': true, 'lastRunAt': v, 'due': false}),
       );
     } else {
       res.statusCode = 404;
@@ -480,6 +509,47 @@ void main() {
       expect(again.triggered, isFalse);
       expect(again.note, '已有任务排队中');
       lastOf('POST', '/api/v1/pipeline/trigger');
+    },
+  );
+
+  test(
+    'weeklyScan：POST/GET/PUT /api/v1/pipeline/weekly——手动周扫触发、状态读取、计时调整',
+    () async {
+      // POST：手动真题周扫 kickoff（weekly-only 单轮）
+      final trigger = await ApiClient.instance.triggerWeeklyScan();
+      expect(trigger.ok, isTrue);
+      expect(trigger.triggered, isTrue);
+      expect(trigger.note, '已触发真题周扫（后台运行中）');
+      lastOf('POST', '/api/v1/pipeline/weekly');
+
+      // GET：自动周扫计时状态
+      final status = await ApiClient.instance.weeklyScanStatus();
+      expect(status.lastRunAt, '2026-09-07T08:00:00.000');
+      expect(status.intervalDays, 7);
+      expect(status.due, isFalse);
+      lastOf('GET', '/api/v1/pipeline/weekly');
+
+      // PUT：写任意 ISO 时间 → 原样回显
+      final moved = await ApiClient.instance.setWeeklyScanSchedule(
+        '2026-09-05T12:00:00.000',
+      );
+      expect(moved.ok, isTrue);
+      expect(moved.lastRunAt, '2026-09-05T12:00:00.000');
+      expect(moved.due, isFalse);
+      final putReq = lastOf('PUT', '/api/v1/pipeline/weekly');
+      expect(putReq['body'], '{"lastRunAt":"2026-09-05T12:00:00.000"}');
+
+      // PUT：null = 清除（下次 catchup 立即到期）
+      final cleared = await ApiClient.instance.setWeeklyScanSchedule(null);
+      expect(cleared.ok, isTrue);
+      expect(cleared.lastRunAt, isNull);
+      expect(cleared.due, isTrue);
+      expect(
+        cleared.note,
+        '已清除自动周扫计时——下次拆卡收尾立即到期',
+      );
+      final clearReq = lastOf('PUT', '/api/v1/pipeline/weekly');
+      expect(clearReq['body'], '{"lastRunAt":null}');
     },
   );
 
