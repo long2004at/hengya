@@ -1924,6 +1924,8 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
     final st = _st;
     if (st == null || _busyTrigger) return;
     final modeLabel = _modeLabel(st);
+    // 失败/取消态 = 续跑：明确告知走断点续传，不是从头重建。
+    final resuming = st.error != null || st.cancelled;
     // 教材标注（本节点）：待处理含教材树（<短码>-textbook）时确认框措辞
     // 「课件/教材」，纯课件树维持原文案（零变化）。节点④补：大纲树
     // （-outline）/真题树（-exam）同理并入措辞。
@@ -1942,12 +1944,17 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
     final go = await showDialog<bool>(
       context: context,
       builder: (dlgCtx) => AlertDialog(
-        title: const Text('开始建库？'),
+        title: Text(resuming ? '继续建库？' : '开始建库？'),
         content: Text(
-          '将把 ${_pending.length} 个$kindLabel抽取入库（$modeLabel）。\n\n'
-          '后台运行，期间可正常使用 App、可离开本页。'
-          '${st.modePreview == 'online' ? '\n在线嵌入会消耗少量 API 额度。' : ''}'
-          '${st.replacesForeign ? '\n\n注意：当前语料库含非本机上传语料，本次构建后将以本机课件为准（树外语料将被移除）。' : ''}',
+          resuming
+              ? '将从上次中断处继续：已抽取/已嵌入的部分自动跳过'
+                    '${_pending.isEmpty ? '，无需重新上传或从头重建' : ''}。\n\n'
+                    '后台运行，期间可正常使用 App、可离开本页。'
+                    '${st.modePreview == 'online' ? '\n在线嵌入会消耗少量 API 额度。' : ''}'
+              : '将把 ${_pending.length} 个$kindLabel抽取入库（$modeLabel）。\n\n'
+                    '后台运行，期间可正常使用 App、可离开本页。'
+                    '${st.modePreview == 'online' ? '\n在线嵌入会消耗少量 API 额度。' : ''}'
+                    '${st.replacesForeign ? '\n\n注意：当前语料库含非本机上传语料，本次构建后将以本机课件为准（树外语料将被移除）。' : ''}',
         ),
         actions: [
           TextButton(
@@ -2176,6 +2183,8 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
   }
 
   Widget _idleView(ColorScheme scheme, CorpusBuildStatus st) {
+    // 失败/取消态 = 续跑：放行「开始/继续建库」按钮（见按钮区注释）。
+    final canResume = st.error != null || st.cancelled;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -2235,15 +2244,21 @@ class _CorpusBuildPanelState extends State<_CorpusBuildPanel> {
           _summaryView(scheme, st.result!),
           const SizedBox(height: 10),
         ],
-        // ---- 开始建库（待处理为空时禁用——构建语义 = 消费待处理队列） ----
+        // ---- 开始/继续建库 ----
+        // 正常态：待处理为空时禁用（构建语义 = 消费待处理队列）。
+        // 失败/取消态：放行——chunk_state 断点数据仍在，点了自动续传
+        // （forceFull=false + 两层断点：manifest 抽取增量 + 嵌入续跑），
+        // 而不是从零重建。2026-09-11 修复：嵌入阶段中断后 pending 已空，
+        // 原条件把唯一续传入口锁死（按钮灰掉），与「失败可重试（断点
+        // 续传）」文案自相矛盾。
         SizedBox(
           width: double.infinity,
           child: FilledButton.icon(
-            onPressed: _pending.isEmpty || _busyTrigger
+            onPressed: (_pending.isEmpty && !canResume) || _busyTrigger
                 ? null
                 : _confirmAndStart,
             icon: const Icon(Icons.construction_rounded, size: 18),
-            label: Text(_busyTrigger ? '启动中…' : '开始建库'),
+            label: Text(_busyTrigger ? '启动中…' : (canResume ? '继续建库' : '开始建库')),
           ),
         ),
         // ---- 重建全部向量（2026-09-11 强制重建；无待处理也可用——

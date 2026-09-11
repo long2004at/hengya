@@ -365,18 +365,19 @@ void main() {
     await tester.pump();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.textContaining('上次建库失败：抽取失败：演示错误'), findsOneWidget);
+expect(find.textContaining('上次建库失败：抽取失败：演示错误'), findsOneWidget);
     expect(find.textContaining('失败可重试'), findsOneWidget);
-    // 待处理未清（无 manifest）→ 再开始按钮仍可用
+    // 待处理未清（无 manifest）→ 续跑按钮仍可用（失败态 label = 继续建库）
     expect(find.text('待处理 2 个文件'), findsOneWidget);
+    expect(find.text('继续建库'), findsOneWidget);
     final btn = find
-        .ancestor(of: find.text('开始建库'), matching: find.byType(FilledButton))
+        .ancestor(of: find.text('继续建库'), matching: find.byType(FilledButton))
         .evaluate()
         .single;
     expect((btn.widget as FilledButton).onPressed, isNotNull);
 
     // 重试走通（第二轮触发）
-    await tester.tap(find.text('开始建库'));
+    await tester.tap(find.text('继续建库'));
     await tester.pump();
     await tester.tap(find.text('立即开始'));
     await tester.pump();
