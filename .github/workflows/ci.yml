@@ -30,7 +30,10 @@ jobs:
 
       - run: flutter pub get
       - run: flutter analyze
-      - run: flutter test
+      # 串行跑套件（--concurrency=1）：共享 runner 负载下并发套件互相挤兑，
+      # 重 IO/时序敏感用例（full_backup 换库、pipeline 池上限）会 flake——
+      # 同 commit main 绿 tag 红且每轮挂的用例不同即此因。确定性优先。
+      - run: flutter test --concurrency=1
 
   # Linux 宿主：试探性验证（PDF/金样用例自动 SKIP；sqlite3 走系统库）
   test-linux:
@@ -55,7 +58,10 @@ jobs:
 
       - run: flutter pub get
       - run: flutter analyze
-      - run: flutter test
+      # 串行跑套件（--concurrency=1）：共享 runner 负载下并发套件互相挤兑，
+      # 重 IO/时序敏感用例（full_backup 换库、pipeline 池上限）会 flake——
+      # 同 commit main 绿 tag 红且每轮挂的用例不同即此因。确定性优先。
+      - run: flutter test --concurrency=1
 
   # 打 tag（v*）时：Android release 构建并附到草稿 Release（发布前可编辑中文说明）
   release-android:

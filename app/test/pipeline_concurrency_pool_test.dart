@@ -96,8 +96,10 @@ void main() {
     'score': 0.92,
   };
 
-  /// fake LLM（脚本化）：split → 25ms 延迟后出 1 张真 ppt 卡（探针记录
-  /// 在跑数）；throwOn 集合内关键词延迟 10ms 后抛非 LlmException 的 Error
+  /// fake LLM（脚本化）：split → 150ms 延迟后出 1 张真 ppt 卡（探针记录
+  /// 在跑数；延迟窗口取大——CI 共享 runner 负载下 worker 取任务间隙可被
+  /// 拖长，25ms 窗口曾致「峰值恰 3」满载断言漏采，150ms 使 3 worker 必然
+  /// 同时在飞）；throwOn 集合内关键词延迟 10ms 后抛非 LlmException 的 Error
   ///（模拟 splitKeyword 内逃逸的畸形数据异常——隔离路径必经池 worker catch）。
   (LlmChatFn, _SplitProbe) fakeLlm({Set<String> throwOn = const {}}) {
     final probe = _SplitProbe();
@@ -115,7 +117,7 @@ void main() {
                 await Future<void>.delayed(const Duration(milliseconds: 10));
                 throw StateError('模拟未捕获 Error（畸形数据同型）：$kwText');
               }
-              await Future<void>.delayed(const Duration(milliseconds: 25));
+              await Future<void>.delayed(const Duration(milliseconds: 150));
               return jsonEncode(<String, Object?>{
                 'cards': <Map<String, Object?>>[
                   <String, Object?>{
