@@ -18,6 +18,7 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:hengya/app.dart';
+import 'package:hengya/pages/about_page.dart';
 import 'package:hengya/pages/bank_page.dart';
 import 'package:hengya/pages/home_page.dart';
 import 'package:hengya/pages/progress_page.dart';
@@ -446,13 +447,15 @@ void main() {
     final settingsTaps = await sweepPage(tester,
         anchor: find.byType(SettingsPage),
         skip: const {
-          '开启提醒', // flutter_local_notifications 平台通道（真机验证项）
-          '去开启', // 系统权限页
-          '导入数据库（迁移）', // file_selector 平台通道（真机验证项）
-          '一键导出并分享', // share_plus 平台通道（真机验证项）
+          // 2026-09-11 UI 迁移：每日提醒/数据管理/AI 服务配置区块已迁「恒牙」
+          // 聚合页——'开启提醒'/'去开启'/'导入数据库'/'一键导出'跻身 AboutPage，
+          // 由下方 ⑥a 恒牙聚合页 sweep 覆盖；'恒牙' 行 + '上传课件' 这里跳过
+          //（恒牙行转入显式导航段，避免 sweep 隐式漫游拉长收敛）。
+          '恒牙', // 显式导航段处理（点入 AboutPage 后锚点失效需 back 收敛）
           '上传课件', // file_selector 平台通道（真机验证项）
         });
-    expect(settingsTaps, greaterThan(5), reason: '设置页应点到同步/检查/拆卡/AI/语料等行');
+    expect(settingsTaps, greaterThan(3),
+        reason: '设置页迁走提醒/数据管理/AI 区块后应仍点到拆卡/语料/关于等行');
 
     // sweep 可能点掉设置页自身返回键弹回统计页——不在设置页就重新进入
     if (!tester.any(find.byType(SettingsPage))) {
@@ -462,14 +465,54 @@ void main() {
       expect(tester.any(find.byType(SettingsPage)), isTrue, reason: '重新进入设置页');
     }
 
-    // 2026-09-06 措辞刀：local 模式无服务器概念——「数据与同步」段（离线评分
+// 2026-09-06 措辞刀：local 模式无服务器概念——「数据与同步」段（离线评分
     // 队列/手动同步/服务器连接）整段隐藏，三件均断言不在场
     expect(find.text('数据与同步'), findsNothing, reason: 'local 模式不该出现「数据与同步」段');
     expect(find.text('手动同步'), findsNothing, reason: 'local 模式不该出现「手动同步」');
     expect(find.text('服务器连接'), findsNothing, reason: 'local 模式不该出现「服务器连接」');
-    // AI 编辑：填表保存 → 气泡 + 编辑层关闭
+
+    // —— ⑥a 「恒牙」聚合页（AboutPage）：迁入区块（每日提醒/数据管理/AI 服务
+    // 配置/instruct）全部按钮 sweep + AI 编辑保存气泡（2026-09-11 UI 迁移：
+    // 这三区块自设置页整体迁入恒牙聚合页，sweep 目标随之迁移）——
+    if (!tester.any(find.byType(SettingsPage))) {
+      await tester.ensureVisible(find.text('设置'));
+      await tester.tap(find.text('设置'), warnIfMissed: false);
+      await settle(tester);
+      expect(tester.any(find.byType(SettingsPage)), isTrue, reason: '重新进入设置页');
+    }
+    await tester.ensureVisible(find.widgetWithText(ListTile, '恒牙'));
+    await tester.tap(find.widgetWithText(ListTile, '恒牙'), warnIfMissed: false);
+    await settle(tester);
+    expect(tester.any(find.byType(AboutPage)), isTrue, reason: '点恒牙必须进恒牙聚合页');
+    final aboutTaps = await sweepPage(tester,
+        anchor: find.byType(AboutPage),
+        skip: const {
+          '开启提醒', // SwitchListTile 本就不入候选（通知平台通道，防御保留）
+          '去开启', // 系统权限页（flutter_local_notifications 通道，真机验证项）
+          '导入数据库（迁移）', // file_selector 平台通道（真机验证项）
+          '导入语料包（成品语料库）', // file_selector 平台通道（真机验证项）
+          '一键导出并分享', // share_plus 平台通道（真机验证项）
+          '日志', // AppLogPage 跨页漫游（sweep 锚点无法跨页回归，显式留待他测）
+          '检查新版本', // 真实 HTTP 链路（宿主恒 400 → 失败相位；非死角但不扰动）
+        });
+    expect(aboutTaps, greaterThan(3),
+        reason: '恒牙聚合页应点到版本线路/提醒时间/AI 卡片/清除缓存等行');
+
+// AI 编辑（已迁恒牙聚合页）：填表保存 → 气泡 + 编辑层关闭
     //（2026-09-07 batch3 node1：设置页「应用内更新」源输入框也是常驻 TextField，
     //  收窄到 BottomSheet 子树——只驱动 AI 编辑层三字段）
+    // sweep 可能点掉 AboutPage 自身返回键弹回设置页——不在聚合页就重新进入
+    if (!tester.any(find.byType(AboutPage))) {
+      if (!tester.any(find.byType(SettingsPage))) {
+        await tester.ensureVisible(find.text('设置'));
+        await tester.tap(find.text('设置'), warnIfMissed: false);
+        await settle(tester);
+      }
+      await tester.ensureVisible(find.widgetWithText(ListTile, '恒牙'));
+      await tester.tap(find.widgetWithText(ListTile, '恒牙'), warnIfMissed: false);
+      await settle(tester);
+      expect(tester.any(find.byType(AboutPage)), isTrue, reason: '重新进入恒牙聚合页');
+    }
     await tester.ensureVisible(find.text('生卡 LLM'));
     await tester.tap(find.text('生卡 LLM'), warnIfMissed: false);
     await settle(tester);
@@ -484,6 +527,15 @@ void main() {
     expect(find.textContaining('已保存 AI 服务配置'), findsOneWidget, reason: 'AI 保存必须出气泡');
     await tester.pump(const Duration(milliseconds: 1500)); // 走完 enter150+stay1000+exit250
     await tester.pump(const Duration(milliseconds: 800));
+    // 返回设置页（AboutPage 由设置页 push：返回键可弹栈；sweep 可能已点掉返回键）
+    await backIfPushed(tester);
+    await settle(tester);
+    if (!tester.any(find.byType(SettingsPage))) {
+      await tester.ensureVisible(find.text('设置'));
+      await tester.tap(find.text('设置'), warnIfMissed: false);
+      await settle(tester);
+      expect(tester.any(find.byType(SettingsPage)), isTrue, reason: '回到设置页');
+    }
     // 强制拆卡：确认对话框 → 立即触发 → local .force_run 落盘 + 气泡
     await tester.ensureVisible(find.textContaining('强制开始拆卡'));
     await tester.tap(find.textContaining('强制开始拆卡'), warnIfMissed: false);

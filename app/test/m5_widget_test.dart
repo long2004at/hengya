@@ -1,9 +1,12 @@
 // M5 组件级测试：
-// 设置页 AI 配置/知识库区块（404 降级 → 「需服务器 0.3.0+」不崩溃；正常态渲染；
+// AI 配置/知识库区块（404 降级 → 「需服务器 0.3.0+」不崩溃；正常态渲染；
 // 编辑层保存把 apiKey 送进 PUT 请求体并弹已保存提示）
 // 关键词录入栏（科目拉取失败 → 回退内置 7 科 + 内联新建入口；新建对话框名称必填）
 // 科目选择弹层（动态列表 + 内置标注 + 选中返回）
 //
+// 2026-09-11 UI 迁移：AI 服务配置区块自设置页迁入「恒牙」聚合页（AboutPage）——
+// AI 卡片/编辑层相关用例改 pump AboutPage（remote 模式，假 HttpClient 注入
+// 走 /settings/ai 契约不变）；知识库区块仍留守设置页，相关断言保持 settings。
 // 测试基建：TestWidgetsFlutterBinding 会把 HttpClient mock 成恒 400，且 widget
 // 测试的 fake-async 环境里真实 socket 不可靠（实测会挂起）——改经
 // [ApiClient.debugInjectHttpClient] 注入本文件实现的假 HttpClient：
@@ -12,6 +15,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:hengya/pages/about_page.dart';
 import 'package:hengya/pages/inbox_sheet.dart';
 import 'package:hengya/pages/settings_page.dart';
 import 'package:hengya/pages/subject_picker.dart';
@@ -262,20 +266,37 @@ void main() {
     await tester.pumpAndSettle(); // 假路由即答（微任务）→ settle 即得最终 UI
   }
 
-  testWidgets('设置页 404 降级：AI 配置与知识库区块显示「需服务器 0.3.0+」，不崩溃',
+  /// 打开「恒牙」聚合页（2026-09-11 UI 迁移：AI 服务配置区块迁入地）。
+  /// 视口 800×2600：头部卡 + 版本更新 + 每日提醒 + 数据管理(local 隐藏) +
+  /// AI 四卡全在渲染范围内；假路由即答 → pumpAndSettle 即得最终 UI。
+  Future<void> pumpAbout(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(800, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const MaterialApp(home: AboutPage()));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('404 降级：恒牙聚合页 AI 区块 + 设置页知识库各显示「需服务器 0.3.0+」，不崩溃',
       (tester) async {
     router.all404 = true; // 旧服务器（0.2.0）：新增端点全部 404
+    // AI 服务配置已迁入「恒牙」聚合页（AboutPage）
+    await pumpAbout(tester);
+    expect(find.textContaining('需服务器 0.3.0+，暂未部署'), findsOneWidget);
+    expect(find.text('AI 服务配置'), findsOneWidget);
+    expect(find.text('每日提醒'), findsOneWidget); // 同日迁入的提醒区块照常渲染
+    // 知识库仍留守设置页：降级提示 + 页面其余部分照常渲染
+    await tester.pumpWidget(const SizedBox());
     await pumpSettings(tester);
-    // 两处新区块（AI 服务配置 + 知识库）都降级提示
-    expect(find.textContaining('需服务器 0.3.0+，暂未部署'), findsNWidgets(2));
-    // 页面其余部分照常渲染
+    expect(find.textContaining('需服务器 0.3.0+，暂未部署'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
-    expect(find.text('每日提醒'), findsOneWidget);
     expect(find.text('关于'), findsOneWidget);
   });
 
-  testWidgets('设置页正常态：两套 AI 卡片 + 掩码 + 知识库状态可见', (tester) async {
-    await pumpSettings(tester);
+  testWidgets('正常态：恒牙聚合页两套 AI 卡片 + 掩码；设置页知识库状态可见', (tester) async {
+    // AI 卡片（已迁入恒牙聚合页）
+    await pumpAbout(tester);
     expect(find.text('生卡 LLM'), findsOneWidget);
     expect(find.text('向量模型'), findsOneWidget);
     // 服务端掩码原样展示 + 加密态
@@ -288,6 +309,8 @@ void main() {
     expect(find.text('地址：https://r.cn/v1/rerank'), findsOneWidget);
     // 知识库状态卡：块数/存储/待处理队列/科目分布（设置页不拉科目目录，
     // 名称缓存未命中 → 原样 id 渲染——0.3.1 起无内置短名兜底）
+    await tester.pumpWidget(const SizedBox());
+    await pumpSettings(tester);
     expect(find.text('语料库'), findsOneWidget);
     expect(find.textContaining('42 块语料 · 3.2 MB'), findsOneWidget);
     expect(find.textContaining('oms 18'), findsOneWidget);
@@ -297,7 +320,7 @@ void main() {
 
   testWidgets('AI 编辑层：apiKey 送进 PUT 请求体 → 保存成功弹提示并关闭',
       (tester) async {
-    await pumpSettings(tester);
+    await pumpAbout(tester);
     // 打开生卡 LLM 编辑层
     await tester.tap(find.text('生卡 LLM'));
     await tester.pumpAndSettle();
@@ -328,7 +351,7 @@ void main() {
   });
 
   testWidgets('AI 编辑层：测试连接按钮展示 ok + 延迟', (tester) async {
-    await pumpSettings(tester);
+    await pumpAbout(tester);
     await tester.tap(find.text('向量模型'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('测试连接'));
@@ -343,7 +366,7 @@ void main() {
 
   testWidgets('LLM 编辑层（#2 分支一）：model 在 /models 列表 → 正常成功行', (tester) async {
     llmListModelsOverride = (baseUrl, apiKey) async => ['m1', 'gpt-4o-mini'];
-    await pumpSettings(tester);
+    await pumpAbout(tester);
     await tester.tap(find.text('生卡 LLM'));
     await tester.pumpAndSettle();
     // 配置已回显（baseUrl=https://a.cn/v1、model=m1）；输入 key 启用在列核对
@@ -370,7 +393,7 @@ void main() {
 
   testWidgets('LLM 编辑层（#2 分支二）：model 不在列表 → 橙色警示行，不阻断保存', (tester) async {
     llmListModelsOverride = (baseUrl, apiKey) async => ['gpt-4o-mini'];
-    await pumpSettings(tester);
+    await pumpAbout(tester);
     await tester.tap(find.text('生卡 LLM'));
     await tester.pumpAndSettle();
     await tester.enterText(aiSheetFields().at(2), 'sk-llm-key');
@@ -401,7 +424,7 @@ void main() {
   testWidgets('重排序编辑层（未配置态）：预填 SiliconFlow 默认端点+模型，保存三字段入 PUT',
       (tester) async {
     router.rerankerCfg = null; // 旧服务器响应缺 reranker 节点 → 未配置态
-await pumpSettings(tester);
+    await pumpAbout(tester);
     // 卡片空态占位（收窄到重排序卡内部——备用生卡 LLM 未配置时也有「地址：—」）
     expect(
       find.descendant(
@@ -446,7 +469,7 @@ await pumpSettings(tester);
   });
 
   testWidgets('重排序编辑层：测试连接成功 → 内联结果 + TopToast 双反馈', (tester) async {
-    await pumpSettings(tester);
+    await pumpAbout(tester);
     await tester.tap(find.text('重排序模型'));
     await tester.pumpAndSettle();
 
@@ -474,7 +497,7 @@ await pumpSettings(tester);
       'latencyMs': 120,
       'message': 'Invalid token', // 上游裸 message
     };
-    await pumpSettings(tester);
+    await pumpAbout(tester);
     await tester.tap(find.text('重排序模型'));
     await tester.pumpAndSettle();
 

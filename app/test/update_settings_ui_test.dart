@@ -64,7 +64,7 @@ void main() {
     LocalBackend.instance.init(tmp.path);
     debugBackendMode = BackendMode.local;
     ApiClient.instance.resetSubjectCaches();
-    // 设置页 initState：DailyReminder.loadSettings 走 SharedPreferences（内存 mock）
+    // 关于页/设置页 initState：DailyReminder.loadSettings 走 SharedPreferences（内存 mock）
     SharedPreferences.setMockInitialValues({});
     // 验签公钥 = 固定测试密钥对公钥（安全修复 B；生产 asset 不在测试宿主）
     fx = await UpdateSignFixture.load();

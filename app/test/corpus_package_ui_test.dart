@@ -1,11 +1,12 @@
-// 语料包导入 · 设置页区块 UI 测试（批5 节点③）
+// 语料包导入 · 「恒牙」聚合页（AboutPage）区块 UI 测试（批5 节点③；
+// 2026-09-11 UI 迁移：数据管理 + instruct 前缀开关随设置页区块迁入 AboutPage）
 // ============================================================================
 //
 // testWidgets 假异步纪律（同 update_settings_ui_test.dart / corpus_build_
 // panel_test.dart）：
 //   - setUp/tearDown 100% 同步；boot() 放用例体首行；
 //   - 用例体内文件操作全 Sync 变体；Windows 宿主显式加载 test/sqlite3.dll；
-//   - SharedPreferences.setMockInitialValues({})（设置页 initState 读提醒配置）；
+//   - SharedPreferences.setMockInitialValues({})（AboutPage initState 读提醒配置）；
 //   - file_selector 平台通道在测试宿主不存在（真机验证项）——点击入口走
 //     失败 Toast 路径不炸；
 //   - 面板 pump()+pump(450ms)；Toast 展示 3000ms 纪律。
@@ -16,7 +17,7 @@
 import 'dart:ffi' as ffi;
 import 'dart:io';
 
-import 'package:hengya/pages/settings_page.dart';
+import 'package:hengya/pages/about_page.dart';
 import 'package:hengya/services/api/api_client.dart';
 import 'package:hengya/services/local/local_backend.dart';
 import 'package:hengya/services/local/pipeline_runner.dart'
@@ -57,13 +58,15 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   }
 
-  /// 打开设置页并等首屏异步加载落地（视口调高：ListView 惰性构建）。
-  Future<void> openSettings(WidgetTester tester) async {
-    tester.view.physicalSize = const Size(800, 3000);
+  /// 打开「恒牙」聚合页（AboutPage；数据管理/语料包/instruct 迁入地）并等
+  /// 首屏异步加载落地（视口调高：ListView 惰性构建，目标区块在折叠线以下）。
+  /// 2026-09-11 UI 迁移：原 openSettings（设置页）改为 pump AboutPage。
+  Future<void> openAbout(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(800, 4000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
+    await tester.pumpWidget(const MaterialApp(home: AboutPage()));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
@@ -81,7 +84,7 @@ void main() {
   testWidgets('数据管理区「导入语料包」入口渲染 + 点击不炸（通道真机验证项）',
       (tester) async {
     await boot();
-    await openSettings(tester);
+    await openAbout(tester);
 
     expect(find.text('导入语料包（成品语料库）'), findsOneWidget);
     expect(find.text('导入数据库（迁移）'), findsOneWidget); // 既有入口不挤掉
@@ -99,7 +102,7 @@ void main() {
   testWidgets('instruct 开关：默认开=保持旧行为；点按落库回读 + 装配接线',
       (tester) async {
     await boot();
-    await openSettings(tester);
+    await openAbout(tester);
 
     // 默认渲染：开（保持旧行为）
     expect(instructTile(tester).value, isTrue);
