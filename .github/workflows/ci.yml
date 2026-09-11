@@ -77,6 +77,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Gradle 构建缓存：AGP/AndroidX 依赖 + wrapper 发行版跨 run 复用，
+      # 消除每次发版现场下载（约省 3-4 分钟/build）。tag 触发写缓存供下次用。
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.44.6

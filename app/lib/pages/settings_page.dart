@@ -1171,12 +1171,20 @@ class _SettingsPageState extends State<SettingsPage> {
           else
             Column(
               children: [
-                _AiServiceCard(
+_AiServiceCard(
                   scheme: scheme,
                   title: '生卡 LLM',
                   desc: '每晚自动拆卡用',
                   config: _ai!.llm,
                   onEdit: () => _editAiService('llm'),
+                ),
+                const SizedBox(height: 8),
+                _AiServiceCard(
+                  scheme: scheme,
+                  title: '备用生卡 LLM',
+                  desc: '主 LLM 连续失败自动切换',
+                  config: _ai!.of('llm_backup'),
+                  onEdit: () => _editAiService('llm_backup'),
                 ),
                 const SizedBox(height: 8),
                 _AiServiceCard(
@@ -1837,7 +1845,8 @@ class _AiServiceEditSheetState extends State<_AiServiceEditSheet> {
       );
       // #2：llm 连接成功 → 再核对所配 model 是否在服务方 /models 列表
       //（在滚动条期间完成，一次 setState 落结果；核对失败不降级连通性结论）
-      final missing = (widget.service == 'llm' && r.ok)
+final missing = ((widget.service == 'llm' || widget.service == 'llm_backup') &&
+              r.ok)
           ? await _checkModelInList()
           : null;
       if (!mounted) return;
@@ -1886,11 +1895,12 @@ class _AiServiceEditSheetState extends State<_AiServiceEditSheet> {
     final baseUrl = _baseUrlCtrl.text.trim();
     final model = _modelCtrl.text.trim();
     if (baseUrl.isEmpty || model.isEmpty) return null;
-    var key = _keyCtrl.text.trim();
+var key = _keyCtrl.text.trim();
     if (key.isEmpty && currentBackendMode == BackendMode.local) {
       try {
         await LocalBackend.instance.initAiKeys(); // 幂等预热（main 已接线）
-        key = LocalBackend.instance.aiKeyOf('llm');
+        key = LocalBackend.instance
+            .aiKeyOf(widget.service == 'llm_backup' ? 'llm_backup' : 'llm');
       } catch (_) {
         key = '';
       }
@@ -1948,8 +1958,9 @@ class _AiServiceEditSheetState extends State<_AiServiceEditSheet> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final title = switch (widget.service) {
+final title = switch (widget.service) {
       'llm' => '编辑生卡 LLM',
+      'llm_backup' => '编辑备用生卡 LLM',
       'embedding' => '编辑向量模型',
       _ => '编辑重排序模型',
     };

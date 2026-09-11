@@ -116,7 +116,13 @@ import 'corpus/run_engine.dart'
         runWeekly,
         splitKeyword,
         splitPendingBySource;
-import 'corpus/run_llm.dart' show LlmAccount, LlmChatFn, LlmConfig, llmChatFn;
+import 'corpus/run_llm.dart'
+    show
+        LlmAccount,
+        LlmChatFn,
+        LlmConfig,
+        LlmFailoverEvent,
+        failoverLlmChatFn;
 import 'corpus/search_api.dart'
     show SiliconFlowConfig, normalizeEmbedEndpoint, siliconFlowEmbedder;
 import 'corpus/search_engine.dart' show EmbedQueryFn, corpusSearch;
@@ -1522,10 +1528,17 @@ Future<Map<String, Object?>> _runCatchupInWorker(
         embed: embed,
         embedModel: embedModel,
       );
-      final llmCfg = LlmConfig(
+final llmCfg = LlmConfig(
         baseUrl: db.settingGet('llm.baseUrl') ?? '',
         apiKey: req.aiKeys['llm'] ?? '',
         model: db.settingGet('llm.model') ?? '',
+      );
+      // 备用生卡 LLM（llm_backup.*，可选）：主连续失败 3 次切备用；
+      // 备用也连续失败 3 次 → 熔断（本轮跳过、收件箱保留，次日自动再试）。
+      final backupCfg = LlmConfig(
+        baseUrl: db.settingGet('llm_backup.baseUrl') ?? '',
+        apiKey: req.aiKeys['llm_backup'] ?? '',
+        model: db.settingGet('llm_backup.model') ?? '',
       );
       final account = LlmAccount();
       if (!llmCfg.configured) {
@@ -1535,6 +1548,25 @@ Future<Map<String, Object?>> _runCatchupInWorker(
         );
       }
       account.notes.addAll(req.promptNotes);
+      // failover 装配：备用已配置 → 主备自动切换；否则纯主通道（行为零变化）。
+      // failover 事件记入 account.notes（流水线结果/设置页可见，Q4-A）。
+      final failoverEvents = <String>[];
+      final llmChat = failoverLlmChatFn(
+        primary: llmCfg,
+        backup: backupCfg.configured ? backupCfg : null,
+        account: account,
+        onEvent: (event, state) {
+          final msg = switch (event) {
+            LlmFailoverEvent.switchedToBackup =>
+              '主 LLM 连续失败，已切备用生卡 LLM（备用模型 ${backupCfg.model}）',
+            LlmFailoverEvent.switchedBackToPrimary => '备用成功冷却到期，已切回主 LLM',
+            LlmFailoverEvent.tripped =>
+              '主备生卡 LLM 均连续失败已熔断，本轮剩余关键词跳过（收件箱保留，次日自动重试）',
+          };
+          failoverEvents.add(msg);
+          account.notes.add(msg);
+        },
+      );
       final progressPath = '$dataDir/corpus/progress.json';
       // 节点④（E 项）：大纲细目打标器——corpus.db outline_entries 载入
       // 执业树索引（corpus.db 只读连接；缺 outline_entries 表（旧库）或
@@ -1558,7 +1590,7 @@ Future<Map<String, Object?>> _runCatchupInWorker(
       final catchupDeps = PipelineDeps(
         db: db,
         runSearch: runSearch,
-        llmChat: llmChatFn(llmCfg, account),
+llmChat: llmChat,
         prompts: req.prompts,
         progressData: loadProgress(progressPath),
         progressPath: progressPath,
@@ -1739,9 +1771,10 @@ class PipelineRunner {
       args: PipelineCatchupRequest(
         dataDir: dataDir,
         prompts: prompts,
-        aiKeys: {
+aiKeys: {
           'embedding': LocalBackend.instance.aiKeyOf('embedding'),
           'llm': LocalBackend.instance.aiKeyOf('llm'),
+          'llm_backup': LocalBackend.instance.aiKeyOf('llm_backup'),
         },
         promptNotes: promptNotes,
         trigger: trigger,

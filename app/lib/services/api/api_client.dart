@@ -1162,16 +1162,21 @@ class AiSettings {
     required this.llm,
     required this.embedding,
     this.reranker = AiServiceConfig.empty,
+    this.llmBackup = AiServiceConfig.empty,
   });
 
   final AiServiceConfig llm;
   final AiServiceConfig embedding;
   final AiServiceConfig reranker;
 
+  /// 备用生卡 LLM（local 模式主备 failover；旧后端无此节点 → empty 兜底）。
+  final AiServiceConfig llmBackup;
+
   factory AiSettings.fromJson(Map<String, dynamic> json) {
     final llm = json['llm'];
     final embedding = json['embedding'];
     final reranker = json['reranker'];
+    final llmBackup = json['llm_backup'];
     return AiSettings(
       llm: llm is Map
           ? AiServiceConfig.fromJson(Map<String, dynamic>.from(llm))
@@ -1182,13 +1187,17 @@ class AiSettings {
       reranker: reranker is Map
           ? AiServiceConfig.fromJson(Map<String, dynamic>.from(reranker))
           : AiServiceConfig.empty,
+      llmBackup: llmBackup is Map
+          ? AiServiceConfig.fromJson(Map<String, dynamic>.from(llmBackup))
+          : AiServiceConfig.empty,
     );
   }
 
-  /// 按服务名取配置（service ∈ llm | embedding | reranker）
+/// 按服务名取配置（service ∈ llm | llm_backup | embedding | reranker）
   AiServiceConfig of(String service) => switch (service) {
     'embedding' => embedding,
     'reranker' => reranker,
+    'llm_backup' => llmBackup,
     _ => llm,
   };
 }

@@ -84,6 +84,136 @@ typedef LlmChatFn = Future<String> Function(String system, String user,
 LlmChatFn llmChatFn(LlmConfig cfg, LlmAccount account) =>
     (system, user, {tag = ''}) => llmChat(cfg, account, system, user, tag: tag);
 
+// ---------------- 主备 failover（生卡 LLM 保底） ----------------
+//
+// 语义（用户拍板，2026-09-11）：
+//   主 LLM 连续 3 次 LlmException → 切备用（onEvent 上报「主异常已用备用」）；
+//   备用连续 3 次失败 → 熔断闸：本轮剩余请求立即抛 LlmException（调用方按
+//   关键词 failed 处理、收件箱保留，次日自动再试）；
+//   备用成功 → 冷却 30 分钟后自动切回主（下轮调度天然机会，Q2-B）。
+// 设计约束：引擎零改动（仍是 LlmChatFn seam）；熔断抛 LlmException 与现有
+// 单点降级链（splitKeyword/synonym/studylog 的 on LlmException catch）完全
+// 兼容——熔断 = 快速失败，不空转烧超时。
+
+/// failover 状态快照（onEvent 上报/设置页展示用）。
+class LlmFailoverState {
+  const LlmFailoverState({
+    required this.onBackup,
+    required this.tripped,
+    required this.failStreak,
+    this.lastError,
+    this.switchedAt,
+  });
+
+  /// 当前是否走备用配置。
+  final bool onBackup;
+
+  /// 备用也已熔断（本轮剩余请求不再真打）。
+  final bool tripped;
+
+  /// 当前通道连续失败次数（主或备用各自累计）。
+  final int failStreak;
+
+  final String? lastError;
+
+  /// 最近一次切换时间（null = 从未切过）。
+  final DateTime? switchedAt;
+
+  Map<String, Object?> toJson() => {
+        'onBackup': onBackup,
+        'tripped': tripped,
+        'failStreak': failStreak,
+        'lastError': lastError,
+        'switchedAt': switchedAt?.toIso8601String(),
+      };
+}
+
+/// 主备切换事件类型（onEvent 回调标签）。
+enum LlmFailoverEvent {
+  switchedToBackup, // 主连续失败 → 切备用
+  switchedBackToPrimary, // 备用成功 + 冷却到期 → 切回主
+  tripped, // 备用也连续失败 → 熔断
+}
+
+/// 主备 failover LLM seam：无备用配置时与 [llmChatFn] 等价。
+/// [chat] 仅测试注入（默认真 [llmChat]；生产勿碰）。
+LlmChatFn failoverLlmChatFn({
+  required LlmConfig primary,
+  LlmConfig? backup,
+  required LlmAccount account,
+  void Function(LlmFailoverEvent, LlmFailoverState)? onEvent,
+  Future<String> Function(LlmConfig, LlmAccount, String, String,
+      {String tag})? chat,
+}) {
+final chatFn = chat ?? llmChat;
+  if (backup == null || !backup.configured) {
+    // 未配备用 → 纯主通道（透传 chat seam，测试注入仍生效）
+    return (system, user, {tag = ''}) =>
+        chatFn(primary, account, system, user, tag: tag);
+  }
+  var onBackup = false;
+  var tripped = false;
+  var failStreak = 0; // 当前通道连续失败
+  var switchedAt = DateTime.now();
+  DateTime? lastSuccessAt;
+
+  // 冷却 30 分钟：备用成功后到期自动切回主
+  const coolDownSec = 30 * 60;
+
+  LlmFailoverState state() => LlmFailoverState(
+        onBackup: onBackup,
+        tripped: tripped,
+        failStreak: failStreak,
+        lastError: null,
+        switchedAt: switchedAt,
+      );
+
+  void emit(LlmFailoverEvent e) => onEvent?.call(e, state());
+
+  return (system, user, {tag = ''}) async {
+    // 熔断闸：备用也挂了 → 快速失败，不空转
+    if (tripped) {
+      throw LlmException(
+          '[$tag] 生卡 LLM 主备均已熔断，本轮跳过（收件箱保留，次日自动重试）');
+    }
+    // 冷却到期自动切回主（下轮首请求生效）
+    if (onBackup &&
+        lastSuccessAt != null &&
+        DateTime.now().difference(lastSuccessAt!).inSeconds >= coolDownSec) {
+      onBackup = false;
+      failStreak = 0;
+      switchedAt = DateTime.now();
+      emit(LlmFailoverEvent.switchedBackToPrimary);
+    }
+    final cfg = onBackup ? backup : primary;
+    try {
+final content = await chatFn(cfg, account, system, user, tag: tag);
+      failStreak = 0;
+      lastSuccessAt = DateTime.now();
+      return content;
+    } on LlmException catch (e) {
+      failStreak++;
+      // 主通道连续 3 次失败 → 切备用
+      if (!onBackup && failStreak >= 3 && backup.configured) {
+        onBackup = true;
+        failStreak = 0;
+        switchedAt = DateTime.now();
+        emit(LlmFailoverEvent.switchedToBackup);
+        throw LlmException(
+            '[$tag] 主 LLM 连续失败已切备用（${e.message}）；本轮继续用备用');
+      }
+      // 备用也连续 3 次失败 → 熔断
+      if (onBackup && failStreak >= 3) {
+        tripped = true;
+        emit(LlmFailoverEvent.tripped);
+        throw LlmException(
+            '[$tag] 备用 LLM 也已连续失败，主备熔断（收件箱保留，次日自动重试）：${e.message}');
+      }
+      rethrow;
+    }
+  };
+}
+
 /// OpenAI 兼容 chat/completions：流式优先 + 参数降级梯 + 重试 + 当日 token 熔断。
 ///
 /// 对拍基线 run.py llm_chat L517-582：HTTP 400 降级梯不耗重试次数；重试环

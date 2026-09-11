@@ -235,10 +235,11 @@ class LocalBackend {
       };
     }
 
-    // /settings/ai（掩码态；三套：llm / embedding / reranker）
+// /settings/ai（掩码态；四套：llm / llm_backup / embedding / reranker）
     if (path == '/settings/ai') {
       return {
         'llm': _serviceView(db, 'llm'),
+        'llm_backup': _serviceView(db, 'llm_backup'),
         'embedding': _serviceView(db, 'embedding'),
         'reranker': _serviceView(db, 'reranker'),
       };
@@ -688,8 +689,8 @@ class LocalBackend {
 
     // /settings/ai/<svc>/test（真外呼：llm GET /models；embedding POST
     // /embeddings；reranker POST <完整端点>，外呼可注入 mock）
-    final aiTest = RegExp(
-      r'^/settings/ai/(llm|embedding|reranker)/test$',
+final aiTest = RegExp(
+      r'^/settings/ai/(llm_backup|llm|embedding|reranker)/test$',
     ).firstMatch(path);
     if (aiTest != null) {
       return _testAiService(aiTest.group(1)!, m);
@@ -720,8 +721,8 @@ class LocalBackend {
     // /settings/ai/<svc>（baseUrl 必须 https://、model 非空；apiKey 空=保持；
     // 键名 <svc>.baseUrl / <svc>.model（settings 表），<svc>.apiKey 只留空
     // 键位——key 本体存系统安全存储 AiKeyVault，svc ∈ llm|embedding|reranker）
-    final aiPut = RegExp(
-      r'^/settings/ai/(llm|embedding|reranker)$',
+final aiPut = RegExp(
+      r'^/settings/ai/(llm_backup|llm|embedding|reranker)$',
     ).firstMatch(path);
     if (aiPut != null) {
       final svc = aiPut.group(1)!;
@@ -1376,7 +1377,7 @@ class LocalBackend {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 10);
       try {
-        if (svc == 'llm') {
+if (svc == 'llm' || svc == 'llm_backup') {
           final rq = await client
               .getUrl(Uri.parse('$baseUrl/models'))
               .timeout(const Duration(seconds: 10));
