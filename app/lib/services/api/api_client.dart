@@ -678,10 +678,7 @@ class ApiClient {
   /// 库内科目名缓存 → 原样 id（13 科罗盘全名映射已随内置科目一并移除）。
   String subjectFullNameOf(String id) => subjectNames[id] ?? id;
 
-  /// 测试辅助：清空科目目录/名称缓存（跨用例隔离）。
-  /// 离线缓存回退的旁路元信息一并清零（所有既有测试的 setUp/tearDown 都
-  /// 走这里 → 新旧用例天然隔离，无需逐个改造）。
-  @visibleForTesting
+  /// 导入/恢复数据后清空科目目录、名称及缓存来源标记；测试亦用于隔离。
   void resetSubjectCaches() {
     _subjectCatalogCache = null;
     subjectNames.clear();

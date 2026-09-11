@@ -54,6 +54,7 @@ import 'corpus/progress_db.dart'
         tocSidecarSubjects;
 import 'corpus/search_api.dart' show normalizeRerankEndpoint;
 import 'corpus_build_job.dart';
+import 'data_maintenance.dart';
 import 'db.dart';
 import 'app_log.dart';
 import 'isolate_runner.dart';
@@ -114,7 +115,24 @@ class LocalBackend {
   }
 
   /// Phase 4：流水线等上层服务共用连接（与路由同源单写者，WAL）。
-  Future<Db> get sharedDb => _db;
+  Future<Db> get sharedDb => _routeDb;
+
+  void _ensureDataAvailable() {
+    if (DataMaintenance.busy) {
+      throw ApiException(409, '正在${DataMaintenance.operation}，请稍后再试');
+    }
+    final dir = _dataDir;
+    if (dir != null && File('$dir/.full-restore-journal.json').existsSync()) {
+      throw ApiException(409, '上次恢复尚未完成，请重启应用修复后再使用');
+    }
+  }
+
+  Future<Db> get _routeDb async {
+    _ensureDataAvailable();
+    final db = await _db;
+    _ensureDataAvailable(); // 初始化 await 期间也可能进入备份/恢复
+    return db;
+  }
 
   // ---------------- AI key 安全存储（安全修复 C：vault + 内存缓存） ----------------
 
@@ -169,7 +187,8 @@ class LocalBackend {
   /// 逐条解析，未知科目 → errors 细目、id 已存在幂等 skip；插入成功 bump
   /// data_version）。Phase 4 端上拆卡流水线与本文件测试共用。
   Future<Map<String, dynamic>> importCards(List<dynamic> rawCards) async {
-    final db = await _db;
+    final db = await _routeDb;
+    _ensureDataAvailable();
     var inserted = 0, skipped = 0;
     final errors = <String>[];
     for (var i = 0; i < rawCards.length; i++) {
@@ -213,7 +232,8 @@ class LocalBackend {
   // ---------------- GET ----------------
 
   Future<Map<String, dynamic>> get(String path) async {
-    final db = await _db;
+    final db = await _routeDb;
+    _ensureDataAvailable();
     path = _normalize(path);
 
     // /health（无 /api/v1 前缀也直达——ApiClient fetchHealth 特例）
@@ -374,7 +394,8 @@ class LocalBackend {
   // ---------------- POST ----------------
 
   Future<Map<String, dynamic>> post(String path, Object? body) async {
-    final db = await _db;
+    final db = await _routeDb;
+    _ensureDataAvailable();
     path = _normalize(path);
     final m = body is Map
         ? Map<String, dynamic>.from(body)
@@ -714,7 +735,8 @@ final aiTest = RegExp(
   // ---------------- PUT ----------------
 
   Future<Map<String, dynamic>> put(String path, Object? body) async {
-    final db = await _db;
+    final db = await _routeDb;
+    _ensureDataAvailable();
     path = _normalize(path);
     final m = body is Map
         ? Map<String, dynamic>.from(body)
@@ -738,6 +760,7 @@ final aiPut = RegExp(
       // 安全修复 C：key 存系统安全存储（vault）+ 内存缓存；settings 表该键
       // 只保留键位、值恒空串（兼容 data_manager 导出剥离与旧版导入）。
       await initAiKeys();
+      _ensureDataAvailable();
       final oldKey = aiKeyOf(svc);
       final effectiveKey = apiKey.isEmpty ? oldKey : apiKey;
       db.settingSet('$svc.baseUrl', baseUrl);
@@ -825,7 +848,8 @@ final aiPut = RegExp(
   /// 科目存在 → 文件名清洗 → 后缀白名单 → 魔数头 → 落盘 incoming/）。
   /// 端上 bytes 已在内存，无需服务器侧流式处理；大小上限同 200MB。
   Future<Map<String, dynamic>> upload(String path, List<int> bytes) async {
-    final db = await _db;
+    final db = await _routeDb;
+    _ensureDataAvailable();
     path = _normalize(path);
 
     if (path.startsWith('/corpus/upload')) {
@@ -949,6 +973,9 @@ final aiPut = RegExp(
   /// 建库是否在运行（内部窗口 ∪ 上游单飞位——CLI 探针直连占用也可见）。
   bool get _corpusBuildRunning =>
       _corpusBuildActive || IsolateRunner.instance.isRunning(corpusBuildJobId);
+
+  /// 完整备份/恢复须等待建库（包括 worker 返回后的主库/进度收尾）。
+  bool get corpusBuildRunning => _corpusBuildRunning;
 
   // ---- 嵌入模式自动选路（用户拍板：UI 不做任何 API key 引导） ----
 

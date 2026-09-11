@@ -57,6 +57,7 @@ import 'corpus/progress_db.dart'
     show applyChange, loadProgress, saveProgress, todayIso;
 import 'corpus/toc_chapters.dart';
 import 'corpus_build_job.dart' show corpusBuildJobId;
+import 'data_maintenance.dart';
 import 'db.dart';
 import 'isolate_runner.dart';
 import 'pipeline_runner.dart' show PipelineRunner;
@@ -380,6 +381,7 @@ class CorpusPackageManager {
   static bool Function() pipelineBusyCheck = _defaultPipelineBusy;
 
   static bool _defaultPipelineBusy() =>
+      DataMaintenance.busy ||
       PipelineRunner.instance.running ||
       IsolateRunner.instance.isRunning(corpusBuildJobId);
 
@@ -397,6 +399,9 @@ class CorpusPackageManager {
   // runner 的单飞位在 worker 返回时释放；此位覆盖主 isolate 换库/补行收尾。
   static bool _importBgRunning = false;
   static final Set<String> _importDataDirs = {};
+
+  /// 完整备份不能与语料包换库/主库补行并行。
+  bool get importRunning => _importBgRunning || _importDataDirs.isNotEmpty;
 
   // ---------------- 校验 ----------------
 

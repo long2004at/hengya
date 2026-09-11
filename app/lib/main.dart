@@ -24,6 +24,7 @@ import 'services/api/api_client.dart';
 import 'services/api/local_cache.dart';
 import 'services/local/app_log.dart';
 import 'services/local/data_manager.dart';
+import 'services/local/full_backup.dart';
 import 'services/local/local_backend.dart';
 import 'services/local/pipeline_runner.dart';
 import 'services/notification/daily_reminder.dart';
@@ -68,6 +69,8 @@ Future<void> _mainImpl() async {
   // 未初始化就调用会显式 StateError，而非静默写错位置）
   if (kBackendMode == BackendMode.local) {
     final support = await getApplicationSupportDirectory();
+    // 上次恢复若被系统中断，必须在任何数据库连接打开前先恢复一致状态。
+    FullBackupManager.instance.recoverInterruptedRestore(support.path);
     LocalBackend.instance.init(support.path);
     // 安全修复 C：AI 服务 key 从 settings 表明文迁入系统安全存储
     //（AiKeyVault，Android Keystore 加密）。启动即执行一次性迁移（幂等，

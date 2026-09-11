@@ -132,6 +132,7 @@ import 'corpus/search_api.dart'
         siliconFlowEmbedder;
 import 'corpus/search_engine.dart' show EmbedQueryFn, corpusSearch;
 import 'app_log.dart';
+import 'data_maintenance.dart';
 import 'db.dart';
 import 'isolate_runner.dart';
 import 'local_backend.dart';
@@ -1752,7 +1753,8 @@ class PipelineRunner {
   Future<void> consumeForceRun({
     String trigger = kPipelineTriggerManual,
   }) async {
-    if (_spinning) {
+    if (_spinning || DataMaintenance.busy) {
+      // 完整备份/恢复期间保留 .force_run，不启动会修改知识库/进度的 worker。
       return;
     }
     _spinning = true;

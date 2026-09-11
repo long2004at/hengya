@@ -4,8 +4,8 @@
 //   1. 只读校验源库 schema（必需表齐全 + cards 可查 + meta.data_version
 //      可读），返回数据统计供 UI 二次确认（「将导入 21 张卡…」）；
 //   2. 关闭在用连接（[LocalBackend.reload]）；
-//   3. 原子替换：源 → hengya.db.import-tmp → 删旧 db/-wal/-shm → rename；
-//      任何失败不碰原库（tmp 先行、rename 最后）。
+//   3. 原子替换：源先复制到 .db-import-*/new.db 并校验；旧 db/-wal/-shm
+//      挪入暂存区，再 rename 新库，失败还原旧件（不再先删除旧库）。
 //   注意：源必须是单文件完整库——服务器 `sqlite3 .backup` 产物、或导出件；
 //   若从运行中的 WAL 库裸拷 .db（不带 -wal）会丢尾部写入，校验会读出
 //   正常但数据偏旧（无从检测，UI 文案已提示「请使用完整备份文件」）。
@@ -23,6 +23,8 @@
 import 'dart:io';
 
 import 'package:sqlite3/sqlite3.dart';
+
+import 'data_maintenance.dart';
 
 class DataManagerException implements Exception {
   DataManagerException(this.message);
@@ -75,33 +77,36 @@ class DataManager {
       db = sqlite3.open(sourcePath, mode: OpenMode.readOnly);
       final names = {
         for (final r in db.select(
-            "SELECT name FROM sqlite_master WHERE type='table'"))
+          "SELECT name FROM sqlite_master WHERE type='table'",
+        ))
           r['name'] as String,
       };
       final missing = _requiredTables.where((t) => !names.contains(t));
       if (missing.isNotEmpty) {
-        throw DataManagerException(
-            '不是恒牙数据库（缺表：${missing.join('、')}）');
+        throw DataManagerException('不是恒牙数据库（缺表：${missing.join('、')}）');
       }
-      final journal = (db
-              .select('PRAGMA journal_mode')
-              .first
-              .values
-              .first ?? '') as String;
+      final journal =
+          (db.select('PRAGMA journal_mode').first.values.first ?? '') as String;
       final cards =
           db.select('SELECT COUNT(*) AS n FROM cards').first['n'] as int;
-      final active = db.select(
-              "SELECT COUNT(*) AS n FROM cards WHERE status = 'active'")
-          .first['n'] as int;
+      final active =
+          db
+                  .select(
+                    "SELECT COUNT(*) AS n FROM cards WHERE status = 'active'",
+                  )
+                  .first['n']
+              as int;
       final logs =
           db.select('SELECT COUNT(*) AS n FROM review_logs').first['n'] as int;
       final subjects =
           db.select('SELECT COUNT(*) AS n FROM subjects').first['n'] as int;
       String? dataVersion;
       try {
-        dataVersion = db.select(
-                "SELECT value FROM meta WHERE key = 'data_version'")
-            .firstOrNull?['value'] as String?;
+        dataVersion =
+            db
+                    .select("SELECT value FROM meta WHERE key = 'data_version'")
+                    .firstOrNull?['value']
+                as String?;
       } catch (_) {}
       return {
         'cards': cards,
@@ -131,28 +136,54 @@ class DataManager {
     String sourcePath, {
     Future<void> Function()? onBeforeSwap,
   }) async {
-    final stats = validateSource(sourcePath); // 再验一次（文件可能在预览后被换）
-    final dbPath = dbPathOf(dataDir);
-    final tmp = File('$dbPath.import-tmp');
-    if (tmp.existsSync()) tmp.deleteSync();
-    try {
-      tmp.writeAsBytesSync(File(sourcePath).readAsBytesSync());
-      await onBeforeSwap?.call(); // 调用方关闭在用连接（LocalBackend.reload）
-      // 删旧库三件套（-wal/-shm 若存在；replaceSync 直接覆盖也行，但先删
-      // 更稳——Windows 上 rename 不允许目标存在时行为依平台）
-      final wal = File('$dbPath-wal');
-      final shm = File('$dbPath-shm');
-      if (dbPath.startsWith(dataDir) && File(dbPath).existsSync()) {
-        File(dbPath).deleteSync();
-      }
-      if (wal.existsSync()) wal.deleteSync();
-      if (shm.existsSync()) shm.deleteSync();
-      tmp.renameSync(dbPath);
-    } catch (e) {
-      if (tmp.existsSync()) tmp.deleteSync(); // 失败自清，不留残件
-      rethrow;
+    if (DataMaintenance.busy ||
+        File('$dataDir/.full-restore-journal.json').existsSync()) {
+      throw DataManagerException('数据正在维护或恢复尚未完成，请稍后再试或重启应用');
     }
-    return stats;
+    final token = DataMaintenance.acquire('导入主数据库');
+    Directory? stage;
+    final moved = <String, String>{};
+    var installed = false;
+    var keepStage = false;
+    final dbPath = dbPathOf(dataDir);
+    try {
+      validateSource(sourcePath);
+      final directory = Directory(dataDir)..createSync(recursive: true);
+      stage = directory.createTempSync('.db-import-');
+      final tmp = File('${stage.path}/new.db');
+      File(sourcePath).copySync(tmp.path);
+      final stats = validateSource(tmp.path); // 校验实际将被换入的副本
+      await onBeforeSwap?.call();
+      for (final suffix in ['', '-wal', '-shm']) {
+        final old = File('$dbPath$suffix');
+        if (old.existsSync()) {
+          final saved = '${stage.path}/old.db$suffix';
+          old.renameSync(saved);
+          moved[old.path] = saved;
+        }
+      }
+      tmp.renameSync(dbPath);
+      installed = true;
+      return stats;
+    } catch (_) {
+      try {
+        if (installed && File(dbPath).existsSync()) File(dbPath).deleteSync();
+        for (final entry in moved.entries.toList().reversed) {
+          File(entry.value).renameSync(entry.key);
+        }
+      } catch (_) {
+        keepStage = true;
+        throw DataManagerException('导入失败且旧库回滚受阻，原件已保留，请勿清除应用数据');
+      }
+      rethrow;
+    } finally {
+      if (!keepStage && stage != null) {
+        try {
+          stage.deleteSync(recursive: true);
+        } catch (_) {}
+      }
+      DataMaintenance.release(token);
+    }
   }
 
   // ---------------- 导出 ----------------
@@ -165,6 +196,9 @@ class DataManager {
   /// 剥离失败则删除导出件并报错（宁可失败，绝不带 key 出门）。
   /// 本机库与 backups/ 自动备份不动（同机同安全域）。
   String exportDatabase(String dataDir) {
+    if (DataMaintenance.busy) {
+      throw DataManagerException('正在${DataMaintenance.operation}，请稍后再导出');
+    }
     final dbPath = dbPathOf(dataDir);
     if (!File(dbPath).existsSync()) {
       throw DataManagerException('本地数据库不存在（尚未初始化）');
@@ -206,28 +240,64 @@ class DataManager {
   bool autoBackupIfNeeded(String dataDir) {
     final dbPath = dbPathOf(dataDir);
     if (!File(dbPath).existsSync()) return false;
-    final dir = Directory('$dataDir/$_backupsDirName');
-    final existing = _backupFiles(dir);
+    final existing = backupsOf(dataDir);
     if (existing.isNotEmpty) {
-      final newest = existing.last; // 已按文件名升序 = 时间序
-      final newestTime = newest.lastModifiedSync();
+      final newestTime = existing.last.lastModifiedSync();
       if (DateTime.now().difference(newestTime) < backupInterval) {
         return false; // 48h 内已有备份
       }
     }
-    dir.createSync(recursive: true);
-    // checkpoint（同导出）保证单文件完整
-    Database? db;
-    try {
-      db = sqlite3.open(dbPath);
-      db.execute('PRAGMA wal_checkpoint(TRUNCATE);');
-    } finally {
-      db?.dispose();
-    }
-    final ts = _timestamp(DateTime.now());
-    File(dbPath).copySync('${dir.path}/hengya-backup-$ts.db');
-    _pruneBackups(dir);
+    backupDatabase(dataDir);
     return true;
+  }
+
+  /// 立即备份主库，不受 48h 间隔限制；返回实际落盘的完整单文件路径。
+  /// 使用 SQLite 一致性快照读取（含尚在 WAL 中的已提交数据），不能只在
+  /// checkpoint 后裸拷 .db：其他读连接可能阻挡 checkpoint，导致静默丢数据。
+  /// 先写临时文件并校验，再原子发布、轮转；失败不删除任何已有备份。
+  /// 与自动备份共用 backups/ 和 [maxBackups]；不包含 corpus/ 或系统密钥。
+  String backupDatabase(String dataDir) {
+    final dbPath = dbPathOf(dataDir);
+    if (!File(dbPath).existsSync()) {
+      throw DataManagerException('本地数据库不存在（尚未初始化）');
+    }
+    final dir = Directory('$dataDir/$_backupsDirName')
+      ..createSync(recursive: true);
+    // 秒内多次手动备份也不能覆盖旧文件；扩展旧时间戳保持文件名时间排序。
+    final now = DateTime.now();
+    final ts =
+        '${_timestamp(now)}'
+        '${now.millisecond.toString().padLeft(3, '0')}'
+        '${now.microsecond.toString().padLeft(3, '0')}';
+    final out = File('${dir.path}/hengya-backup-$ts.db');
+    final staging = Directory('${out.path}.tmp')..createSync();
+    final tmp = File('${staging.path}/$_dbFileName');
+    try {
+      final source = sqlite3.open(dbPath, mode: OpenMode.readOnly);
+      try {
+        source.execute('PRAGMA busy_timeout = 3000');
+        source.execute('VACUUM INTO ?', [tmp.path]);
+      } finally {
+        source.dispose();
+      }
+      validateSource(tmp.path); // 与恢复入口同一校验契约，通过才算一份备份
+      // 确保数据已提交给文件系统，再发布 .db；目录同时隔离临时 sidecar。
+      final handle = tmp.openSync(mode: FileMode.append);
+      try {
+        handle.flushSync();
+      } finally {
+        handle.closeSync();
+      }
+      tmp.renameSync(out.path);
+      _pruneBackups(dir);
+      return out.path;
+    } on SqliteException catch (e) {
+      throw DataManagerException('数据库备份失败：${e.message}');
+    } on FileSystemException catch (e) {
+      throw DataManagerException('备份文件写入失败，请检查存储空间和权限：${e.message}');
+    } finally {
+      if (staging.existsSync()) staging.deleteSync(recursive: true);
+    }
   }
 
   /// 备份清单（时间升序）供 UI 展示「最近备份 / 份数」
@@ -236,12 +306,13 @@ class DataManager {
 
   List<File> _backupFiles(Directory dir) {
     if (!dir.existsSync()) return const [];
-    final files = dir
-        .listSync()
-        .whereType<File>()
-        .where((f) => f.path.endsWith('.db'))
-        .toList()
-      ..sort((a, b) => a.path.compareTo(b.path));
+    final files =
+        dir
+            .listSync()
+            .whereType<File>()
+            .where((f) => f.path.endsWith('.db'))
+            .toList()
+          ..sort((a, b) => a.path.compareTo(b.path));
     return files;
   }
 
