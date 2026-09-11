@@ -247,9 +247,34 @@ void main() {
     expect(r['status'], 200);
     expect(r['message'], '连接正常');
     // 外呼契约：URL = 完整端点原样透传（不拼后缀）——Phase 4 检索引擎同契约
-    expect(gotUrl, 'https://api.siliconflow.cn/v1/rerank');
+expect(gotUrl, 'https://api.siliconflow.cn/v1/rerank');
     expect(gotKey, 'rr-fake-abc123');
     expect(gotModel, 'Qwen/Qwen3-Reranker-8B');
+  });
+
+  test('连接测试：基址形态 baseUrl（…/v1 不带 /rerank）自动补全端点 → 不再 404', () async {
+    // 2026-09-11 修复：用户可能填基址形态（https://api.siliconflow.cn/v1），
+    // 修复前 probe 直接 POST …/v1 → SiliconFlow 根路径恒 404。现经
+    // normalizeRerankEndpoint 先补 /rerank 再外呼（对齐 embedding 两形态兼容）。
+    await boot();
+    final be = LocalBackend.instance;
+    String? gotUrl;
+    LocalBackend.rerankProbeOverride = (url, apiKey, model) async {
+      gotUrl = url;
+      return (status: 200, body: jsonEncode({
+        'results': [{'index': 0, 'relevance_score': 0.9}],
+      }));
+    };
+
+    final r = await be.post('/settings/ai/reranker/test', {
+      'baseUrl': 'https://api.siliconflow.cn/v1', // 基址形态（无 /rerank）
+      'model': 'Qwen/Qwen3-Reranker-8B',
+      'apiKey': 'rr-fake-abc123',
+    });
+    expect(r['ok'], true);
+    expect(r['status'], 200);
+    // 外呼收到的是补全后的完整端点
+    expect(gotUrl, 'https://api.siliconflow.cn/v1/rerank');
   });
 
   test('连接测试：apiKey 空串 → 外呼用已存 key（与 llm/embedding 同语义）', () async {

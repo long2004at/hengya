@@ -125,6 +125,32 @@ String normalizeEmbedEndpoint(
   return '$u/embeddings';
 }
 
+/// reranker baseUrl 规范化 → /v1/rerank 完整端点（对齐
+/// [normalizeEmbedEndpoint] 的 #6① 两形态兼容，2026-09-11）：
+///
+/// settings `reranker.baseUrl` 两种存储形态并存（用户可能填基址
+/// `https://api.siliconflow.cn/v1` 或完整端点 `…/v1/rerank`）：
+/// 规则：trim + 去全部尾部斜杠 → 已以 /rerank 结尾（大小写不敏感）则原样
+/// 返回，否则自动补 `/rerank`；全空回退 [fallback]（默认 [kRerankApiUrl]）。
+/// 修复前测试连接（local_backend._testAiService）与运行时（查询重排）直接
+/// 透传 baseUrl → 基址形态 POST …/v1 恒 404（SiliconFlow 根路径无路由）。
+String normalizeRerankEndpoint(
+  String baseUrl, {
+  String fallback = kRerankApiUrl,
+}) {
+  var u = baseUrl.trim();
+  while (u.endsWith('/')) {
+    u = u.substring(0, u.length - 1);
+  }
+  if (u.isEmpty) {
+    return fallback;
+  }
+  if (u.toLowerCase().endsWith('/rerank')) {
+    return u;
+  }
+  return '$u/rerank';
+}
+
 // --------------------------------------------------------- HTTP 异常 ----
 
 /// 非 2xx 响应（对齐 Python urllib.error.HTTPError 的 code/body 消费面）。
