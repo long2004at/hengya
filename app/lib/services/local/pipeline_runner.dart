@@ -82,7 +82,10 @@ import 'package:shared/hengya_shared.dart';
 import 'package:sqlite3/sqlite3.dart'
     show Database, OpenMode, SqliteException, sqlite3;
 
-import 'corpus/extract_all.dart' show atomicWriteText, nowIso;
+import 'card_dedup.dart'
+    show dupThresholdOf, runCardDupPass;
+import 'corpus/extract_all.dart'
+    show apiEmbedBatch, atomicWriteText, mrlTruncateRenorm, nowIso;
 import 'corpus/exam_topics.dart' show kExamTopics;
 import 'corpus/outline_docx.dart'
     show kMaxOutlineTagsPerCard, loadZhiyeSubtopicIndex, outlineTagsFor;
@@ -127,6 +130,7 @@ import 'corpus/run_llm.dart'
 import 'corpus/search_api.dart'
     show
         SiliconFlowConfig,
+        kEmbedDim,
         kRerankModelDefault,
         normalizeEmbedEndpoint,
         normalizeRerankEndpoint,
@@ -1778,6 +1782,43 @@ llmChat: llmChat,
       } catch (_) {
         // 周扫装配异常（如 settings 读写故障）：静默跳过——不写脏数据、
         // 不掩盖 catchup 成功结果（下次 catchup 再试）
+      }
+
+      // ── #11 卡片查重趟次（用户拍板 2026-09-13）：全流程末尾统一处理
+      // 「缺向量的卡」——本轮新卡 + 存量首次回填 + 上轮降级 skipped 的
+      // 自动补查，同一趟「嵌 → 存向量 → 比对 → 写结果」。嵌入未配置 →
+      // 静默跳过（查重功能未启用，不打「未查重」徽标）；配置了但 API
+      // 失败 → pass 内置降级 skipped + 本日志通道 warning。查重绝不影响
+      // 流水线主流程（外层再兜底装配层意外）。
+      try {
+        final dupCfg = assembleEmbedConfig(
+          db,
+          apiKey: req.aiKeys['embedding'] ?? '',
+        );
+        if (dupCfg != null) {
+          final threshold = dupThresholdOf(db);
+          Future<List<List<double>>> embedBatch(List<String> texts) async {
+            final raw = await apiEmbedBatch(
+              texts,
+              dupCfg.apiKey,
+              model: dupCfg.embedModel,
+              url: dupCfg.embedBaseUrl,
+            );
+            return [
+              for (final v in raw) mrlTruncateRenorm(v, kEmbedDim),
+            ];
+          }
+          final dupRes = await runCardDupPass(
+            db: db,
+            model: dupCfg.embedModel,
+            threshold: threshold,
+            embedBatch: embedBatch,
+            log: ctx.log,
+          );
+          result['dupCheck'] = dupRes.toJson();
+        }
+      } catch (e) {
+        ctx.log('warn', 'dedup', '查重趟次异常（不影响本轮流水线结果）：$e');
       }
       return result;
     } finally {

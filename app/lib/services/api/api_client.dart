@@ -928,6 +928,17 @@ class ApiClient {
     return AiSettings.fromJson(json);
   }
 
+  /// #11 查重阈值（GET /api/v1/settings/dup；默认 0.92 由后端兜底）
+  Future<double> fetchDupThreshold() async {
+    final json = await _getJson('/api/v1/settings/dup');
+    return (json['threshold'] as num?)?.toDouble() ?? 0.92;
+  }
+
+  /// #11 查重阈值写入（PUT /api/v1/settings/dup；生效于下一轮流水线）
+  Future<void> updateDupThreshold(double threshold) async {
+    await _putJson('/api/v1/settings/dup', {'threshold': threshold});
+  }
+
   /// 更新一套 AI 服务配置。apiKey 传空串 = 保持已存 key 不变。
   Future<AiServiceUpdateResult> updateAiService(
     String service, {

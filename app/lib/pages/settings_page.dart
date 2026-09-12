@@ -257,6 +257,80 @@ class _SettingsPageState extends State<SettingsPage> {
       ? '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB'
       : '${(bytes / 1024).round()} KB';
 
+  // ---------------- #11 重复卡查重阈值（2026-09-13） ----------------
+
+  /// 阈值调节弹层：拉当前值 → 滑杆 0.80~0.99 → PUT /settings/dup。
+  /// 生效于下一轮流水线查重趟次；默认 0.92（宁漏勿误杀，用户实测后自调）。
+  Future<void> _editDupThreshold() async {
+    double value;
+    try {
+      value = await ApiClient.instance.fetchDupThreshold();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(context, '读取失败：${e.message}', type: TopToastType.error);
+      return;
+    }
+    if (!mounted) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dlgCtx) => StatefulBuilder(
+        builder: (dlgCtx, setDlg) => AlertDialog(
+          title: const Text('疑似重复相似度阈值'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                '新卡的题干与已有卡向量相似度达到该阈值即标记「疑似重复」，'
+                '照常进审核区并排对比。调低更敏感（易误报），调高更宽松（易漏）。',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              Slider(
+                value: value,
+                min: 0.80,
+                max: 0.99,
+                divisions: 19,
+                label: value.toStringAsFixed(2),
+                onChanged: (v) => setDlg(() => value = v),
+              ),
+              Text('当前：${value.toStringAsFixed(2)}'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dlgCtx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dlgCtx, true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (go != true) return;
+    try {
+      await ApiClient.instance.updateDupThreshold(
+        double.parse(value.toStringAsFixed(2)),
+      );
+      if (!mounted) return;
+      TopToast.show(
+        context,
+        '已保存：阈值 ${value.toStringAsFixed(2)}（下一轮流水线生效）',
+        type: TopToastType.success,
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(
+        context,
+        '保存失败：${e.message}',
+        type: TopToastType.error,
+        stayDuration: const Duration(milliseconds: 1800),
+      );
+    }
+  }
+
   // ---------------- 强制开始拆卡 / 改卡（server 0.4.1+ / Phase 4 端上） ----------------
 
   /// 触发拆卡流水线尽快运行：先弹确认，确认后 POST /api/v1/pipeline/trigger，
@@ -671,6 +745,20 @@ class _SettingsPageState extends State<SettingsPage> {
                   onTap: _weeklyTriggering ? null : _confirmWeeklyScan,
                 ),
                 if (currentBackendMode == BackendMode.local) ...[
+                  const Divider(height: 1, indent: 16, endIndent: 16),
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                    title: const Text(
+                      '重复卡查重阈值',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: const Text(
+                      '生成卡的题干与已有卡向量相似度 ≥ 阈值 → 标记「疑似重复」进审核区；调低更敏感，调高更宽松',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    trailing: const Icon(Icons.rule_outlined),
+                    onTap: _editDupThreshold,
+                  ),
                   const Divider(height: 1, indent: 16, endIndent: 16),
                   ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 16),

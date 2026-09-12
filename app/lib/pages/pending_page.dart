@@ -19,6 +19,7 @@ class _PendingPageState extends State<PendingPage> {
   static const int _pageSize = 100;
 
   List<FlashCard> _cards = [];
+  final Map<String, FlashCard> _dupTargets = {}; // #11 dupOf → 已有卡（对比视图）
   int _total = 0;
   bool _loading = true;
   bool _loadingMore = false;
@@ -32,6 +33,23 @@ class _PendingPageState extends State<PendingPage> {
     _load();
   }
 
+  /// #11：拉取疑似重复卡的指向目标（并排对比用）；单张失败不阻塞列表
+  Future<void> _loadDupTargets(List<FlashCard> cards) async {
+    final ids = {
+      for (final c in cards)
+        if (c.dupCheck == 'dup' && (c.dupOf?.isNotEmpty ?? false)) c.dupOf!,
+    };
+    for (final id in ids) {
+      if (_dupTargets.containsKey(id)) continue;
+      try {
+        final bank = await ApiClient.instance.fetchCardById(id);
+        _dupTargets[id] = bank.card;
+      } on ApiException catch (_) {
+        // 目标卡可能已被移除：对比区降级显示 id
+      }
+    }
+  }
+
   Future<void> _load() async {
     setState(() {
       _loading = true;
@@ -41,6 +59,8 @@ class _PendingPageState extends State<PendingPage> {
       final (cards, total) = await ApiClient.instance.fetchPendingCards(
         limit: _pageSize,
       );
+      await _loadDupTargets(cards);
+      if (!mounted) return;
       setState(() {
         _cards = cards;
         _total = total;
@@ -64,6 +84,8 @@ class _PendingPageState extends State<PendingPage> {
         limit: _pageSize,
         offset: _cards.length,
       );
+      await _loadDupTargets(cards);
+      if (!mounted) return;
       setState(() {
         final known = _cards.map((c) => c.id).toSet();
         _cards.addAll([for (final c in cards) if (!known.contains(c.id)) c]);
@@ -161,6 +183,9 @@ class _PendingPageState extends State<PendingPage> {
                   final card = _cards[i];
                   return _PendingCard(
                     card: card,
+                    dupTarget: card.dupOf == null
+                        ? null
+                        : _dupTargets[card.dupOf],
                     onApprove: () => _act(
                       () => ApiClient.instance.approveCard(card.id),
                       '已批准进复习队列',
@@ -392,9 +417,11 @@ class _PendingCard extends StatelessWidget {
     required this.onApprove,
     required this.onEdit,
     required this.onReject,
+    this.dupTarget,
   });
 
   final FlashCard card;
+  final FlashCard? dupTarget; // #11：疑似重复指向的已有卡（并排对比）
   final VoidCallback onApprove;
   final VoidCallback onEdit;
   final VoidCallback onReject;
@@ -456,6 +483,49 @@ class _PendingCard extends StatelessWidget {
                     ),
                   ),
                 ],
+                // #11 查重徽标（用户要求标识明显）：红=疑似重复；橙=未查重降级
+                if (card.dupCheck == 'dup') ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFDE8E8),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Text(
+                      '疑似重复',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFD54941),
+                      ),
+                    ),
+                  ),
+                ],
+                if (card.dupCheck == 'skipped') ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF3E0),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Text(
+                      '未查重',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFE37318),
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(width: 8),
                 if (card.tags.isNotEmpty)
                   Expanded(
@@ -500,6 +570,16 @@ class _PendingCard extends StatelessWidget {
               ],
             ),
             const Divider(height: 20),
+            // #11：疑似重复卡并排对比（新卡 vs 已有卡），方便人工裁决
+            if (card.dupCheck == 'dup')
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _DupCompare(
+                  newCard: card,
+                  oldCard: dupTarget,
+                  oldCardId: card.dupOf ?? '',
+                ),
+              ),
             Row(
               children: [
                 Expanded(
@@ -571,6 +651,85 @@ class _LoadMoreTile extends StatelessWidget {
               )
             : const Text('加载更多'),
       ),
+    );
+  }
+}
+
+/// #11：疑似重复并排对比（左=这张新卡，右=已有卡；目标卡被移除时降级显示 id）
+class _DupCompare extends StatelessWidget {
+  const _DupCompare({
+    required this.newCard,
+    required this.oldCard,
+    required this.oldCardId,
+  });
+
+  final FlashCard newCard;
+  final FlashCard? oldCard;
+  final String oldCardId;
+
+  Widget _pane(
+    BuildContext context,
+    String title,
+    String front,
+    String back, {
+    bool highlight = false,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: highlight
+              ? const Color(0xFFFDE8E8)
+              : scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: highlight ? const Color(0xFFD54941) : scheme.outline,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(front, style: const TextStyle(fontSize: 13, height: 1.35)),
+            const SizedBox(height: 6),
+            Text(
+              back,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.35,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _pane(context, '这张（新卡）', newCard.front, newCard.back,
+            highlight: true),
+        const SizedBox(width: 8),
+        oldCard != null
+            ? _pane(context, '已有卡', oldCard!.front, oldCard!.back)
+            : Expanded(
+                child: Text(
+                  '已有卡 $oldCardId 暂不可比（可能已被移除）',
+                  style: TextStyle(fontSize: 11, color: scheme.outline),
+                ),
+              ),
+      ],
     );
   }
 }

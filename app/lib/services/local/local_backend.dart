@@ -40,6 +40,7 @@ import 'package:sqlite3/sqlite3.dart' show OpenMode, sqlite3;
 
 import '../api/api_client.dart';
 import 'ai_key_vault.dart';
+import 'card_dedup.dart' show dupThresholdOf, kDupThresholdSettingKey;
 import 'corpus/extract_all.dart' show CorpusEmbedMode, loadManifest;
 import 'corpus/exam_topics.dart';
 import 'corpus/outline_docx.dart' show kOutlineUploadCode;
@@ -300,6 +301,11 @@ class LocalBackend {
         'intervalDays': kWeeklyScanInterval.inDays,
         'due': weeklyScanDue(lastRunAt, DateTime.now()),
       };
+    }
+
+    // /settings/dup（#11 查重阈值状态；写入见 PUT）
+    if (path == '/settings/dup') {
+      return {'threshold': dupThresholdOf(db)};
     }
 
     // /cards/pending?limit=&offset=（server 裸数组 → {'list': [...]} 约定形状）
@@ -790,6 +796,18 @@ final aiTest = RegExp(
     final m = body is Map
         ? Map<String, dynamic>.from(body)
         : const <String, dynamic>{};
+
+    // /settings/dup（#11 查重阈值写入：body {threshold} ∈ [0.5, 0.999]；
+    // 生效于下一轮流水线查重趟次）
+    if (path == '/settings/dup') {
+      final t = (m['threshold'] as num?)?.toDouble();
+      if (t == null || t < 0.5 || t > 0.999) {
+        throw ApiException(400, 'threshold 须在 0.5 ~ 0.999 之间');
+      }
+      db.settingSet(kDupThresholdSettingKey, t.toStringAsFixed(3));
+      db.bumpDataVersion();
+      return {'ok': true, 'threshold': t};
+    }
 
     // /settings/ai/<svc>（baseUrl 必须 https://、model 非空；apiKey 空=保持；
     // 键名 <svc>.baseUrl / <svc>.model（settings 表），<svc>.apiKey 只留空

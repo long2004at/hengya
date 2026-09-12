@@ -11,9 +11,14 @@
 // 既有库 subjects.is_builtin 全部归 0（列保留仅为既有库 schema 兼容，
 // 代码不再写 1；新库零科目，科目全部用户自建）。
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:shared/hengya_shared.dart';
 import 'package:sqlite3/sqlite3.dart';
+
+/// 占位卡题干前缀（与 run_engine kPlaceholderBack 的前缀一致）：
+/// 占位卡无实质内容，不参与查重（不入比对域、不嵌向量）。
+const String kDupPlaceholderPrefix = '【语料未覆盖】';
 
 class Db {
   Db._(this._db);
@@ -112,8 +117,26 @@ class Db {
       'CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status, subject_id);',
     );
     db.execute(
-      "CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(m_due_at) WHERE status = 'active';",
+      'CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(m_due_at) WHERE status = \'active\';',
     );
+
+    // #11 卡片查重（2026-09-13）：cards 扩展 dup_check/dup_of 两列（幂等）。
+    // dup_check ∈ ok（已查无重复）/ dup（疑似重复，dup_of 指向已有卡）/
+    // skipped（未查重——嵌入 API 不可用降级，下轮流水线自动补查）。
+    _addColumnIfMissing(db, 'cards', 'dup_check', "TEXT NOT NULL DEFAULT 'ok'");
+    _addColumnIfMissing(db, 'cards', 'dup_of', 'TEXT');
+
+    // #11 卡向量表：题干嵌入（float32 原始字节），与 corpus.db 的语料向量
+    // 分库隔离——卡向量随卡生命周期（删除卡经 ON DELETE CASCADE 清理）。
+    // model 记录嵌入模型：模型更换后新旧向量不可比，比对时按 model 过滤。
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS card_vectors (
+        card_id TEXT PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
+        model   TEXT NOT NULL,
+        dim     INTEGER NOT NULL,
+        vec     BLOB NOT NULL
+      );
+    ''');
 
     db.execute('''
       CREATE TABLE IF NOT EXISTS review_logs (
@@ -1131,9 +1154,56 @@ class Db {
     status: CardStatus.values.byName(row['status'] as String),
     tags: _tagsFromJson((row['tags'] ?? '[]') as String),
     examYear: row['exam_year'] as String?,
+    // #11 查重状态（列迁移前的旧行/测试内存构造：回退默认）
+    dupCheck: (row['dup_check'] ?? 'ok') as String,
+    dupOf: row['dup_of'] as String?,
     createdAt: DateTime.tryParse((row['created_at'] ?? '') as String),
     updatedAt: DateTime.tryParse((row['updated_at'] ?? '') as String),
   );
+
+  // ---------------- #11 卡片查重（2026-09-13） ----------------
+
+  /// 缺向量的卡（题干非占位）——查重趟次的处理域：新导入卡 + 历史
+  /// 未查重（skipped）卡 + 首次上线的存量回填，统一「缺向量」口径。
+  List<(String id, String front)> cardsMissingVectors() {
+    final rows = _db.select(
+      "SELECT c.id, c.front FROM cards c "
+      'LEFT JOIN card_vectors v ON v.card_id = c.id '
+      "WHERE v.card_id IS NULL AND c.front NOT LIKE '$kDupPlaceholderPrefix%' "
+      'ORDER BY c.created_at',
+    );
+    return [for (final r in rows) (r['id'] as String, r['front'] as String)];
+  }
+
+  /// 全部已有卡向量（比对域；model 不一致的行跳过——换模型后不可比）。
+  List<(String cardId, Uint8List vec)> cardVectors(String model) {
+    final rows = _db.select(
+      'SELECT card_id, vec FROM card_vectors WHERE model = ? AND dim > 0',
+      [model],
+    );
+    return [
+      for (final r in rows) (r['card_id'] as String, r['vec'] as Uint8List),
+    ];
+  }
+
+  /// 写卡向量（INSERT OR REPLACE：重嵌覆盖旧值）。
+  void saveCardVector(String cardId, String model, int dim, Uint8List vec) {
+    _db.execute(
+      'INSERT INTO card_vectors (card_id, model, dim, vec) VALUES (?,?,?,?) '
+      'ON CONFLICT(card_id) DO UPDATE SET model=excluded.model, '
+      'dim=excluded.dim, vec=excluded.vec',
+      [cardId, model, dim, vec],
+    );
+  }
+
+  /// 写查重结果（dup/skipped 三态；dup 带指向；置 dup 同时留 updated_at）。
+  void setDupResult(String cardId, {required String check, String? dupOf}) {
+    _db.execute(
+      "UPDATE cards SET dup_check = ?, dup_of = ?, "
+      "updated_at = datetime('now') WHERE id = ?",
+      [check, dupOf, cardId],
+    );
+  }
 
   void close() => _db.dispose(); // sqlite3 2.x API（与 server 端一致）
 }

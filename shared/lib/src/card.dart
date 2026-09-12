@@ -30,6 +30,8 @@ class FlashCard {
     this.sourceTier = SourceTier.ppt,
     this.tags = const [],
     this.examYear,
+    this.dupCheck = 'ok',
+    this.dupOf,
     this.createdAt,
     this.updatedAt,
   });
@@ -58,6 +60,14 @@ class FlashCard {
   /// 真题卡：保留年份元数据（规范 §六，统计页单看真题卡正确率）
   final String? examYear;
 
+  /// 查重状态（#11，2026-09-13）：
+  /// ok = 已查无重复；dup = 疑似重复（dupOf 指向已有卡）；
+  /// skipped = 未查重（嵌入 API 不可用降级，审核区带「未查重」徽标）。
+  final String dupCheck;
+
+  /// dupCheck=dup 时指向的疑似重复已有卡 id（其余为 null）。
+  final String? dupOf;
+
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
@@ -73,6 +83,8 @@ class FlashCard {
         'status': status.name,
         'tags': tags,
         if (examYear != null) 'examYear': examYear,
+        'dupCheck': dupCheck,
+        if (dupOf != null) 'dupOf': dupOf,
         if (createdAt != null) 'createdAt': createdAt!.toIso8601String(),
         if (updatedAt != null) 'updatedAt': updatedAt!.toIso8601String(),
       };
@@ -93,6 +105,8 @@ class FlashCard {
             .map((e) => e as String)
             .toList(),
         examYear: json['examYear'] as String?,
+        dupCheck: json['dupCheck'] as String? ?? 'ok',
+        dupOf: json['dupOf'] as String?,
         createdAt: json['createdAt'] == null
             ? null
             : DateTime.parse(json['createdAt'] as String),
