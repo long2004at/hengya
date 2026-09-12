@@ -143,26 +143,43 @@ class AppLog {
 
   /// 读取最近日志（跨当日 + 轮转文件，时间倒序 = 最新在前），默认最近 500 行。
   /// 返回行以 '\n' 连接（无结尾换行）；无日志/未初始化 → 空串。
+  ///
+  /// 2026-09-13 fix：原实现把整个多文件循环包在一个 try 里，任何一个文件
+  /// 解码失败（v0.1.9/10 的 UTF-16 毒文件遗留）就整体返回空串，把其余合法
+  /// 日志全部掩盖——日志页「恒空」的真根因。改为逐文件独立容错：单个文件
+  /// 读/解码失败只跳过该文件，收集完毕后将其删除（毒文件不可修复且会永久
+  /// 连坐后续读取），并写一条清理留痕。
   Future<String> readTail({int maxLines = 500}) async {
     if (maxLines <= 0) return '';
     final collected = <String>[];
-    try {
-      final dir = _logsDir();
-      if (dir == null || !dir.existsSync()) return '';
-      final files = _sortedLogFiles(dir); // 新 → 旧
-      outer:
-      for (final f in files) {
-        if (collected.length >= maxLines) break;
-        final lines = await File(f.path).readAsLines();
-        for (final line in lines) {
-          if (line.isEmpty) continue;
-          collected.add(line);
-          // 已远超目标行数：本文件即最新内容（新→旧序），留余量后收口
-          if (collected.length >= maxLines * 2) break outer;
-        }
+    final dir = _logsDir();
+    if (dir == null || !dir.existsSync()) return '';
+    final poisoned = <File>[]; // 不可解码的遗留文件：先跳过，收口后统一清理
+    outer:
+    for (final f in _sortedLogFiles(dir)) {
+      if (collected.length >= maxLines) break;
+      List<String>? lines;
+      try {
+        lines = await File(f.path).readAsLines();
+      } catch (_) {
+        poisoned.add(f);
+        continue;
       }
-    } catch (_) {
-      return ''; // 读失败 → 空（调用方落空态）
+      for (final line in lines) {
+        if (line.isEmpty) continue;
+        collected.add(line);
+        // 已远超目标行数：本文件即最新内容（新→旧序），留余量后收口
+        if (collected.length >= maxLines * 2) break outer;
+      }
+    }
+    for (final f in poisoned) {
+      try {
+        f.deleteSync();
+        log(AppLogLevel.warn, 'applog',
+            '清理不可解码的遗留日志文件：${f.uri.pathSegments.last}');
+      } catch (_) {
+        // 删除失败静默：下次 readTail 会再次跳过该文件，不影响其余内容
+      }
     }
     // 行首 23 字符即 yyyy-MM-dd HH:mm:ss.SSS，字典序 = 时间序；倒序取最近
     collected.sort((a, b) => b.compareTo(a));

@@ -456,6 +456,9 @@ class LocalBackend {
         db.rejectCardWithReason(id, reason, note);
       }
       db.bumpDataVersion();
+      // #2 埋点：审核拒绝（回炉循环入口事件）
+      AppLog.instance.log(AppLogLevel.info, 'review',
+          '审核拒绝：${_head(card.front, 30)}；理由=$reason${note.isEmpty ? '' : '；留言=$note'}');
       return {'ok': true, 'id': id, 'status': 'rejected'};
     }
 
@@ -526,6 +529,9 @@ class LocalBackend {
         (m['note'] as String?) ?? '',
       );
       db.bumpDataVersion();
+      // #2 埋点：回炉登记（题库/复习页入口）
+      AppLog.instance.log(AppLogLevel.info, 'rework',
+          '回炉登记：${_head(card.front, 30)}；理由=${(m['reason'] as String?) ?? ''}；留言=${(m['note'] as String?) ?? ''}');
       return {'ok': true, 'cardId': cardId};
     }
 
@@ -540,6 +546,8 @@ class LocalBackend {
       if (err == 'not_found') throw ApiException(404, '卡片不存在或已被移除');
       if (err == 'not_rejected') throw ApiException(400, '仅已拒绝的废卡可移除');
       db.bumpDataVersion();
+      // #2 埋点：物理删除属不可逆操作，必须留痕
+      AppLog.instance.log(AppLogLevel.warn, 'review', '移除废卡（物理删除）：$cardId');
       return {'ok': true, 'cardId': cardId};
     }
 
@@ -558,6 +566,9 @@ class LocalBackend {
       db.bumpDataVersion();
       final cardId = db.reworkQueueCardId(queueId);
       if (cardId != null) db.markAiNoteSeen(cardId);
+      // #2 埋点：回炉完成 → 卡回待审核区
+      AppLog.instance.log(AppLogLevel.info, 'rework',
+          '回炉重造完成（队列 #$queueId${cardId == null ? '' : '，卡 $cardId'}）→ 卡回待审核区');
       return {
         'ok': true,
         'queueId': queueId,
@@ -864,6 +875,9 @@ final aiPut = RegExp(
       }
       if (r.mutated) {
         saveProgress(progressPath, data);
+        // #2 埋点：章节进度变更（手动章节管理）
+        AppLog.instance.log(AppLogLevel.info, 'progress',
+            '章节管理变更：科目 $id learned_through=$lt skipped=${skipped?.length ?? 0}处（${r.note}）');
       }
       return {..._subjectChaptersView(id), 'ok': true, 'note': r.note};
     }
@@ -1241,6 +1255,12 @@ final sub = progress.listen((e) {
         'error' => AppLogLevel.error,
         _ => null,
       };
+
+  /// #2 埋点用：长文本截断（题干等防长文刷屏；换行归一）。
+  static String _head(String? text, int n) {
+    final t = (text ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    return t.length > n ? '${t.substring(0, n)}…' : t;
+  }
 
   void _finishCorpusBuildJob() {
     _corpusBuildActive = false;

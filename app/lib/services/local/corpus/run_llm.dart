@@ -80,6 +80,21 @@ class LlmAccount {
 typedef LlmChatFn = Future<String> Function(String system, String user,
     {String tag});
 
+/// LLM 请求日志 sink（#2 埋点，2026-09-13）：worker 内由流水线装配处注入
+/// ctx.log（经 stage='log' 事件回流主 isolate 落 AppLog——worker 内 AppLog
+/// 无 dataDir 不落盘）；主 isolate 直跑场景（CLI 探针/测试）可注入
+/// AppLog.instance.log。null = 不记（默认，测试零噪音）。
+/// 纪律同 ctx.log：消息绝不携带 key/token/敏感值。
+void Function(String level, String tag, String message)? llmLogSink;
+
+void _llmLog(String level, String message) {
+  try {
+    llmLogSink?.call(level, 'llm', message);
+  } catch (_) {
+    // 日志 sink 自身故障绝不影响 LLM 请求主流程
+  }
+}
+
 /// 装配 [llmChat] 为引擎注入 seam（绑定配置与账本）。
 LlmChatFn llmChatFn(LlmConfig cfg, LlmAccount account) =>
     (system, user, {tag = ''}) => llmChat(cfg, account, system, user, tag: tag);
@@ -260,10 +275,19 @@ Future<String> llmChat(LlmConfig cfg, LlmAccount account, String system,
   }
 
   var lastErr = '';
+  final sw = Stopwatch()..start();
+  void logOk(String content, ({int prompt, int completion}) u) {
+    _llmLog('info',
+        '[${tag.isEmpty ? 'chat' : tag}] LLM 请求成功 model=${cfg.model} '
+        '耗时=${(sw.elapsedMilliseconds / 1000).toStringAsFixed(1)}s '
+        'tokens=${u.prompt}/${u.completion}\n输出：$content');
+  }
+
   // 参数兼容梯（HTTP 400 → 逐项降级，不耗重试次数）
   for (var dropI = 0; dropI <= droppable.length; dropI++) {
     try {
       final (content, u) = await _llmPost(cfg, url, payload());
+      logOk(content, u);
       return account_(content, u);
     } on LlmException catch (e) {
       lastErr = e.message;
@@ -280,9 +304,12 @@ Future<String> llmChat(LlmConfig cfg, LlmAccount account, String system,
         seconds: lastErr.contains('HTTP 5') ? 30 : kLlmRetryIntervalSec));
     try {
       final (content, u) = await _llmPost(cfg, url, payload());
+      logOk(content, u);
       return account_(content, u);
     } on LlmException catch (e) {
       lastErr = e.message;
+      _llmLog('warn',
+          '[${tag.isEmpty ? 'chat' : tag}] LLM 第 ${attempt + 1}/$kLlmRetryTimes 次重试失败：$lastErr');
       if (lastErr.contains('HTTP 400')) {
         final nxt = droppable.where((k) => !dropped.contains(k)).toList();
         if (nxt.isNotEmpty) {
@@ -291,6 +318,9 @@ Future<String> llmChat(LlmConfig cfg, LlmAccount account, String system,
       }
     }
   }
+  _llmLog('error',
+      '[${tag.isEmpty ? 'chat' : tag}] LLM 请求失败 model=${cfg.model}：'
+      '${lastErr.isEmpty ? 'LLM 失败' : lastErr}');
   throw LlmException('[$tag] ${lastErr.isEmpty ? 'LLM 失败' : lastErr}');
 }
 

@@ -122,7 +122,8 @@ import 'corpus/run_llm.dart'
         LlmChatFn,
         LlmConfig,
         LlmFailoverEvent,
-        failoverLlmChatFn;
+        failoverLlmChatFn,
+        llmLogSink;
 import 'corpus/search_api.dart'
     show
         SiliconFlowConfig,
@@ -177,10 +178,16 @@ class PipelineDeps {
     this.account,
     this.onProgress,
     this.outlineTagger,
+    this.onLog,
   }) : port = port ?? LocalDbPort(db);
 
   /// hengya.db 直连（收件箱/科目/回炉队列读 + import/consume 写）。
   final Db db;
+
+  /// #2 埋点（2026-09-13）：流水线内部日志通道（章节推进落盘等）——worker
+  /// 装配处传 ctx.log 回流主 isolate 落 AppLog；测试/CLI 可不传（默认 null
+  /// 不记）。与 [onProgress]（结构化事件，UI 消费）分轨。
+  void Function(String level, String tag, String message)? onLog;
 
   /// 语料检索 seam（App 装配 [assembleRunSearch]；测试注入脚本化 fake）。
   final RunSearchFn runSearch;
@@ -239,14 +246,50 @@ class PipelineDeps {
   outlineTagger;
 }
 
+/// #2 埋点：章节进度落盘摘要（info 级；各科目 learned_through 一行带出）。
+void _logProgressAdvance(
+  PipelineDeps deps,
+  Map<String, Object?> progressData,
+) {
+  final log = deps.onLog;
+  if (log == null) return;
+  final subs = progressData['subjects'];
+  if (subs is! Map) return;
+  final parts = <String>[];
+  subs.forEach((k, v) {
+    if (v is! Map) return;
+    final lt = v['learned_through'];
+    final sk = v['skipped'];
+    parts.add(
+      '$k=$lt${sk is List && sk.isNotEmpty ? '（跳过 ${sk.length} 处）' : ''}',
+    );
+  });
+  if (parts.isNotEmpty) {
+    log('info', 'progress', '章节进度落盘：${parts.join('，')}');
+  }
+}
+
 // ------------------------------------------------------- CardPort 实装 ----
 
 /// CardPort 的 db 直连实装（tool/run_probe.dart _DbPort 模式 + 与
 /// LocalBackend 路由同语义的 data_version/已读标记副作用）。
 class LocalDbPort implements CardPort {
-  LocalDbPort(this.db);
+  LocalDbPort(this.db, {this.onLog});
 
   final Db db;
+
+  /// #2 埋点（2026-09-13）：入库/回炉完成的日志回调——worker 内装配处传
+  /// ctx.log（回流主 isolate 落 AppLog）；测试/CLI 直跑可不传（默认 null
+  /// 不记）。纪律：消息不含 key/token/敏感值。
+  void Function(String level, String tag, String message)? onLog;
+
+  void _log(String level, String tag, String message) {
+    try {
+      onLog?.call(level, tag, message);
+    } catch (_) {
+      // 日志回调故障绝不影响入库主流程
+    }
+  }
 
   /// SQLITE_BUSY 短退避重试（P1-3 isolate 化新增）：主 isolate（UI 路由）
   /// 与流水线 worker 双连接并发写 hengya.db（WAL）时，busy_timeout 编译
@@ -304,6 +347,13 @@ class LocalDbPort implements CardPort {
       // App 增量同步锚（与 /cards/import 路由同语义）
       await _busyRetry(() => db.bumpDataVersion());
     }
+    if (inserted > 0 || skipped > 0) {
+      _log('info', 'pipeline',
+          '生卡入库：新增 $inserted 张，跳过 $skipped 张（id 幂等）');
+    }
+    if (errors.isNotEmpty) {
+      _log('error', 'pipeline', '生卡入库失败 ${errors.length} 张：${errors.take(3).join('；')}');
+    }
     return (
       ok: errors.isEmpty,
       inserted: inserted,
@@ -322,9 +372,11 @@ class LocalDbPort implements CardPort {
       final n = await _busyRetry(() => db.consumeKeywords(idInts));
       if (n > 0) {
         await _busyRetry(() => db.bumpDataVersion()); // 与 /inbox/consume 路由同语义
+        _log('info', 'pipeline', '收件箱关键词已消费 $n 条（本轮完成）');
       }
       return (ok: true, error: null);
     } catch (e) {
+      _log('warn', 'pipeline', '收件箱关键词消费失败（留补跑）：$e');
       return (ok: false, error: '$e');
     }
   }
@@ -341,6 +393,7 @@ class LocalDbPort implements CardPort {
         () => db.reworkDone(queueId, front: front, back: back, anchor: anchor),
       );
       if (r != null) {
+        _log('warn', 'rework', '回炉完成落库异常（队列 #$queueId）：$r');
         return (ok: false, error: r); // 'not_found' / 'stale'
       }
       // done 后自动标已读（契约 3；与 /cards/rework/<id>/done 路由同语义）
@@ -349,8 +402,11 @@ class LocalDbPort implements CardPort {
         await _busyRetry(() => db.markAiNoteSeen(cardId));
       }
       await _busyRetry(() => db.bumpDataVersion());
+      _log('info', 'rework',
+          '回炉重造完成（队列 #$queueId${cardId == null ? '' : '，卡 $cardId'}）→ 卡回待审核区');
       return (ok: true, error: null);
     } catch (e) {
+      _log('error', 'rework', '回炉完成落库失败（队列 #$queueId）：$e');
       return (ok: false, error: '$e');
     }
   }
@@ -995,6 +1051,8 @@ Future<Map<String, Object?>> runCatchup({
   if (ppath != null && jsonEncode(progressData) != progressBefore) {
     saveProgress(ppath, progressData);
     progressSaved = true;
+    // #2 埋点：章节进度（罗盘/学习记录推进）落盘——科目与章序摘要
+    _logProgressAdvance(deps, progressData);
   }
 
   // ── ⑨ 结果装配（counts 对齐 run.py _assemble_result / report.py 口径） ──
@@ -1577,6 +1635,9 @@ Future<Map<String, Object?>> _runCatchupInWorker(
 ) async {
   final dataDir = req.dataDir;
   final db = await Db.open('$dataDir/hengya.db'); // worker 自开连接
+  // #2 埋点（2026-09-13）：LLM 请求日志 sink 绑 ctx.log——worker 内 AppLog
+  // 无 dataDir 不落盘，经 stage='log' 事件回流主 isolate 落盘。
+  llmLogSink = ctx.log;
   try {
     final corpusPath = '$dataDir/corpus/corpus.db';
     final cdb = tryOpenCorpusDb(corpusPath);
@@ -1666,6 +1727,9 @@ final llmCfg = LlmConfig(
         db: db,
         runSearch: runSearch,
 llmChat: llmChat,
+        // #2 埋点：入库/回炉完成的日志回调 → ctx.log 回流主 isolate 落盘
+        port: LocalDbPort(db, onLog: ctx.log),
+        onLog: ctx.log,
         prompts: req.prompts,
         progressData: loadProgress(progressPath),
         progressPath: progressPath,

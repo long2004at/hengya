@@ -237,10 +237,17 @@ void corpusBuildWorkerEntry(IsolateWorkerBoot boot) {
     );
 
     // 进度转发即取消检查点（best-effort：每条进度回调一次）
+    // #2 埋点（2026-09-13）：每条进度同步以 debug 级 log 事件回流主 isolate
+    // 落 AppLog——建库/嵌入全程细节进日志（原实现只进 UI 状态帧，
+    // 日志文件里建库成功全程 0 痕迹）。
     void relay(String stage, String message) {
       ctx.checkCancelled();
       ctx.emit(IsolateProgressEvent(stage: stage, message: message));
+      ctx.log('debug', 'corpus-build', '[$stage] $message');
     }
+
+    // 里程碑（info 级，日志页默认可见）：开始/抽取完成/入库完成/结束
+    void milestone(String message) => ctx.log('info', 'corpus-build', message);
 
     ctx.emit(
       IsolateProgressEvent(
@@ -248,6 +255,7 @@ void corpusBuildWorkerEntry(IsolateWorkerBoot boot) {
         message: '建库开始：mode=${req.mode.name}，输入 ${req.inputPath}',
       ),
     );
+    milestone('建库开始：mode=${req.mode.name}');
 
     // 路径布局与 buildCorpus 一致（chunks.jsonl/manifest 落库同级）
     final dbFile = File(req.corpusDbPath);
@@ -276,6 +284,8 @@ void corpusBuildWorkerEntry(IsolateWorkerBoot boot) {
         counts: ex.toJson(),
       ),
     );
+    milestone('抽取完成：${ex.chunks} chunks'
+        '（changed=${ex.changed} unchanged=${ex.unchanged} removed=${ex.removed}）');
 
     // 节点④：-outline 大纲树文件 → outline_entries（不走常规切块/嵌入；
     // F 证据隔离——正文绝不进语料块）。仅大纲入库（0 chunks）不算失败。
@@ -348,6 +358,8 @@ void corpusBuildWorkerEntry(IsolateWorkerBoot boot) {
           },
         ),
       );
+      milestone('建库结束（0 chunks，'
+          '${ex.outlineFiles.isEmpty ? '未入库' : '仅大纲入库 $outlineEntries 条'}）');
       return CorpusBuildResult(
         extract: ex.toJson(),
         ingest: null,
@@ -380,6 +392,8 @@ final ing = await ingestCorpus(
         counts: ing.toJson(),
       ),
     );
+    milestone('入库完成：rows=${ing.rows} embedded=${ing.embedded} '
+        'resumed=${ing.resumed}');
 
     final elapsed = t0.elapsedMilliseconds / 1000.0;
     ctx.emit(
@@ -395,6 +409,8 @@ final ing = await ingestCorpus(
         },
       ),
     );
+    milestone('建库完成：${ex.chunks} chunks，嵌入 ${ing.embedded}'
+        '（${elapsed.toStringAsFixed(1)}s）');
     return CorpusBuildResult(
       extract: ex.toJson(),
       ingest: ing.toJson(),
