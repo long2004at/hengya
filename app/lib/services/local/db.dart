@@ -337,13 +337,25 @@ class Db {
     return rows.isEmpty ? null : _rowToCard(rows.first);
   }
 
-  /// 待审核卡（新导入/重造完成）
-  List<FlashCard> pendingCards({int limit = 100}) {
+  /// 待审核卡（新导入/重造完成）。
+  /// #15（2026-09-13）：支持分页——原默认 100 张硬截断会把 created_at 较旧
+  /// 的回炉完成卡挤出待审池（它又不进题库列表），形成「审核区/题库两端都
+  /// 找不到」的假性丢卡；配合路由层返回 total 供 UI 加载更多。
+  List<FlashCard> pendingCards({int limit = 100, int offset = 0}) {
     final rows = _db.select(
-      "SELECT * FROM cards WHERE status = 'pending' ORDER BY created_at LIMIT ?",
-      [limit],
+      "SELECT * FROM cards WHERE status = 'pending' "
+      'ORDER BY created_at LIMIT ? OFFSET ?',
+      [limit, offset],
     );
     return rows.map(_rowToCard).toList();
+  }
+
+  /// 待审核总数（#15 分页配套：审核区「加载更多」判定与总数展示）。
+  int pendingCardsCount() {
+    final rows = _db.select(
+      "SELECT COUNT(*) AS n FROM cards WHERE status = 'pending'",
+    );
+    return (rows.first['n'] as int?) ?? 0;
   }
 
   /// 复习队列：active 且到期（含超期），按到期时间升序；科目隔离（决策 #8）
@@ -442,16 +454,36 @@ class Db {
     );
   }
 
-  /// 回炉重造：active → rework（出复习队列），并登记原因
+  /// 回炉重造：active → rework（出复习队列），并登记原因。
+  /// #15（2026-09-13）：双写包事务——原实现两条 execute 无事务，第二条
+  /// （INSERT rework_queue）失败时卡会卡死在 rework 状态且队列无行，
+  /// 永不重造、永不回 pending（题库里只剩「重造中」徽标的僵尸卡）。
   void reworkCard(String id, String reason, String note) {
-    _db.execute(
-      "UPDATE cards SET status = 'rework', updated_at = datetime('now') WHERE id = ?",
-      [id],
-    );
-    _db.execute(
-      'INSERT INTO rework_queue (card_id, reason, note) VALUES (?,?,?)',
-      [id, reason, note],
-    );
+    _tx(() {
+      _db.execute(
+        "UPDATE cards SET status = 'rework', updated_at = datetime('now') WHERE id = ?",
+        [id],
+      );
+      _db.execute(
+        'INSERT INTO rework_queue (card_id, reason, note) VALUES (?,?,?)',
+        [id, reason, note],
+      );
+    });
+  }
+
+  /// 事务包裹（#15）：BEGIN IMMEDIATE / COMMIT / ROLLBACK——与
+  /// extract_all.dart tx 同款形态（写锁碰撞由调用方 busy 重试吸收）。
+  void _tx(void Function() body) {
+    _db.execute('BEGIN IMMEDIATE');
+    try {
+      body();
+      _db.execute('COMMIT');
+    } catch (e) {
+      try {
+        _db.execute('ROLLBACK');
+      } catch (_) {}
+      rethrow;
+    }
   }
 
   /// 回炉队列（自动化拉取 GET /rework/pending）
@@ -546,10 +578,15 @@ class Db {
       args.add(anchor);
     }
     args.add(cardId);
-    _db.execute('UPDATE cards SET ${sets.join(', ')} WHERE id = ?', args);
-    _db.execute("UPDATE rework_queue SET status = 'done' WHERE id = ?", [
-      queueId,
-    ]);
+    // #15（2026-09-13）：两写包事务——卡回 pending 与队列置 done 必须原子，
+    // 中断（如进程被杀）会造成「卡已回 pending 但队列仍 pending」的状态漂移
+    // （下轮重复重造）或反向漂移。
+    _tx(() {
+      _db.execute('UPDATE cards SET ${sets.join(', ')} WHERE id = ?', args);
+      _db.execute("UPDATE rework_queue SET status = 'done' WHERE id = ?", [
+        queueId,
+      ]);
+    });
     return null;
   }
 

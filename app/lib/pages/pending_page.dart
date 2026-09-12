@@ -16,9 +16,15 @@ class PendingPage extends StatefulWidget {
 }
 
 class _PendingPageState extends State<PendingPage> {
+  static const int _pageSize = 100;
+
   List<FlashCard> _cards = [];
+  int _total = 0;
   bool _loading = true;
+  bool _loadingMore = false;
   String? _error;
+
+  bool get _hasMore => _cards.length < _total;
 
   @override
   void initState() {
@@ -32,9 +38,12 @@ class _PendingPageState extends State<PendingPage> {
       _error = null;
     });
     try {
-      final cards = await ApiClient.instance.fetchPendingCards();
+      final (cards, total) = await ApiClient.instance.fetchPendingCards(
+        limit: _pageSize,
+      );
       setState(() {
         _cards = cards;
+        _total = total;
         _loading = false;
       });
     } on ApiException catch (e) {
@@ -42,6 +51,35 @@ class _PendingPageState extends State<PendingPage> {
         _error = e.message;
         _loading = false;
       });
+    }
+  }
+
+  /// #15 分页：加载下一页（原 100 张硬截断会把 created_at 较旧的回炉完成
+  /// 卡挤出待审池，形成审核区/题库两端都找不到的假性丢卡）。
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore) return;
+    setState(() => _loadingMore = true);
+    try {
+      final (cards, total) = await ApiClient.instance.fetchPendingCards(
+        limit: _pageSize,
+        offset: _cards.length,
+      );
+      setState(() {
+        final known = _cards.map((c) => c.id).toSet();
+        _cards.addAll([for (final c in cards) if (!known.contains(c.id)) c]);
+        _total = total;
+        _loadingMore = false;
+      });
+    } on ApiException catch (e) {
+      setState(() => _loadingMore = false);
+      if (mounted) {
+        TopToast.show(
+          context,
+          '加载更多失败：${e.message}',
+          type: TopToastType.error,
+          stayDuration: const Duration(milliseconds: 1800),
+        );
+      }
     }
   }
 
@@ -85,7 +123,9 @@ class _PendingPageState extends State<PendingPage> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Text(
-                    '${_cards.length} 张待审',
+                    _total > _cards.length
+                        ? '${_cards.length}/$_total 张待审'
+                        : '${_cards.length} 张待审',
                     style: TextStyle(
                       fontSize: 12,
                       color: scheme.onPrimaryContainer,
@@ -107,9 +147,17 @@ class _PendingPageState extends State<PendingPage> {
               child: ListView.separated(
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(16),
-                itemCount: _cards.length,
+                // #15 分页：列表末尾追加「加载更多」（还有剩余时）
+                itemCount: _cards.length + (_hasMore ? 1 : 0),
                 separatorBuilder: (_, _) => const SizedBox(height: 12),
                 itemBuilder: (context, i) {
+                  if (i >= _cards.length) {
+                    return _LoadMoreTile(
+                      hasMore: _hasMore,
+                      loading: _loadingMore,
+                      onTap: _loadMore,
+                    );
+                  }
                   final card = _cards[i];
                   return _PendingCard(
                     card: card,
@@ -493,6 +541,35 @@ class _PendingCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// #15 分页：加载更多入口（超出首页 100 张的待审卡由此带出）
+class _LoadMoreTile extends StatelessWidget {
+  const _LoadMoreTile({
+    required this.hasMore,
+    required this.loading,
+    required this.onTap,
+  });
+
+  final bool hasMore;
+  final bool loading;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: FilledButton.tonal(
+        onPressed: loading ? null : onTap,
+        child: loading
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Text('加载更多'),
       ),
     );
   }

@@ -547,6 +547,11 @@ class _BankCardTile extends StatelessWidget {
     if (item.card.status == CardStatus.rework) {
       return ('重造中', const Color(0xFFE37318));
     }
+    // #15（2026-09-13）：rejected 卡此前与普通卡一样落到「未开始」调度徽标，
+    // 用户无从辨认（「回炉后找不到卡」的观感帮凶之一）——给专属灰红徽标
+    if (item.card.status == CardStatus.rejected) {
+      return ('已拒绝', const Color(0xFF8A5050));
+    }
     final due = item.dueAt;
     if (item.lapses >= 4) return ('弱卡', const Color(0xFFD54941));
     if (due == null) return ('未开始', HengyaColors.textSecondary);

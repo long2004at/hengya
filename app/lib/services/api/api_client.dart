@@ -356,13 +356,33 @@ class ApiClient {
     return items;
   }
 
-  /// 待审核池
-  Future<List<FlashCard>> fetchPendingCards() async {
-    final body = await _getRaw('/api/v1/cards/pending');
-    final list = jsonDecode(body) as List<dynamic>;
-    return list
-        .map((e) => FlashCard.fromJson(Map<String, dynamic>.from(e as Map)))
-        .toList();
+  /// 待审核池（#15 分页，2026-09-13）：local 模式带 limit/offset 并返回
+  /// total（「加载更多」判定）；demo/remote 服务端无分页参数——退化为一次
+  /// 全量，total = 列表长度（行为与旧版一致）。
+  Future<(List<FlashCard>, int)> fetchPendingCards({
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    switch (currentBackendMode) {
+      case BackendMode.local:
+        final data = await LocalBackend.instance
+            .get('/api/v1/cards/pending?limit=$limit&offset=$offset');
+        final rawList = data['list'] as List<dynamic>? ?? const [];
+        final cards = [
+          for (final e in rawList)
+            FlashCard.fromJson(Map<String, dynamic>.from(e as Map)),
+        ];
+        final total = (data['total'] as num?)?.toInt() ?? cards.length;
+        return (cards, total);
+      case BackendMode.demo:
+      case BackendMode.remote:
+        final body = await _getRaw('/api/v1/cards/pending');
+        final list = jsonDecode(body) as List<dynamic>;
+        final cards = list
+            .map((e) => FlashCard.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList();
+        return (cards, cards.length);
+    }
   }
 
   /// 复习队列（科目隔离，一次拉一批：地铁弱网也能背完，13.6）。

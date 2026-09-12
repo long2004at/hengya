@@ -302,10 +302,19 @@ class LocalBackend {
       };
     }
 
-    // /cards/pending（server 裸数组 → {'list': [...]} 约定形状）
+    // /cards/pending?limit=&offset=（server 裸数组 → {'list': [...]} 约定形状）
+    // #15（2026-09-13）：分页 + total——审核区加载更多（原 100 张硬截断
+    // 会淹掉 created_at 较旧的回炉完成卡）。limit/offset 缺省行为不变。
     if (path == '/cards/pending') {
+      final q = _parseQuery(path);
+      final limit = int.tryParse(q['limit'] ?? '') ?? 100;
+      final offset = int.tryParse(q['offset'] ?? '') ?? 0;
       return {
-        'list': [for (final c in db.pendingCards()) c.toJson()],
+        'list': [
+          for (final c in db.pendingCards(limit: limit, offset: offset))
+            c.toJson(),
+        ],
+        'total': db.pendingCardsCount(),
       };
     }
 
