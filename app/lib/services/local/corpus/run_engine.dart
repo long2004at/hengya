@@ -574,14 +574,15 @@ final Map<String, String> kFallbackPrompts = {
       '$kMaxSubtopicsPerKeyword 个，宁缺毋滥不硬凑）；第二段输出一个 JSON 对象 '
       '{"cards":[...]}，逐子考点出卡（每子考点 1-2 张，每张卡用 subtopic 字段'
       '标注所属子考点）。每张卡一个考点（back 要点≤4，禁「和、以及、并简述」'
-      '触发词）；答案以 evidence 的语料原文为准（PPT 课件或教材兜底，见 '
-      'evidence.sourceType）；pptHit=false 时只输出一张占位卡'
-      '（back=【语料未覆盖】请结合课堂笔记/教材补全原文后审核）。'
+      '触发词）；答案以 evidence 的语料原文为准（PPT 课件或教材，见 '
+      'evidence.sourceType；两者内容冲突时以教材为准）；pptHit=false 时只输出'
+      '一张占位卡（back=【语料未覆盖】请结合课堂笔记/教材补全原文后审核）。'
       'exam 卡每关键词 ≤2 张，需 examMeta{year,no}。',
   'rework':
       '你是恒牙复习系统的回炉重写助手。输入为 JSON（回炉项+理由+留言+证据），'
       '只输出 {"front","back","evidenceChunkId"}；「审核拒绝：」理由必须修正，'
-      '重写不得凭空改写。',
+      '重写不得凭空改写；evidence 为 PPT+教材双源（见 evidence.sourceType），'
+      '内容冲突时以教材为准，理由/留言指明依据来源（如「按教材」）时必须遵从。',
   'synonym':
       '为课堂关键词生成最多 $kMaxSynonymQueries 条同义表述检索式'
       '（强相关、宁缺毋滥、不准硬凑数——上限不是配额，质量优先），只输出 '
@@ -1077,7 +1078,35 @@ Future<Map<String, Object?>> splitKeyword({
   final String? evidenceTier = hits.isEmpty
       ? null
       : (textbookFallback ? kSplitFallbackSourceType : kSplitMainSourceType);
-  final evidence = hits.take(kSearchK).map(chunkToEvidence).toList();
+  // ── 方案 A（#10/#17，2026-09-13 拍板）：双源证据池——教材不再只是零命中
+  //    兜底：ppt 主源命中时也并行检索该科目教材树，双源合并去重同喂 LLM
+  //    （提示词明示「证据冲突时以教材为准」）。textbookFallback 路径的
+  //    hits 本身就是教材命中，无需重查。槽位翻倍（≤12 条）容纳双源。
+  var mergedHits = List<Map<String, Object?>>.of(hits.take(kSearchK));
+  if (pptHit && !textbookFallback) {
+    try {
+      final resTb = await runSearch(
+        text,
+        subject: subject,
+        sourceType: kSplitFallbackSourceType,
+        k: kSearchK,
+      );
+      final tb = searchHits(resTb, opts.floor);
+      if (tb.isNotEmpty) {
+        notes.add('教材证据入池：${tb.length} 条（双源证据池）');
+        mergedHits.addAll(tb.take(kSearchK));
+      }
+    } on SearchException catch (e) {
+      notes.add('教材并行检索故障降级（仅 ppt 证据）：$e');
+    }
+  }
+  // chunkId 去重（保序：ppt 在前、教材在后）
+  final seenCids = <String>{};
+  mergedHits = [
+    for (final h in mergedHits)
+      if (seenCids.add(h['chunk_id']?.toString() ?? '')) h,
+  ];
+  final evidence = mergedHits.map(chunkToEvidence).toList();
   final evidenceById = <String, Map<String, Object?>>{};
   for (final e in evidence) {
     final cid = e['chunkId'];
@@ -1367,23 +1396,62 @@ Future<List<Map<String, Object?>>> processRework({
         'anchor': it['anchor'],
       },
     };
+    // ── 方案 A（#10/#17，2026-09-13 拍板）：双源证据池 + 理由入检索 ──
+    // 原实现钉死 sourceType='ppt' 且 query 只取题干前 60 字（理由完全不参
+    // 与检索）——「按教材改」的理由传到了 prompt，检索层却无教材证据可喂，
+    // LLM 只能沿 PPT 旧证据重写（用户七轮回炉同错即此死循环）。现改：
+    // ppt + textbook 双路检索合并去重同喂；理由/留言非空时以「题干+理由」
+    // 对教材路增补一次检索（理由常指明方向，如「依照书本教材为准」）。
+    final reasonText = [
+      (it['reason']?.toString() ?? '')
+          .replaceFirst('审核拒绝：', '')
+          .replaceAll(RegExp(r'[、,，;；]+'), ' ')
+          .trim(),
+      (it['note']?.toString() ?? '').trim(),
+    ].where((s) => s.isNotEmpty).join(' ');
     var q = frontNow.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
     if (q.length > 60) {
       q = q.substring(0, 60);
     }
-    List<Map<String, Object?>> hits;
-    try {
-      final res = await runSearch(
-        q.isNotEmpty ? q : frontNow,
-        subject: subjectId.isEmpty ? null : subjectId,
-        sourceType: 'ppt',
-        k: kSearchK,
-      );
-      hits = searchHits(res, opts.floor);
-    } on SearchException {
-      hits = <Map<String, Object?>>[];
+    final baseQuery = q.isNotEmpty ? q : frontNow;
+    final merged = <Map<String, Object?>>[];
+    final seenIds = <String>{};
+    void addHits(List<Map<String, Object?>> hs) {
+      for (final h in hs) {
+        final cid = h['chunk_id']?.toString() ?? '';
+        if (cid.isEmpty || seenIds.add(cid)) {
+          merged.add(h);
+        }
+      }
     }
-    final evidence = hits.take(kSearchK).map(chunkToEvidence).toList();
+
+    Future<List<Map<String, Object?>>> trySearch(
+      String query,
+      String sourceType,
+    ) async {
+      try {
+        final res = await runSearch(
+          query,
+          subject: subjectId.isEmpty ? null : subjectId,
+          sourceType: sourceType,
+          k: kSearchK,
+        );
+        return searchHits(res, opts.floor);
+      } on SearchException {
+        return <Map<String, Object?>>[];
+      }
+    }
+
+    addHits(await trySearch(baseQuery, 'ppt'));
+    addHits(await trySearch(baseQuery, 'textbook'));
+    if (reasonText.isNotEmpty) {
+      final qr = '$baseQuery $reasonText'.trim();
+      addHits(await trySearch(qr, 'textbook'));
+    }
+    final evidence = merged
+        .take(kSearchK * 2) // 双源槽位：≤12 条（ppt 在前、教材在后、理由增补再次）
+        .map(chunkToEvidence)
+        .toList();
     final evById = <String, Map<String, Object?>>{};
     for (final e in evidence) {
       final cid = e['chunkId'];

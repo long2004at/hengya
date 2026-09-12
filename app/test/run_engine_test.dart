@@ -697,9 +697,11 @@ void main() {
     expect(payload['channelACap'], 2);
     // 真题候选检索：不带科目过滤、k=12、sourceType=exam
     expect(searchCalls.any((c) => c.endsWith('|null|exam|12')), isTrue);
-    // 批4 节点①：主源证据检索钉死 sourceType=ppt；命中即止，不触发教材兜底
+    // 批4 节点①：主源证据检索钉死 sourceType=ppt；
+    // 方案 A（#10/#17，2026-09-13）：ppt 命中时教材并行入池（双源证据池）——
+    // 教材不再是零命中兜底，ppt 命中也应发起 textbook 检索
     expect(searchCalls.first, '龋病四联因素|endo|ppt|6');
-    expect(searchCalls.any((c) => c.contains('|textbook|')), isFalse);
+    expect(searchCalls.any((c) => c.contains('|textbook|')), isTrue);
     expect(res['evidenceTier'], 'ppt');
   });
 
