@@ -290,6 +290,12 @@ class LocalBackend {
       return _corpusBuildView(db);
     }
 
+    // /corpus/diagnostics（#5 前半：语料库诊断——deck 来源分布 / 各类型
+    // 块数 / 向量完整度 / 上次建库与嵌入模型。语料缺失/损坏 → 零值不炸）
+    if (path == '/corpus/diagnostics') {
+      return _corpusDiagnostics(db);
+    }
+
     // /pipeline/weekly（自动周扫计时状态：节流时间戳 + 到期判定；清除后
     // settings 存的是空串——对外归一为 null，「从未跑过」单一表示）
     if (path == '/pipeline/weekly') {
@@ -1903,6 +1909,73 @@ if (svc == 'llm' || svc == 'llm_backup') {
 
   /// 待处理数（manifest 比对口径——构建成功后清零；见 _pendingIncomingFiles）。
   int _countPendingIncoming() => _pendingIncomingFiles().length;
+
+  /// #5 前半（2026-09-13）：语料库诊断——回答「语料包内容还在不在库里」：
+  /// deck 来源分布（package=语料包豁免剪除 / tree=手动课件）+ 各 source_type
+  /// 块数（教材/真题/课件）+ 向量完整度 + 上次入库与嵌入模型。任何查询失败
+  /// 单独吞掉（损坏库 → 零值降级，status 仍 200）。
+  Map<String, dynamic> _corpusDiagnostics(Db db) {
+    final deckSources = <String, int>{};
+    final deckChunkCounts = <String, int>{};
+    final chunkTypes = <String, int>{};
+    final out = <String, dynamic>{
+      'hasCorpus': false,
+      'chunks': 0,
+      'vectors': 0,
+      'deckSources': deckSources,
+      'deckChunkCounts': deckChunkCounts,
+      'chunkTypes': chunkTypes,
+      'lastIngest': null,
+      'lastBuild': null,
+      'embedModel': db.settingGet('embedding.model') ?? '',
+    };
+    final dbFile = File('$_corpusDir/corpus.db');
+    if (!dbFile.existsSync() || dbFile.lengthSync() == 0) return out;
+    dynamic cdb;
+    try {
+      cdb = sqlite3.open(dbFile.path, mode: OpenMode.readOnly);
+      out['hasCorpus'] = true;
+      try {
+        out['chunks'] =
+            (cdb.select('SELECT COUNT(*) AS n FROM chunks').first['n'] as int?) ??
+                0;
+      } catch (_) {}
+      try {
+        out['vectors'] = (cdb
+                .select('SELECT COUNT(*) AS n FROM vectors')
+                .first['n'] as int?) ??
+            0;
+      } catch (_) {}
+      try {
+        for (final row in cdb.select(
+          'SELECT source AS s, COUNT(*) AS decks, SUM(chunk_count) AS cs '
+          'FROM deck_state GROUP BY source',
+        )) {
+          deckSources[row['s'] as String] = row['decks'] as int;
+          deckChunkCounts[row['s'] as String] = (row['cs'] as int?) ?? 0;
+        }
+      } catch (_) {}
+      try {
+        for (final row in cdb.select(
+          'SELECT source_type AS t, COUNT(*) AS n FROM chunks GROUP BY source_type',
+        )) {
+          chunkTypes[row['t'] as String] = row['n'] as int;
+        }
+      } catch (_) {}
+      try {
+        for (final row in cdb.select(
+          "SELECT key, value FROM meta WHERE key IN ('last_ingest', 'last_build')",
+        )) {
+          out[row['key'] as String] = row['value'] as String?;
+        }
+      } catch (_) {}
+    } catch (_) {
+      // 打不开 → hasCorpus 维持 true/false 按实况，其余零值降级
+    } finally {
+      (cdb as dynamic)?.dispose();
+    }
+    return out;
+  }
 
   int _dirSize(Directory dir) {
     if (!dir.existsSync()) return 0;

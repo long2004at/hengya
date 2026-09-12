@@ -939,6 +939,10 @@ class ApiClient {
     await _putJson('/api/v1/settings/dup', {'threshold': threshold});
   }
 
+  /// #5 前半：语料库诊断（GET /api/v1/corpus/diagnostics）
+  Future<Map<String, dynamic>> fetchCorpusDiagnostics() =>
+      _getJson('/api/v1/corpus/diagnostics');
+
   /// 更新一套 AI 服务配置。apiKey 传空串 = 保持已存 key 不变。
   Future<AiServiceUpdateResult> updateAiService(
     String service, {

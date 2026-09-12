@@ -257,6 +257,112 @@ class _SettingsPageState extends State<SettingsPage> {
       ? '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB'
       : '${(bytes / 1024).round()} KB';
 
+  // ---------------- #5 前半 语料库诊断（2026-09-13） ----------------
+
+  String _diagType(String key) => switch (key) {
+        'textbook' => '教材',
+        'exam' => '真题',
+        'ppt' => '课件',
+        'outline' => '大纲',
+        _ => key,
+      };
+
+  /// 诊断弹层：回答「语料包内容还在不在库里」（2026-09-11 剪除事故自查
+  /// ——deck 来源分布 + 各类型块数 + 向量完整度，详见 _corpusDiagnostics）。
+  Future<void> _showCorpusDiagnostics() async {
+    Map<String, dynamic> d;
+    try {
+      d = await ApiClient.instance.fetchCorpusDiagnostics();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(context, '诊断失败：${e.message}', type: TopToastType.error);
+      return;
+    }
+    if (!mounted) return;
+    final hasCorpus = d['hasCorpus'] == true;
+    final chunks = (d['chunks'] as num?)?.toInt() ?? 0;
+    final vectors = (d['vectors'] as num?)?.toInt() ?? 0;
+    final types = (d['chunkTypes'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final deckSources =
+        (d['deckSources'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final deckChunks =
+        (d['deckChunkCounts'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final embedModel = (d['embedModel'] as String?) ?? '';
+    final lastIngest = (d['lastIngest'] as String?) ?? '';
+    final lastBuild = (d['lastBuild'] as String?) ?? '';
+
+    final rows = <Widget>[
+      _diagRow('语料库', hasCorpus ? '已找到' : '未找到'),
+      _diagRow(
+        '语料块',
+        '$chunks 块（向量 $vectors 条'
+        '${vectors < chunks ? '，缺 ${chunks - vectors} 条向量' : '，完整'}）',
+      ),
+      if (types.isNotEmpty)
+        _diagRow('块来源', [
+          for (final e in types.entries)
+            '${_diagType(e.key)} ${(e.value as num?)?.toInt() ?? 0}',
+        ].join(' · ')),
+      if (deckSources.isNotEmpty)
+        _diagRow('deck 来源', [
+          if (deckSources['package'] != null)
+            '语料包 ${deckSources['package']} 个 deck'
+                '（${deckChunks['package'] ?? 0} 块）',
+          if (deckSources['tree'] != null)
+            '手动课件 ${deckSources['tree']} 个 deck'
+                '（${deckChunks['tree'] ?? 0} 块）',
+        ].where((s) => s.isNotEmpty).join(' · ')),
+      _diagRow('嵌入模型', embedModel.isEmpty ? '未配置' : embedModel),
+      if (lastBuild.isNotEmpty)
+        _diagRow('上次构建', _fmtTimeOrRaw(lastBuild)),
+      if (lastIngest.isNotEmpty)
+        _diagRow('上次入库', _fmtTimeOrRaw(lastIngest)),
+    ];
+
+    await showDialog<void>(
+      context: context,
+      builder: (dlgCtx) => AlertDialog(
+        title: const Text('语料库诊断'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: rows,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// meta 时间值可解析则本地化展示，否则原样截断（last_ingest 为 JSON 文本）
+  String _fmtTimeOrRaw(String raw) {
+    final t = DateTime.tryParse(raw);
+    return t != null ? _fmtDateTime(t) : (raw.length > 60 ? '${raw.substring(0, 60)}…' : raw);
+  }
+
+  Widget _diagRow(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 72,
+              child: Text(
+                label,
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ),
+            Expanded(
+              child: Text(value, style: const TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+      );
+
   // ---------------- #11 重复卡查重阈值（2026-09-13） ----------------
 
   /// 阈值调节弹层：拉当前值 → 滑杆 0.80~0.99 → PUT /settings/dup。
@@ -827,6 +933,20 @@ class _SettingsPageState extends State<SettingsPage> {
                       icon: const Icon(Icons.refresh, size: 20),
                       onPressed: _refreshCorpus,
                     ),
+                  ),
+                  const Divider(height: 1, indent: 16, endIndent: 16),
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                    title: const Text(
+                      '语料库诊断',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: const Text(
+                      'deck 来源分布 · 教材/真题/课件块数 · 向量完整度',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    trailing: const Icon(Icons.monitor_heart_outlined),
+                    onTap: _showCorpusDiagnostics,
                   ),
                   if (_corpus!.subjects.isNotEmpty)
                     Padding(
