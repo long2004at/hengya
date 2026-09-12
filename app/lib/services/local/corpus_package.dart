@@ -892,7 +892,9 @@ final (progressCreated, progressSynced) =
   /// 包内每科：progress.json 无条目 → 建（sidecar 有 → 全 0 真罗盘；无 →
   /// 无罗盘占位，applyChange 同款 history 记录）；已有条目 → 仅同步
   /// textbook/chapters（derm 占位升级），learned_through/skipped/history
-  /// **分毫不动（不 clamp）**。chapters 落库前一律经 effectiveTocChapters
+  /// 不动**但章列表被替换时收口到新列表合法域**（#1，2026-09-13：指针
+  /// 不收口会在缩水后的稀疏列表上越界——进度页「已学 > 有效章数」；
+  /// history 分毫不动）。chapters 落库前一律经 effectiveTocChapters
   /// 变换（真章救援+辅文过滤，稀疏保 no——与建库端同源；旧库垃圾章列表
   /// 借「已有条目同步」升级为干净列表）。返回 (created, synced实际变化数)。
   (int, int) _syncProgress(String corpusDir, List<PackageSubjectSeed> seeds) {
@@ -945,7 +947,7 @@ final (progressCreated, progressSynced) =
       // 与建库端同源走 effectiveTocChapters——旧库垃圾章列表借此升级）
       final newTextbook =
           ((sidecar?['textbook'] as String?) ?? s.textbook)?.trim();
-      final newChapters =
+      final List<Map<String, Object?>>? newChapters0 =
           sidecar == null ? null : effectiveTocChapters(sidecar);
       var changed = false;
       if (newTextbook != null &&
@@ -954,9 +956,36 @@ final (progressCreated, progressSynced) =
         e0['textbook'] = newTextbook;
         changed = true;
       }
-      if (newChapters is List && !_jsonEqual(e0['chapters'], newChapters)) {
+      // 独立局部变量：Dart 对传给 dynamic 下标赋值后的可空变量类型提升
+      // 不保证生效，复制一份保证 for-in 前非空
+      final newChapters = newChapters0;
+      if (newChapters != null && !_jsonEqual(e0['chapters'], newChapters)) {
         e0['chapters'] = newChapters;
         changed = true;
+        // #1（2026-09-13）：章列表被替换（可能缩短/稀疏编号变化）→ 指针与
+        // 跳过集收口到新列表合法域——与建库端 _applySidecarEntry 同口径
+        // （progress_db.dart 收口先例）。原「分毫不动」下旧库大指针在新
+        // 列表上越界，进度页出现「已学 > 有效章数」。history 不动。
+        final nos = <int>{
+          for (final ch in newChapters)
+            if (ch['no'] is int) ch['no'] as int,
+        };
+        final maxNo = nos.isEmpty ? 0 : nos.reduce((a, b) => a > b ? a : b);
+        final lt =
+            e0['learned_through'] is int ? e0['learned_through'] as int : 0;
+        if (lt > maxNo) {
+          e0['learned_through'] = maxNo;
+        }
+        final sk = e0['skipped'];
+        if (sk is List) {
+          final valid = [
+            for (final v in sk)
+              if (v is int && nos.contains(v)) v,
+          ]..sort();
+          if (!_jsonEqual(sk, valid)) {
+            e0['skipped'] = valid;
+          }
+        }
       }
       if (changed) {
         e0['updated_at'] = nowIso();

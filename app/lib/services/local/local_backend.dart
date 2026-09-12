@@ -1696,9 +1696,9 @@ if (svc == 'llm' || svc == 'llm_backup') {
         subjects.add({
           'id': entry.key,
           'textbook': value['textbook'],
-          'learned_through':
-              learnedThrough - skipped.where((s) => s <= learnedThrough).length,
-          'total': chapters.length - skipped.length,
+          // #1 口径对齐：已学/总量均为真实正文章口径（剔辅文与跳过）
+          'learned_through': _effectiveLearned(chapters, learnedThrough, skipped),
+          'total': _effectiveTotal(chapters, skipped),
           'next_chapter': next,
         });
       }
@@ -1736,6 +1736,44 @@ if (svc == 'llm' || svc == 'llm_backup') {
     return skipped.where(nos.contains).toSet();
   }
 
+  /// #1（2026-09-13）有效已学口径：**真实正文章**（剔辅文/空标题）中
+  /// no ≤ 指针且未跳过的**章数**——不再是「原始序号轴上的指针减跳过」
+  /// （稀疏编号/辅文过滤下旧公式会大于有效章数，进度页「已学 > 有效」）。
+  static int _effectiveLearned(
+    List<dynamic> chapters,
+    int learnedThrough,
+    Set<int> skipped,
+  ) {
+    var n = 0;
+    for (final ch in chapters) {
+      if (ch is! Map) continue;
+      final no = ch['no'];
+      if (no is! int || no <= 0 || no > learnedThrough) continue;
+      if (skipped.contains(no)) continue;
+      final title = ch['title'];
+      final norm = title is String ? _normTitle(title) : '';
+      if (norm.isEmpty || _nonContentNorm.contains(norm)) continue;
+      n++;
+    }
+    return n;
+  }
+
+  /// #1 有效总量口径：真实正文章中未跳过的章数（与 [_effectiveLearned]
+  /// 同域——恒有 learned ≤ total；章列表含辅文旧数据时同步纠偏）。
+  static int _effectiveTotal(List<dynamic> chapters, Set<int> skipped) {
+    var n = 0;
+    for (final ch in chapters) {
+      if (ch is! Map) continue;
+      if (ch['no'] is! int) continue;
+      final title = ch['title'];
+      final norm = title is String ? _normTitle(title) : '';
+      if (norm.isEmpty || _nonContentNorm.contains(norm)) continue;
+      if (skipped.contains(ch['no'] as int)) continue;
+      n++;
+    }
+    return n;
+  }
+
   /// 单科章节管理视图（⑨ `GET /progress/<subject>/chapters`）：全章列表 +
   /// 每章状态（learned=指针已越过、skipped=不学）+ 原始/有效统计。
   /// learned_through 返回**原始前缀指针**（PUT 直接吃同一语义）；有效统计
@@ -1753,8 +1791,6 @@ if (svc == 'llm' || svc == 'llm_backup') {
         entry['chapters'] is List ? entry['chapters'] as List : const [];
     final skipped = _validSkipped(
         chapters, skippedChaptersOf(Map<String, Object?>.from(entry)));
-    final effLearned =
-        learnedThrough - skipped.where((s) => s <= learnedThrough).length;
     final rows = <Map<String, dynamic>>[
       for (final ch in chapters)
         if (ch is Map)
@@ -1773,8 +1809,9 @@ if (svc == 'llm' || svc == 'llm_backup') {
       'learned_through': learnedThrough,
       'skipped': skipped.toList()..sort(),
       'total': chapters.length,
-      'effective_total': chapters.length - skipped.length,
-      'effective_learned': effLearned,
+      // #1 口径对齐：有效已学/有效总量为真实正文章口径（剔辅文与跳过）
+      'effective_total': _effectiveTotal(chapters, skipped),
+      'effective_learned': _effectiveLearned(chapters, learnedThrough, skipped),
       'next_chapter': _nextChapter(chapters, learnedThrough, skipped),
       'chapters': rows,
     };

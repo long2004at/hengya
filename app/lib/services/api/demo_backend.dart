@@ -110,7 +110,14 @@ class DemoBackend {
     final skipped = st == null
         ? const <int>{}
         : (st['skipped'] as Set<int>);
-    final effLearned = learned - skipped.where((s) => s <= learned).length;
+    // #1 口径对齐（2026-09-13）：有效已学/有效总量 = 真实正文章口径
+    // （剔辅文与跳过），与 local 实装 _effectiveLearned/_effectiveTotal 一致
+    bool isContent(int no, String title) =>
+        !skipped.contains(no) && !_nonContentNorm.contains(_norm(title));
+    final effLearned = [
+      for (final (no, title, _) in spec)
+        if (no > 0 && no <= learned && isContent(no, title)) no,
+    ].length;
     // 下一章（9 项辅文章过滤 + 跳过感知）
     Map<String, dynamic>? next;
     for (final (no, title, page) in spec) {
@@ -125,7 +132,9 @@ class DemoBackend {
       'learned_through': learned,
       'skipped': skipped.toList()..sort(),
       'total': spec.length,
-      'effective_total': spec.length - skipped.length,
+      'effective_total': [
+        for (final (no, title, _) in spec) if (isContent(no, title)) no,
+      ].length,
       'effective_learned': effLearned,
       'next_chapter': next,
       'chapters': [
