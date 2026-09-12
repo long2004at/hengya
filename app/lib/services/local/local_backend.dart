@@ -1721,9 +1721,10 @@ if (svc == 'llm' || svc == 'llm_backup') {
         subjects.add({
           'id': entry.key,
           'textbook': value['textbook'],
-          // #1 口径对齐：已学/总量均为真实正文章口径（剔辅文与跳过）
-          'learned_through': _effectiveLearned(chapters, learnedThrough, skipped),
-          'total': _effectiveTotal(chapters, skipped),
+          // 审计 e 拍板：主视图原样透传指针/总量（脏数据 UI 层钳制 100%）
+          'learned_through':
+              learnedThrough - skipped.where((s) => s <= learnedThrough).length,
+          'total': chapters.length - skipped.length,
           'next_chapter': next,
         });
       }
@@ -1763,7 +1764,9 @@ if (svc == 'llm' || svc == 'llm_backup') {
 
   /// #1（2026-09-13）有效已学口径：**真实正文章**（剔辅文/空标题）中
   /// no ≤ 指针且未跳过的**章数**——不再是「原始序号轴上的指针减跳过」
-  /// （稀疏编号/辅文过滤下旧公式会大于有效章数，进度页「已学 > 有效」）。
+  /// （稀疏编号下指针可越过列表长度：已学 9 / 有效 6）。恒 ≤ effective_total
+  /// （长度域 ≥ 正文章域）。主 /progress 视图不适用本口径（审计 e 拍板：
+  /// 指针原样透传，UI 层钳制百分比）。
   static int _effectiveLearned(
     List<dynamic> chapters,
     int learnedThrough,
@@ -1778,22 +1781,6 @@ if (svc == 'llm' || svc == 'llm_backup') {
       final title = ch['title'];
       final norm = title is String ? _normTitle(title) : '';
       if (norm.isEmpty || _nonContentNorm.contains(norm)) continue;
-      n++;
-    }
-    return n;
-  }
-
-  /// #1 有效总量口径：真实正文章中未跳过的章数（与 [_effectiveLearned]
-  /// 同域——恒有 learned ≤ total；章列表含辅文旧数据时同步纠偏）。
-  static int _effectiveTotal(List<dynamic> chapters, Set<int> skipped) {
-    var n = 0;
-    for (final ch in chapters) {
-      if (ch is! Map) continue;
-      if (ch['no'] is! int) continue;
-      final title = ch['title'];
-      final norm = title is String ? _normTitle(title) : '';
-      if (norm.isEmpty || _nonContentNorm.contains(norm)) continue;
-      if (skipped.contains(ch['no'] as int)) continue;
       n++;
     }
     return n;
@@ -1834,8 +1821,9 @@ if (svc == 'llm' || svc == 'llm_backup') {
       'learned_through': learnedThrough,
       'skipped': skipped.toList()..sort(),
       'total': chapters.length,
-      // #1 口径对齐：有效已学/有效总量为真实正文章口径（剔辅文与跳过）
-      'effective_total': _effectiveTotal(chapters, skipped),
+      // #1 口径修复：有效已学改为真实正文章计数（原「指针减跳过」在稀疏
+      // 编号下可大于有效总量——「已学 > 有效章数」的真根因）
+      'effective_total': chapters.length - skipped.length,
       'effective_learned': _effectiveLearned(chapters, learnedThrough, skipped),
       'next_chapter': _nextChapter(chapters, learnedThrough, skipped),
       'chapters': rows,

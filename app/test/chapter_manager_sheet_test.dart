@@ -139,7 +139,8 @@ void main() {
 
     expect(find.text('章节管理 · 牙体牙髓病学'), findsOneWidget);
     expect(find.text('牙体牙髓病学-第5版'), findsOneWidget);
-    expect(find.textContaining('已学 2 / 有效 5 章'), findsOneWidget);
+    // #1 新口径：有效已学=正文章计数（指针 2 只越过目录/前言辅文）
+    expect(find.textContaining('已学 0 / 有效 5 章'), findsOneWidget);
     // 五章全列出（罗盘数据源章名）
     for (final t in ['目录', '前言', '第一章 绪论', '第二章 龋病', '第三章 牙体修复']) {
       expect(find.text(t), findsOneWidget, reason: '章名 $t 应在列表');
@@ -184,7 +185,9 @@ void main() {
     expect(find.textContaining('已学到「第二章 龋病」'), findsOneWidget);
     expect(changed, 1);
     // 弹层即时刷新：摘要更新、状态图标随之（已学 4）
-    expect(find.textContaining('已学 4 / 有效 5 章'), findsOneWidget);
+    expect(find.textContaining('已学 2 / 有效 5 章'),
+        findsOneWidget, reason: '#1 新口径：正文章 ≤ 指针 4 共 2 章');
+    // 行级 learned 标记仍按原始指针（含目录/前言）：4 行
     expect(find.byIcon(Icons.check_circle), findsNWidgets(4));
     // 收尾：让气泡走完生命周期
     await tester.pump(const Duration(seconds: 3));
@@ -304,6 +307,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 450));
     expect(find.text('章节管理 · endo'), findsOneWidget,
         reason: 'subjects 表无科目名时 nameOf 回退 id');
-    expect(find.textContaining('已学 2 / 有效 5 章'), findsOneWidget);
+    // #1 新口径：指针 2 只越过辅文 → 正文章计数 0
+    expect(find.textContaining('已学 0 / 有效 5 章'), findsOneWidget);
   });
 }

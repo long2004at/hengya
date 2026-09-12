@@ -488,8 +488,7 @@ void main() {
     final endo = subjects.single as Map<String, dynamic>;
     expect(endo['textbook'], '世界通史-第2版');
     expect(endo['learned_through'], 1);
-    // #1 口径对齐（2026-09-13）：total = 真实正文章数（剔目录/前言辅文）
-    expect(endo['total'], 2);
+    expect(endo['total'], 4); // 原样含目录/前言辅文章（§7.9 拍板）
     final next = endo['next_chapter'] as Map<String, dynamic>;
     expect(next['no'], 4); // 目录/前言被辅文章过滤跳过
     expect(next['title'], '第二章 新航路');

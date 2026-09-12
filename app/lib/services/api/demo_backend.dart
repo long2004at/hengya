@@ -132,9 +132,7 @@ class DemoBackend {
       'learned_through': learned,
       'skipped': skipped.toList()..sort(),
       'total': spec.length,
-      'effective_total': [
-        for (final (no, title, _) in spec) if (isContent(no, title)) no,
-      ].length,
+      'effective_total': spec.length - skipped.length,
       'effective_learned': effLearned,
       'next_chapter': next,
       'chapters': [
@@ -602,10 +600,13 @@ class DemoBackend {
             if (_chapterState.containsKey(id))
               () {
                 final v = _chapterView(id);
+                final lt = v['learned_through'] as int;
+                final sk = (v['skipped'] as List).cast<int>();
                 return {
                   'id': id,
                   'textbook': v['textbook'],
-                  'learned_through': v['effective_learned'],
+                  // 与 local 主视图同口径：指针原样（减跳过），非正文章计数
+                  'learned_through': lt - sk.where((s) => s <= lt).length,
                   'total': v['effective_total'],
                   'next_chapter': v['next_chapter'],
                 };

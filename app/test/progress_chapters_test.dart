@@ -402,7 +402,9 @@ void main() {
     expect(v['learned_through'], 2, reason: '原始前缀指针（PUT 直接吃同一语义）');
     expect(v['total'], 5);
     expect(v['effective_total'], 5);
-    expect(v['effective_learned'], 2);
+    // #1 新口径：有效已学=正文章计数（目录/前言 no=1,2 是辅文，指针 2 也
+    // 只越过辅文 → 0）
+    expect(v['effective_learned'], 0);
     expect(v['skipped'], isEmpty);
     expect((v['next_chapter'] as Map)['no'], 3);
     final rows = (v['chapters'] as List).cast<Map<String, dynamic>>();
@@ -460,7 +462,7 @@ void main() {
     expect(r['ok'], true);
     expect(r['skipped'], [3]);
     expect(r['effective_total'], 4);
-    expect(r['effective_learned'], 2);
+    expect(r['effective_learned'], 0, reason: '#1 新口径：指针 2 只越过辅文');
     expect((r['next_chapter'] as Map)['no'], 4, reason: '「下一章」越过不学章');
     var view = await be.get('/progress');
     var e = subjectOf(view, 'endo');
@@ -470,9 +472,9 @@ void main() {
     // GET 章节视图：no=3 行 skipped=true
     var v = await be.get('/progress/endo/chapters');
     expect(((v['chapters'] as List)[2] as Map)['skipped'], true);
-    // 再标记指针下方的 no=1（目录）→ 有效已学 2-1=1
+    // 再标记指针下方的 no=1（目录）→ #1 新口径：正文章计数不变（0）
     r = await be.put('/progress/endo/chapters', {'skipped': [1, 3]});
-    expect(r['effective_learned'], 1);
+    expect(r['effective_learned'], 0);
     view = await be.get('/progress');
     e = subjectOf(view, 'endo');
     expect(e['learned_through'], 1);
