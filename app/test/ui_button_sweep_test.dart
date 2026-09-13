@@ -329,6 +329,9 @@ void main() {
     final chipBefore = tester.widget<ChoiceChip>(
         find.widgetWithText(ChoiceChip, chipName));
     expect(chipBefore.selected, false);
+    // #6 紧凑化后科目栏单行横滑——末位芯片可能不在视口，先滚到可见
+    await tester.ensureVisible(find.widgetWithText(ChoiceChip, chipName));
+    await tester.pump();
     await tester.tap(find.widgetWithText(ChoiceChip, chipName),
         warnIfMissed: false);
     await tester.pump();

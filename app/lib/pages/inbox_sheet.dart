@@ -8,9 +8,11 @@
 // M5 动态科目：科目列表来自服务端（缓存+刷新），拉取失败 → 空态 + 刷新重试
 //（0.3.1 起无内置科目兜底）；内联「＋新建课程」——创建成功立即可选，
 // TopToast 展示短码。
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
-import '../services/api/api_client.dart';
+import '../services/api/api_client.dart' show ApiClient, ApiException, BackendMode, SubjectChapterStatus, SubjectInfo, currentBackendMode;
 import '../theme.dart';
 import '../widgets/top_toast.dart';
 import 'subject_picker.dart';
@@ -44,6 +46,41 @@ class _InboxSheetState extends State<_InboxSheet> {
   bool _sending = false;
   String? _error;
 
+  // #8 章节快捷点选（2026-09-13）：选中科目有罗盘 → 拉章节视图，
+  // 未学正文章以点选芯片呈现（报学=「已学到此」，要报的是未学章）；
+  // 无罗盘/拉取失败 → 空列表，保持自由输入现状。点选集提交时并入章节条目。
+  List<SubjectChapterStatus> _quickChapters = const [];
+  final Set<String> _pickedChapters = {};
+
+  /// 辅文章标题归一集（与 local_backend/_nonContentExact 同口径的 UI 侧
+  /// 最小集——快捷点选不该报「目录/前言」）
+  static const _auxTitles = {
+    '目录', '目录尾', '前言', '序', '序言', '附录', '附录一', '附录二', '附录三',
+  };
+
+  Future<void> _loadQuickChapters(String? sid) async {
+    _quickChapters = const [];
+    _pickedChapters.clear();
+    if (sid == null || sid.isEmpty) return;
+    try {
+      final view = await ApiClient.instance.fetchSubjectChapters(sid);
+      if (!mounted) return;
+      setState(() {
+        _quickChapters = [
+          for (final ch in view.chapters)
+            if (!ch.learned &&
+                !ch.skipped &&
+                !_auxTitles.contains(ch.title.replaceAll(RegExp(r'\s+'), '')))
+              ch,
+        ];
+      });
+    } on ApiException {
+      // 无罗盘（404）/拉取失败 → 快捷点选缺席，自由输入照常（设计内降级）
+      if (!mounted) return;
+      setState(() => _quickChapters = const []);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -67,6 +104,7 @@ class _InboxSheetState extends State<_InboxSheet> {
         _refreshing = false;
         _subjectId ??= subs.isNotEmpty ? subs.first.id : null;
       });
+      unawaited(_loadQuickChapters(_subjectId));
     } on ApiException {
       // 科目列表拉取失败 → 保留既有列表（可能为空）+ 失败标记，
       // 用户经右上角刷新或「新建课程」走出困境
@@ -88,6 +126,7 @@ class _InboxSheetState extends State<_InboxSheet> {
       _subjects = [..._subjects, created];
       _subjectId = created.id; // 创建成功立即可选
     });
+    unawaited(_loadQuickChapters(created.id));
   }
 
   /// 章节字段拆分：仅按换行拆（每章一行；章名可含顿号/逗号，不按标点拆）
@@ -105,7 +144,12 @@ class _InboxSheetState extends State<_InboxSheet> {
       .toList();
 
   Future<void> _submit() async {
-    final chapters = _splitChapters(_chapterCtrl.text);
+    // #8：快捷点选的章名并入章节条目（与手输去重；手输在前保持用户笔序）
+    final typed = _splitChapters(_chapterCtrl.text);
+    final chapters = [
+      ...typed,
+      for (final t in _pickedChapters) if (!typed.contains(t)) t,
+    ];
     final keywords = _splitKeywords(_keywordCtrl.text);
     if (_subjectId == null) {
       setState(() => _error = '请先选择科目');
@@ -251,35 +295,48 @@ class _InboxSheetState extends State<_InboxSheet> {
                 ),
               ),
               const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final s in _subjects)
-                    ChoiceChip(
-                      // M3 chipTheme.labelStyle 非空会整体替换默认状态化样式（含色），
-                      // 故 label 显式给色：选中白字配品牌蓝底，未选中深色字
-                      label: Text(
-                        s.name,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: _subjectId == s.id
-                              ? Colors.white
-                              : HengyaColors.textPrimary,
+              // #6（2026-09-13）紧凑化：Wrap 多行占屏过高 → 单行横滑
+              //（SingleChildScrollView+Row 一次性构建全部芯片——科目数
+              // 量级小，且选择器/测试需按文本查找任意科目芯片）
+              SizedBox(
+                height: 36,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(children: [
+                    for (final s in _subjects)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                          visualDensity: VisualDensity.compact,
+                          // M3 chipTheme.labelStyle 非空会整体替换默认状态化样式（含色），
+                          // 故 label 显式给色：选中白字配品牌蓝底，未选中深色字
+                          label: Text(
+                            s.name,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: _subjectId == s.id
+                                  ? Colors.white
+                                  : HengyaColors.textPrimary,
+                            ),
+                          ),
+                          selected: _subjectId == s.id,
+                          onSelected: (_) {
+                            setState(() => _subjectId = s.id);
+                            unawaited(_loadQuickChapters(s.id));
+                          },
                         ),
                       ),
-                      selected: _subjectId == s.id,
-                      onSelected: (_) => setState(() => _subjectId = s.id),
+                    ActionChip(
+                      visualDensity: VisualDensity.compact,
+                      avatar: Icon(Icons.add, size: 16, color: scheme.primary),
+                      label: Text(
+                        '新建课程',
+                        style: TextStyle(fontSize: 13, color: scheme.primary),
+                      ),
+                      onPressed: _createSubject,
                     ),
-                  ActionChip(
-                    avatar: Icon(Icons.add, size: 16, color: scheme.primary),
-                    label: Text(
-                      '新建课程',
-                      style: TextStyle(fontSize: 13, color: scheme.primary),
-                    ),
-                    onPressed: _createSubject,
-                  ),
-                ],
+                  ]),
+                ),
               ),
               if (_failed) ...[
                 const SizedBox(height: 6),
@@ -305,12 +362,49 @@ class _InboxSheetState extends State<_InboxSheet> {
                 textInputAction: TextInputAction.newline,
                 decoration: InputDecoration(
                   hintText: '每章一行\n如：第三章 新航路的开辟',
-                  helperText: '章名可含顿号/逗号，一行就是一章',
+                  helperText: _quickChapters.isEmpty
+                      ? '章名可含顿号/逗号，一行就是一章'
+                      : '可直接点选下方章节，新章节仍可手输',
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
               ),
+              // #8（2026-09-13）章节快捷点选：未学正文章 → 点选即报学，
+              // 免手打章名（章名须与教材目录一致，手打极易对不上检索）
+              if (_quickChapters.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '快捷点选（未学章节，点选即报学）',
+                  style: TextStyle(fontSize: 12, color: scheme.outline),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final ch in _quickChapters)
+                      FilterChip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(
+                          ch.title,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: _pickedChapters.contains(ch.title)
+                                ? Colors.white
+                                : HengyaColors.textPrimary,
+                          ),
+                        ),
+                        selected: _pickedChapters.contains(ch.title),
+                        onSelected: (_) => setState(() {
+                          if (!_pickedChapters.remove(ch.title)) {
+                            _pickedChapters.add(ch.title);
+                          }
+                        }),
+                      ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 16),
               // ③ 重点关键词：换行/顿号/逗号分隔均可
               Text(
