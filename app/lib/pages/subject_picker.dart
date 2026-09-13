@@ -41,14 +41,12 @@ Future<SubjectInfo?> showCreateSubjectDialog(BuildContext context) {
           } on ApiException catch (e) {
             setDlgState(() {
               sending = false;
-              // 409 有两种冲突（重名/短码重复）——本地与服务端的 message 均为可直接
-              // 展示的裸中文（API 错误契约），直接透传；旧版一律提示「短码已被占用」
-              // 会误导重名场景（2026-09-06 五问专项整改）
-              error = e.statusCode == 409
-                  ? e.message
-                  : (e.statusCode == 0
-                        ? '连不上服务器，请检查网络'
-                        : '创建失败（${e.statusCode}）');
+              // 4xx 的 message 均为可直接展示的裸中文（API 错误契约）：
+              // 409 重名/短码重复、400 短码非法/系统保留（#7，2026-09-13 起
+              // 本地后端会拒绝保留短码）——一律透传，不再吞成「创建失败（400）」
+              error = e.statusCode == 0
+                  ? '连不上服务器，请检查网络'
+                  : e.message;
             });
           }
         }

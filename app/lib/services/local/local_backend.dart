@@ -43,7 +43,8 @@ import 'ai_key_vault.dart';
 import 'card_dedup.dart' show dupThresholdOf, kDupThresholdSettingKey;
 import 'corpus/extract_all.dart' show CorpusEmbedMode, loadManifest;
 import 'corpus/exam_topics.dart';
-import 'corpus/outline_docx.dart' show kOutlineUploadCode;
+import 'corpus/outline_docx.dart'
+    show kMedSubjectCode, kOutlineUploadCode;
 import 'corpus/progress_db.dart'
     show
         initFromTocSidecar,
@@ -764,6 +765,9 @@ class LocalBackend {
         id = _generateSubjectId(db);
       } else if (!_subjectIdPattern.hasMatch(id)) {
         throw ApiException(400, '科目短码 $id 非法（仅小写字母+数字，2-16 位）');
+      }
+      if (_reservedSubjectIds.contains(id)) {
+        throw ApiException(400, '科目短码 $id 为系统保留，请换一个');
       }
       if (db.subjectExists(id)) throw ApiException(409, '科目短码 $id 已存在');
       if (db.subjectNameExists(name)) throw ApiException(409, '科目名称「$name」已存在');
@@ -2075,6 +2079,18 @@ if (svc == 'llm' || svc == 'llm_backup') {
   // ---------------- 工具 ----------------
 
   static final _subjectIdPattern = RegExp(r'^[a-z0-9]{2,16}$');
+
+  /// #7（2026-09-13）保留短码黑名单：与语料系统保留目录/科目空间冲突的
+  /// 短码禁止用户科目占用——手填 `exam` 的课件会被静默路由进真题树
+  /// （extract_pptx splitSubjectSource 裸 exam 目录语义）、`med` 会被
+  /// 医学综合大纲占位机制收编、`dagang` 是大纲上传固定短码、考站专题码
+  /// （含 shijuan）是真题池的 subject 空间。
+  static final Set<String> _reservedSubjectIds = {
+    'exam',
+    kMedSubjectCode,
+    kOutlineUploadCode,
+    ...kExamTopics.map((t) => t.code),
+  };
   static final _subjectCodePattern = RegExp(
     r'^[a-z0-9]{1,32}$',
   ); // upload 短码（对照 routes/corpus.dart）

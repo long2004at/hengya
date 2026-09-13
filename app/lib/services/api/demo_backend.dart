@@ -6,9 +6,22 @@
 // 一套代码两种构建：DEMO=1 演示包（无网可玩）/ 默认 真实服务器包。
 import 'package:shared/hengya_shared.dart';
 
+import '../local/corpus/exam_topics.dart' show kExamTopics;
 import 'api_client.dart';
 
 class DemoBackend {
+  /// 与 local_backend._subjectIdPattern 同款（契约对齐，2026-09-13）
+  static final RegExp _demoSubjectIdPattern = RegExp(r'^[a-z0-9]{2,16}$');
+
+  /// 演示模式同样拒绝保留短码（与 local 黑名单同源 kExamTopics；demo 无
+  /// 语料系统，但两后端错误契约一致可让 UI 分支在演示下可见）
+  static final Set<String> _demoReservedSubjectIds = {
+    'exam',
+    'med',
+    'dagang',
+    ...kExamTopics.map((t) => t.code),
+  };
+
   DemoBackend._();
 
   static final DemoBackend instance = DemoBackend._();
@@ -875,14 +888,25 @@ class DemoBackend {
       };
     }
 
-    // /subjects（M5 动态科目：新建；id 留空自动生成，重复短码 409）
+    // /subjects（M5 动态科目：新建；id 留空自动生成）
+    // 2026-09-13 契约对齐 local：400 短码正则/保留字、409 重码/重名——
+    // 两后端错误契约一致，UI 的 4xx 透传在演示模式同样可见
     if (path == '/subjects') {
       final name = (m['name'] as String? ?? '').trim();
-      if (name.isEmpty) throw ApiException(400, '名称必填');
+      if (name.isEmpty) throw ApiException(400, '缺少科目名称（name）');
       var id = ((m['id'] as String?) ?? '').trim();
       if (id.isEmpty) id = 'sub${++_autoSubjectSeq}'; // 自动短码
+      if (!_demoSubjectIdPattern.hasMatch(id)) {
+        throw ApiException(400, '科目短码 $id 非法（仅小写字母+数字，2-16 位）');
+      }
+      if (_demoReservedSubjectIds.contains(id)) {
+        throw ApiException(400, '科目短码 $id 为系统保留，请换一个');
+      }
       if (_subjects.any((s) => s.id == id)) {
-        throw ApiException(409, '短码已存在：$id');
+        throw ApiException(409, '科目短码已存在：$id');
+      }
+      if (_subjects.any((s) => s.name == name)) {
+        throw ApiException(409, '科目名称「$name」已存在');
       }
       _subjects.add(Subject(id: id, name: name, isExamSubject: false));
       _bump();
