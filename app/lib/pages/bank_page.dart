@@ -1065,6 +1065,31 @@ class _BankDetailPageState extends State<BankDetailPage> {
             }
           }
         },
+        // 删除整卡（2026-09-13）：物理删除任意状态（active 含学习记录），
+        // 理由随删除进日志；删除后详情卡已不存在 → pop 回列表
+        deleteLabel: '删除整卡（不可恢复）',
+        onDelete: (reason, note) async {
+          try {
+            await ApiClient.instance.removeCard(
+              widget.cardId,
+              reason: reason,
+              note: note,
+            );
+            if (mounted) {
+              TopToast.show(context, '已删除整卡', type: TopToastType.success);
+              Navigator.of(context).pop(); // 卡已物理删除，详情页退出回列表
+            }
+          } on ApiException catch (e) {
+            if (mounted) {
+              TopToast.show(
+                context,
+                '删除失败：${e.message}',
+                type: TopToastType.error,
+                stayDuration: const Duration(milliseconds: 1800),
+              );
+            }
+          }
+        },
       ),
     );
   }

@@ -35,6 +35,9 @@ const List<(String, String)> kReworkReasons = [
 ];
 
 /// 原因操作弹窗：reasons 为 (label, sub) 记录列表，onConfirm 收 (reason, note)。
+/// onDelete 非空 → 确认按钮下方显示次级「删除整卡」按钮（2026-09-13）：
+/// 同一套理由校验（空选节流提示复用），确认后收 (reason, note)——理由随删除
+/// 动作进后端日志留痕；物理删除语义（含警示文案）归调用方与后端。
 class ReasonActionDialog extends StatefulWidget {
   const ReasonActionDialog({
     super.key,
@@ -47,6 +50,8 @@ class ReasonActionDialog extends StatefulWidget {
     required this.onConfirm,
     this.buttonColor = HengyaColors.danger,
     this.buttonIcon = Icons.close_rounded,
+    this.deleteLabel = '',
+    this.onDelete,
   });
 
   final String title;
@@ -58,6 +63,10 @@ class ReasonActionDialog extends StatefulWidget {
   final Color buttonColor;
   final IconData buttonIcon;
   final Future<void> Function(String reason, String note) onConfirm;
+
+  /// 非空 → 显示次级删除按钮，文案如「删除整卡（不可恢复）」。
+  final String deleteLabel;
+  final Future<void> Function(String reason, String note)? onDelete;
 
   @override
   State<ReasonActionDialog> createState() => _ReasonActionDialogState();
@@ -83,18 +92,7 @@ class _ReasonActionDialogState extends State<ReasonActionDialog> {
 
   Future<void> _confirm() async {
     if (_reasons.isEmpty) {
-      final now = DateTime.now();
-      final last = _lastEmptyToastAt;
-      if (last == null ||
-          now.difference(last) >= _emptyToastThrottle) {
-        _lastEmptyToastAt = now;
-        TopToast.show(
-          context,
-          widget.emptyReasonToast,
-          type: TopToastType.error,
-          stayDuration: const Duration(milliseconds: 1200),
-        );
-      }
+      _toastEmptyReason();
       return;
     }
     if (_submitting) return;
@@ -105,6 +103,38 @@ class _ReasonActionDialogState extends State<ReasonActionDialog> {
       await widget.onConfirm(reason, _noteCtrl.text.trim());
     } finally {
       if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  /// 「删除整卡」次级动作：与确认按钮同一套理由校验/节流/提交防重。
+  Future<void> _delete() async {
+    if (_reasons.isEmpty) {
+      _toastEmptyReason();
+      return;
+    }
+    if (_submitting) return;
+    setState(() => _submitting = true);
+    try {
+      final reason = _reasons.join('、');
+      if (mounted) Navigator.pop(context);
+      await widget.onDelete!(reason, _noteCtrl.text.trim());
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  /// 空选提示（节流 1200ms，白屏防御——确认与删除两按钮共用）。
+  void _toastEmptyReason() {
+    final now = DateTime.now();
+    final last = _lastEmptyToastAt;
+    if (last == null || now.difference(last) >= _emptyToastThrottle) {
+      _lastEmptyToastAt = now;
+      TopToast.show(
+        context,
+        widget.emptyReasonToast,
+        type: TopToastType.error,
+        stayDuration: const Duration(milliseconds: 1200),
+      );
     }
   }
 
@@ -223,6 +253,27 @@ class _ReasonActionDialogState extends State<ReasonActionDialog> {
                   onPressed: _submitting ? null : _confirm,
                 ),
               ),
+              // 次级「删除整卡」（2026-09-13）：与确认同版式降级为描边红，
+              // 物理删除语义 + 警示由文案与调用方/后端承载
+              if (widget.onDelete != null) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: HengyaColors.danger,
+                      side: const BorderSide(color: HengyaColors.danger),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(Icons.delete_forever_rounded, size: 18),
+                    label: Text(widget.deleteLabel),
+                    onPressed: _submitting ? null : _delete,
+                  ),
+                ),
+              ],
             ],
           ),
         ),

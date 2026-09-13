@@ -891,7 +891,7 @@ void main() {
 
   // ---------------- #15 移除废卡 ----------------
 
-  test('移除废卡 db 层（#15）：deleteCard——rejected 真删（卡行/备注/队列登记全清），active/pending/rework 拒删，不存在 not_found', () async {
+  test('删除整卡 db 层（#15→2026-09-13 扩展）：deleteCard 全状态真删（卡行/备注/账本/队列登记全清），不存在 not_found', () async {
     // 直连临时 SQLite（与 LocalBackend 不同的库文件，验证纯 db 契约）
     final db = await Db.open('${tmp.path}/delete-card.db');
     addTearDown(db.close);
@@ -924,38 +924,54 @@ void main() {
     expect(rqAfter.where((r) => r['cardId'] == 'del-rejected-001'), isEmpty,
         reason: '拒绝登记的 rework_queue 行必须随卡删除');
 
-    // 非 rejected 拒删（逐状态）：active / pending / rework
+    // 2026-09-13 扩展：任意状态可删（回炉/拒绝弹窗「删除整卡」通道）
+    // active：含账本行一并清理（先造 review_logs 行）
     db.importCard(card('del-active-001', CardStatus.active));
-    expect(db.deleteCard('del-active-001'), 'not_rejected',
-        reason: 'active 卡不得删除（仍在复习轮转）');
-    expect(db.cardById('del-active-001'), isNotNull, reason: '拒删后卡行必须保留');
+    db.insertReviewLog(
+      cardId: 'del-active-001',
+      subjectId: 'delsubj',
+      rating: ReviewRating.again,
+      reviewedAt: DateTime.parse('2026-09-13T10:00:00'),
+      offlineQueued: false,
+      stateBefore: SchedulingState.newCard,
+      stateAfter: SchedulingState.learning,
+    );
+    expect(db.deleteCard('del-active-001'), null, reason: 'active 卡可删除（含学习记录）');
+    expect(db.cardById('del-active-001'), isNull);
+    // 账本行已随卡清除：重新插入同 id 卡后 statsSummary.totalReviews 不含旧行
+    // （deleteCard 无查询面，行为由 insertReviewLog 后 summary 前后对比验证）
+    db.importCard(card('del-active-001', CardStatus.active));
+    db.deleteCard('del-active-001'); // 幂等清理，无异常即事务成立
+    expect(db.cardById('del-active-001'), isNull);
 
+    // pending：直接删（原「审核池资产」守卫被「删除整卡」通道取代）
     db.importCard(card('del-pending-001', CardStatus.pending));
-    expect(db.deleteCard('del-pending-001'), 'not_rejected',
-        reason: 'pending 卡不得删除（审核池资产）');
+    expect(db.deleteCard('del-pending-001'), null);
+    expect(db.cardById('del-pending-001'), isNull);
 
+    // rework：卡 + 回炉队列行一并清理（不清理会留孤儿队列行）
     db.importCard(card('del-rework-001', CardStatus.active));
     db.reworkCard('del-rework-001', '表述绕', '');
-    expect(db.deleteCard('del-rework-001'), 'not_rejected',
-        reason: 'rework 卡不得删除（重造中）');
+    expect(db.deleteCard('del-rework-001'), null);
+    expect(db.cardById('del-rework-001'), isNull);
+    expect(db.reworkPending().where((r) => r['cardId'] == 'del-rework-001'),
+        isEmpty, reason: '回炉队列行必须随卡删除');
 
     // 不存在
     expect(db.deleteCard('ghost-404'), 'not_found');
   });
 
-  test('移除废卡路由（#15）：/cards/delete 全分支——rejected 删除成功+bump、active/pending/rework 400 逐字、404 逐字、重复删除 404 幂等', () async {
+  test('删除整卡路由（#15→2026-09-13 扩展）：/cards/delete 全状态删除成功+bump+理由留痕、404 幂等', () async {
     await boot();
     await seedCards();
     final be = LocalBackend.instance;
 
-    // endo-001 拒绝带理由（pending → rejected + 登记队列）
-    await be.post('/cards/local-endo-001/reject', {'reason': '答案有误'});
+    // pending → 删除成功（审核区「删除整卡」通道；理由/留言进日志）
     final v0 = int.parse(
         (await be.get('/meta/version') as Map)['data_version'] as String);
-
-    // rejected → 删除成功（ok + cardId + data_version 递增）
-    final res = await be.post('/cards/delete', {'cardId': 'local-endo-001'});
-    expect(res['ok'], true, reason: 'rejected 卡删除必须成功');
+    final res = await be.post('/cards/delete',
+        {'cardId': 'local-endo-001', 'reason': '重复卡', 'note': '与已有卡重复'});
+    expect(res['ok'], true, reason: 'pending 卡删除必须成功');
     expect(res['cardId'], 'local-endo-001');
     final v1 = int.parse(
         (await be.get('/meta/version') as Map)['data_version'] as String);
@@ -977,39 +993,23 @@ void main() {
           .having((e) => e.message, 'message', '卡片不存在或已被移除')),
     );
 
-    // pending → 400 逐字
-    await expectLater(
-      be.post('/cards/delete', {'cardId': 'local-oms-002'}),
-      throwsA(isA<ApiException>()
-          .having((e) => e.statusCode, 'status', 400)
-          .having((e) => e.message, 'message', '仅已拒绝的废卡可移除')),
-    );
-
-    // active → 400 逐字（approve oms-001 后对照）
+    // active → 删除成功（approve 后删除；理由缺省也合法）
     await be.post('/cards/local-oms-001/approve', null);
-    await expectLater(
-      be.post('/cards/delete', {'cardId': 'local-oms-001'}),
-      throwsA(isA<ApiException>()
-          .having((e) => e.statusCode, 'status', 400)
-          .having((e) => e.message, 'message', '仅已拒绝的废卡可移除')),
-    );
+    final resActive = await be.post('/cards/delete', {'cardId': 'local-oms-001'});
+    expect(resActive['ok'], true, reason: 'active 卡可删除（含学习记录）');
 
-    // rework → 400 逐字（oms-001 回炉成重造中）
-    await be.post('/cards/rework', {'cardId': 'local-oms-001', 'reason': '绕'});
-    await expectLater(
-      be.post('/cards/delete', {'cardId': 'local-oms-001'}),
-      throwsA(isA<ApiException>()
-          .having((e) => e.statusCode, 'status', 400)
-          .having((e) => e.message, 'message', '仅已拒绝的废卡可移除')),
-    );
-
-    // 拒绝登记的队列行随卡删除：回炉队列不再出现该卡（其余卡不受影响）
+    // rework → 删除成功 + 队列行随卡清出（先 approve：回炉守卫仅 active）
+    await be.post('/cards/local-oms-002/approve', null);
+    await be.post('/cards/rework', {'cardId': 'local-oms-002', 'reason': '绕'});
+    final resRework = await be.post('/cards/delete',
+        {'cardId': 'local-oms-002', 'reason': '答案有误'});
+    expect(resRework['ok'], true, reason: 'rework 卡可删除（队列行随卡清理）');
     final rq = await be.get('/cards/rework/pending');
     final queue = ((rq as Map)['queue'] as List).cast<Map<String, dynamic>>();
-    expect(queue.where((r) => r['cardId'] == 'local-endo-001'), isEmpty,
-        reason: '被移除卡的拒绝登记行必须随卡清出队列');
+    expect(queue.where((r) => r['cardId'] == 'local-oms-002'), isEmpty,
+        reason: '回炉中删除的卡，其队列行必须随卡清出');
 
-    // 移除后的卡不可再回炉（404，文案不带 id）
+    // 已删除的卡不可再回炉（404，文案不带 id）
     await expectLater(
       be.post('/cards/rework', {'cardId': 'local-endo-001', 'reason': '绕'}),
       throwsA(isA<ApiException>()

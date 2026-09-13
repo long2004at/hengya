@@ -613,30 +613,24 @@ class Db {
     return null;
   }
 
-  /// 移除废卡（#15）：物理删除——守卫卡存在且 status == rejected。
+  /// 删除整卡（2026-09-13 扩展）：物理删除，**任意状态**（pending/active/
+  /// rework/rejected/archived）——回炉/拒绝弹窗新增「删除整卡」通道
+  /// （原 #15 语义仅 rejected）。四表清理包事务：
+  /// review_logs（active 卡有账本行，FK ON 挡直删）+ rework_queue（rework/
+  /// rejected 卡的队列行——回炉中删除不清理会留孤儿行）+ card_notes +
+  /// cards；card_vectors 经 ON DELETE CASCADE 自动清理。
   ///
-  /// 审计结论（2026-09-07）：rejected 卡的产生路径只有 [rejectCard] /
-  /// [rejectCardWithReason]（均从 pending 转入），pending 卡不进复习轮转
-  /// （[dueCards] 只查 active），故 rejected 卡理论上绝无 review_logs 账本
-  /// 行。但 Db.open 启用了 PRAGMA foreign_keys=ON：若历史脏数据真有账本行，
-  /// 「保留账本行 + 删卡行」会被外键以 FOREIGN KEY constraint failed 挡住
-  /// ——因此防御性先清该卡账本行（正常路径 0 行删除；统计/热力图/连续打卡
-  /// 聚合全部按 review_logs 自身字段统计，零影响）。拒绝带理由
-  /// （[rejectCardWithReason]）登记的 rework_queue 行是正常存在的（次日
-  /// 自动化拉取的拒绝反馈通道），随卡一并删除；card_notes（用户备注 + AI
-  /// 留言）同删。
-  ///
-  /// 返回 null=删除成功；'not_found'=卡不存在；'not_rejected'=非 rejected
-  /// 拒删（路由层据此给 404/400，文案不带内部 id）。同步 execute 风格与
-  /// [reworkCard] 等一致；bumpDataVersion 由路由层负责（同既有写方法）。
+  /// 返回 null=删除成功；'not_found'=卡不存在（路由层据此 404，文案不带
+  /// 内部 id）。bumpDataVersion 由路由层负责（同既有写方法）。
   String? deleteCard(String cardId) {
     final rows = _db.select('SELECT status FROM cards WHERE id = ?', [cardId]);
     if (rows.isEmpty) return 'not_found';
-    if (rows.first['status'] != 'rejected') return 'not_rejected';
-    _db.execute('DELETE FROM review_logs WHERE card_id = ?', [cardId]);
-    _db.execute('DELETE FROM rework_queue WHERE card_id = ?', [cardId]);
-    _db.execute('DELETE FROM card_notes WHERE card_id = ?', [cardId]);
-    _db.execute('DELETE FROM cards WHERE id = ?', [cardId]);
+    _tx(() {
+      _db.execute('DELETE FROM review_logs WHERE card_id = ?', [cardId]);
+      _db.execute('DELETE FROM rework_queue WHERE card_id = ?', [cardId]);
+      _db.execute('DELETE FROM card_notes WHERE card_id = ?', [cardId]);
+      _db.execute('DELETE FROM cards WHERE id = ?', [cardId]);
+    });
     return null;
   }
 

@@ -249,6 +249,31 @@ class _PendingPageState extends State<PendingPage> {
             }
           }
         },
+        // 删除整卡（2026-09-13）：待审卡物理删除（区别于「拒绝」的柔性
+        // 反馈通道——彻底不要这张卡），理由随删除进日志
+        deleteLabel: '删除整卡（不可恢复）',
+        onDelete: (reason, note) async {
+          try {
+            await ApiClient.instance.removeCard(
+              card.id,
+              reason: reason,
+              note: note,
+            );
+            if (mounted) {
+              TopToast.show(context, '已删除整卡', type: TopToastType.success);
+            }
+            await _load();
+          } on ApiException catch (e) {
+            if (mounted) {
+              TopToast.show(
+                context,
+                '删除失败：${e.message}',
+                type: TopToastType.error,
+                stayDuration: const Duration(milliseconds: 1800),
+              );
+            }
+          }
+        },
       ),
     );
   }

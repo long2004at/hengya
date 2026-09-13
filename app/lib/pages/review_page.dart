@@ -358,6 +358,34 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
             }
           }
         },
+        // 删除整卡（2026-09-13）：active 卡物理删除（含学习记录），理由随
+        // 删除进日志；删除后卡出会话（同回炉跳过语义）
+        deleteLabel: '删除整卡（含学习记录，不可恢复）',
+        onDelete: (reason, note) async {
+          try {
+            await ApiClient.instance.removeCard(
+              card.id,
+              reason: reason,
+              note: note,
+            );
+            if (mounted) {
+              setState(() {
+                _index++;
+                _revealed = false;
+              });
+              TopToast.show(context, '已删除整卡', type: TopToastType.success);
+            }
+          } on ApiException catch (e) {
+            if (mounted) {
+              TopToast.show(
+                context,
+                '删除失败：${e.message}',
+                type: TopToastType.error,
+                stayDuration: const Duration(milliseconds: 1800),
+              );
+            }
+          }
+        },
       ),
     );
   }

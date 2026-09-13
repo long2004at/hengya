@@ -557,19 +557,24 @@ class LocalBackend {
       return {'ok': true, 'cardId': cardId};
     }
 
-    // /cards/delete（#15 移除废卡：物理删除，仅 rejected）
+    // /cards/delete（#15 移除废卡 → 2026-09-13 扩展：物理删除任意状态——
+    // 回炉/拒绝弹窗「删除整卡」通道；body 可选 reason/note 仅进日志留痕）
     // 文案不带内部 id（对齐 #10② 泄露整改）；重复删除同 id → 404
     // 「卡片不存在或已被移除」——卡行已不在、与「从未存在」不可区分，
     // 幂等语义由 404 承载（客户端重复提交不会产生半删状态）。
     if (path == '/cards/delete') {
       final cardId = m['cardId'] as String?;
       if (cardId == null || cardId.isEmpty) throw ApiException(400, '缺少 cardId');
+      final card = db.cardById(cardId);
       final err = db.deleteCard(cardId);
       if (err == 'not_found') throw ApiException(404, '卡片不存在或已被移除');
-      if (err == 'not_rejected') throw ApiException(400, '仅已拒绝的废卡可移除');
       db.bumpDataVersion();
-      // #2 埋点：物理删除属不可逆操作，必须留痕
-      AppLog.instance.log(AppLogLevel.warn, 'review', '移除废卡（物理删除）：$cardId');
+      // #2 埋点：物理删除属不可逆操作，必须留痕（含状态与理由）
+      final reason = ((m['reason'] as String?) ?? '').trim();
+      final note = ((m['note'] as String?) ?? '').trim();
+      AppLog.instance.log(AppLogLevel.warn, 'review',
+          '删除整卡（物理删除，状态 ${card?.status.name ?? '?'}）：${_head(card?.front, 30)}'
+          '${reason.isEmpty ? '' : '；理由=$reason'}${note.isEmpty ? '' : '；留言=$note'}');
       return {'ok': true, 'cardId': cardId};
     }
 

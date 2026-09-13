@@ -623,13 +623,22 @@ class ApiClient {
     });
   }
 
-  /// 移除废卡（#15：物理删除，仅已拒绝 rejected 的卡）。
-  /// `POST /api/v1/cards/delete` {"cardId":…} → {ok:true, cardId}；
-  /// 非 rejected → 400；不存在/已删 → 404「卡片不存在或已被移除」
-  /// （重复删除同 id 幂等报 404，文案不带内部 id）。
+  /// 移除/删除整卡（#15 仅 rejected → 2026-09-13 扩展：任意状态物理删除，
+  /// 回炉/拒绝弹窗「删除整卡」通道共用本端点）。
+  /// `POST /api/v1/cards/delete` {"cardId", reason?, note?} → {ok:true, cardId}；
+  /// 不存在/已删 → 404「卡片不存在或已被移除」（重复删除同 id 幂等报 404，
+  /// 文案不带内部 id）；reason/note 仅后端日志留痕。
   /// remote（server cards.dart 未实现本路由）为遗留——App 默认 local 不受影响。
-  Future<Map<String, dynamic>> removeCard(String cardId) {
-    return _postJson('/api/v1/cards/delete', {'cardId': cardId});
+  Future<Map<String, dynamic>> removeCard(
+    String cardId, {
+    String? reason,
+    String? note,
+  }) {
+    return _postJson('/api/v1/cards/delete', {
+      'cardId': cardId,
+      if (reason != null && reason.isNotEmpty) 'reason': reason,
+      if (note != null && note.isNotEmpty) 'note': note,
+    });
   }
 
   // ---------------- 流水线（server 0.4.1+） ----------------
