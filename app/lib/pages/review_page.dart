@@ -15,6 +15,8 @@ import 'package:provider/provider.dart';
 import 'package:shared/hengya_shared.dart';
 
 import '../services/api/api_client.dart';
+import '../widgets/fog_reveal.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api/local_cache.dart';
 import '../services/review/session_store.dart';
 import '../widgets/offline_data_bar.dart';
@@ -231,10 +233,38 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
   DateTime? _cacheAt; // 非 null = 队列来自离线缓存回退（断网冷启动续背）
   DateTime _revealedAt = DateTime.now();
 
+  // #12 雾气模式（2026-09-13）：翻面后答案被纸白暖雾覆盖，擦雾/掀页/评分
+  // 清雾见 fog_reveal.dart；开关存 shared_preferences（默认关）
+  final FogPeelController _fog = FogPeelController();
+  bool _fogEnabled = false;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _loadFogEnabled();
+    _fog.addListener(_onFogChanged);
+  }
+
+  Future<void> _loadFogEnabled() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() => _fogEnabled = prefs.getBool('hengya.review.fog') ?? false);
+    } catch (_) {
+      // 测试宿主无 prefs 插件/读取失败 → 默认关（功能优雅缺席）
+    }
+  }
+
+  void _onFogChanged() {
+    if (mounted) setState(() {}); // 雾状态驱动滚动锁/雾层重绘
+  }
+
+  @override
+  void dispose() {
+    _fog.removeListener(_onFogChanged);
+    _fog.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -273,6 +303,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
   Future<void> _rate(ReviewRating rating) async {
     if (_rating || _index >= _cards.length) return;
     _rating = true;
+    _fog.markCleared(); // #12：评分=清雾+评分一步完成（雾未擦完也可直接评）
     final card = _cards[_index];
     final latency = DateTime.now().difference(_revealedAt).inMilliseconds;
     final log = ReviewLog(
@@ -458,6 +489,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
           child: GestureDetector(
             onTap: () {
               if (!_revealed) {
+                _fog.reset(); // 每次翻面重新上雾（#12）
                 setState(() {
                   _revealed = true;
                   _revealedAt = DateTime.now();
@@ -469,6 +501,10 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
               child: Padding(
                 padding: const EdgeInsets.all(20),
                 child: SingleChildScrollView(
+                  // #12：雾未清时锁滚动——想看后续内容先擦开/掀页/评分
+                  physics: (_revealed && _fogEnabled && _fog.isFogged)
+                      ? const NeverScrollableScrollPhysics()
+                      : null,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -508,10 +544,19 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
                       if (_revealed) ...[
                         const Divider(),
                         const SizedBox(height: 12),
-                        Text(
-                          card.back,
-                          style: const TextStyle(fontSize: 16, height: 1.6),
-                        ),
+                        if (_fogEnabled)
+                          FogPeel(
+                            controller: _fog,
+                            child: Text(
+                              card.back,
+                              style: const TextStyle(fontSize: 16, height: 1.6),
+                            ),
+                          )
+                        else
+                          Text(
+                            card.back,
+                            style: const TextStyle(fontSize: 16, height: 1.6),
+                          ),
                         const SizedBox(height: 16),
                         Wrap(
                           spacing: 12,

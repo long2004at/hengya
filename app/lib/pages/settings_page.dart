@@ -12,6 +12,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api/api_client.dart';
 import '../services/api/demo_backend.dart';
@@ -30,6 +31,7 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  bool _fogEnabled = false; // #12 答案雾（复习时擦开显示；默认关）
   /// 版本号动态来源（package_info）：读取构建时写入的 versionName，永不需手动同步
   late final Future<PackageInfo> _pkgInfo = PackageInfo.fromPlatform();
 
@@ -58,6 +60,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   void initState() {
+    _loadFogEnabled();
     super.initState();
     _loadAll();
     _loadCorpus();
@@ -594,6 +597,24 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// 「自动周扫计时」调整对话框：清除（立即到期）/ 推迟 7 天（设为现在）/
   /// 自定义时间（日期+时间选择器任意设定）。
+  // ---------------- #12 答案雾开关（2026-09-13） ----------------
+
+  Future<void> _loadFogEnabled() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() => _fogEnabled = prefs.getBool('hengya.review.fog') ?? false);
+    } catch (_) {
+      // 测试宿主无 prefs 插件/读取失败 → 默认关
+    }
+  }
+
+  Future<void> _toggleFog(bool v) async {
+    setState(() => _fogEnabled = v);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('hengya.review.fog', v);
+  }
+
   Future<void> _editWeeklySchedule() async {
     final status = _weeklyStatus;
     if (status == null) {
@@ -829,6 +850,21 @@ class _SettingsPageState extends State<SettingsPage> {
             color: scheme.surfaceContainerLow,
             child: Column(
               children: [
+                SwitchListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text(
+                    '答案雾（复习时擦开显示）',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: const Text(
+                    '翻面后答案被纸雾覆盖：手动擦开逐段看、掀纸角整页显现，'
+                    '或直接评分；默认关',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _fogEnabled,
+                  onChanged: _toggleFog,
+                ),
+                const Divider(height: 1, indent: 16, endIndent: 16),
                 ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16),
                   title: const Text(
