@@ -32,6 +32,7 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   bool _fogEnabled = false; // #12 答案雾（复习时擦开显示；默认关）
+  bool _fogHug = false; // 纸片大小：false=盖满区域（默认），true=贴答案文字
   /// 版本号动态来源（package_info）：读取构建时写入的 versionName，永不需手动同步
   late final Future<PackageInfo> _pkgInfo = PackageInfo.fromPlatform();
 
@@ -603,7 +604,10 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (!mounted) return;
-      setState(() => _fogEnabled = prefs.getBool('hengya.review.fog') ?? false);
+      setState(() {
+        _fogEnabled = prefs.getBool('hengya.review.fog') ?? false;
+        _fogHug = prefs.getBool('hengya.review.fog.hug') ?? false;
+      });
     } catch (_) {
       // 测试宿主无 prefs 插件/读取失败 → 默认关
     }
@@ -613,6 +617,13 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _fogEnabled = v);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('hengya.review.fog', v);
+  }
+
+  /// 纸片大小切换（#12 双模式：盖满区域 / 贴答案文字）
+  Future<void> _setFogHug(bool hug) async {
+    setState(() => _fogHug = hug);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('hengya.review.fog.hug', hug);
   }
 
   Future<void> _editWeeklySchedule() async {
@@ -864,6 +875,34 @@ class _SettingsPageState extends State<SettingsPage> {
                   value: _fogEnabled,
                   onChanged: _toggleFog,
                 ),
+                if (_fogEnabled) ...[
+                  const Divider(height: 1, indent: 16, endIndent: 16),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                    child: Row(
+                      children: [
+                        const Text(
+                          '纸片大小',
+                          style: TextStyle(fontSize: 14),
+                        ),
+                        const Spacer(),
+                        ChoiceChip(
+                          visualDensity: VisualDensity.compact,
+                          label: const Text('盖满区域', style: TextStyle(fontSize: 12)),
+                          selected: !_fogHug,
+                          onSelected: (_) => _setFogHug(false),
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          visualDensity: VisualDensity.compact,
+                          label: const Text('贴答案文字', style: TextStyle(fontSize: 12)),
+                          selected: _fogHug,
+                          onSelected: (_) => _setFogHug(true),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const Divider(height: 1, indent: 16, endIndent: 16),
                 ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16),

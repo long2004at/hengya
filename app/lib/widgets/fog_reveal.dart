@@ -15,6 +15,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderProxyBox;
 
 /// 纸白暖雾配色（深浅色模式恒定——像真的纸片）。
 const Color kFogBase = Color(0xFFF8F3E9); // 纸白基底（一丝暖）
@@ -25,6 +26,12 @@ const double kFogBrushRadius = 24; // 擦除笔刷半径（dp）
 const double kFogCornerHotzone = 96; // 纸角拖拽热区半径（dp）
 const double kFogPeelThresholdRatio = 0.4; // 掀走阈值：对角线比例
 const double kFogFlingVelocity = 900; // 掀走阈值：松手速度（px/s）
+const double kFogSheetMinHeight = 120; // 贴文字模式：纸片最小高度（保纸角可操作）
+
+/// 纸片大小模式（用户拍板做成设置项双模式）：
+/// fill = 盖满答案区剩余空间（恒定大纸，答案再短纸也不变小）；
+/// hugText = 贴答案文字（纸高 = 文字实际高度，clamp 到 [120dp, 可用高度]）。
+enum FogSheetMode { fill, hugText }
 
 /// 雾状态机：idle（全盖，可擦可拖角）→ peeling（拖角中）→ flying（飞出）
 /// / springback（回弹）→ idle；cleared 独立布尔（评分路径瞬时置位）。
@@ -49,6 +56,10 @@ class FogPeelController extends ChangeNotifier {
       _phase == FogPhase.peeling ||
       _phase == FogPhase.flying ||
       _phase == FogPhase.autopeel;
+
+  /// 当前纸片高度（hugText 模式由 widget 测量后回填；fill = 可用高度）。
+  /// 测试/调试用。
+  double? sheetHeight;
 
   /// 擦雾（纸角以外的拖动）：追加笔画点。
   void beginStroke(Offset p) {
@@ -133,10 +144,18 @@ class FogPeelController extends ChangeNotifier {
 /// 雾覆盖组件：child 正常渲染在底层，雾层（一页纸）盖在上面。
 /// isCleared → 只渲染 child（雾层与手势整体移除，宿主解锁滚动）。
 class FogPeel extends StatefulWidget {
-  const FogPeel({super.key, required this.controller, required this.child});
+  const FogPeel({
+    super.key,
+    required this.controller,
+    required this.child,
+    this.sheetMode = FogSheetMode.fill,
+  });
 
   final FogPeelController controller;
   final Widget child;
+
+  /// 纸片大小模式（fill=盖满区域 / hugText=贴答案文字）。
+  final FogSheetMode sheetMode;
 
   @override
   State<FogPeel> createState() => _FogPeelState();
@@ -152,6 +171,7 @@ class _FogPeelState extends State<FogPeel>
   Offset? _panDownPoint; // 本轮拖动的按下点（手势分流用）
   int _animGeneration = -1; // 当前动画绑定的控制器代数（reset 后 tick 自杀）
   double _fade = 1.0;
+  double? _measuredTextHeight; // hugText：答案文字实际高度（Offstage 副本测量）
 
   @override
   void initState() {
@@ -280,67 +300,115 @@ class _FogPeelState extends State<FogPeel>
 
   @override
   Widget build(BuildContext context) {
-    if (widget.controller.isCleared) return widget.child;
+    // 全清 → 完整答案可滚动阅读（两模式同态）
+    if (widget.controller.isCleared) {
+      return Align(
+        alignment: Alignment.topLeft,
+        child: SingleChildScrollView(child: widget.child),
+      );
+    }
     return LayoutBuilder(builder: (context, constraints) {
-      // 高度无界（滚动容器内）→ 雾不可用，直接渲染 child（StackFit.expand
-      // 会把无界约束传给文本，RenderParagraph 布局必炸）
+      // 高度无界（滚动容器内）→ 雾不可用，直接渲染 child（无界约束传给
+      // 文本会炸 RenderParagraph）
       if (!constraints.maxHeight.isFinite || !constraints.maxWidth.isFinite) {
         return widget.child;
       }
-      final size = Size(constraints.maxWidth, constraints.maxHeight);
+      final avail = Size(constraints.maxWidth, constraints.maxHeight);
       final fade = _fade.clamp(0.0, 1.0);
-      return Stack(
-        // 非 expand：Stack 尺寸跟随 child（雾层 Positioned.fill 恰好盖住
-        // child 区域，答案文本保持固有尺寸不被拉伸）
-        children: [
-          widget.child,
-          Positioned.fill(
-              child: Opacity(
-                opacity: fade,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  // onPanDown 即时记录起点（onPanStart 的 localPosition 是
-                  // 识别器胜出时的位置——大幅拖动已远离纸角，热区判定失真）
-                  onPanDown: (d) => _panDownPoint = d.localPosition,
-                  onPanStart: (d) {
-                    if (_anim.isAnimating) return; // 动画中不接新手势
-                    final origin = _panDownPoint ?? d.localPosition;
-                    if (_inCornerHotzone(origin, size)) {
-                      widget.controller.beginPeel(origin);
-                    } else {
-                      widget.controller.beginStroke(origin);
-                    }
-                  },
-                  onPanUpdate: (d) {
-                    if (widget.controller.isPeeling) {
-                      widget.controller.updatePeel(d.localPosition);
-                    } else if (widget.controller.phase == FogPhase.idle) {
-                      widget.controller.erase(d.localPosition);
-                    }
-                  },
-                  onPanEnd: (d) {
-                    if (widget.controller.phase == FogPhase.peeling) {
-                      _endPeel(
-                        size,
-                        d.velocity.pixelsPerSecond.distance,
-                      );
-                    }
-                  },
-                  onTapUp: (d) {
-                    // 纸角热区内点击（未拖动）= 自动掀页
-                    if (_inCornerHotzone(_panDownPoint ?? d.localPosition, size)) {
-                      _autoPeel(size);
-                    }
-                  },
-                  child: CustomPaint(
-                    painter: _FogPainter(
-                      controller: widget.controller,
-                      corner: _corner(size),
-                    ),
+
+      // 雾层（两模式同一套手势/绘制，只是覆盖区域不同）
+      Widget fogLayer(Size sheetSize) => Positioned.fromRect(
+            rect: Offset.zero & sheetSize,
+            child: Opacity(
+              opacity: fade,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                // onPanDown 即时记录起点（onPanStart 的 localPosition 是
+                // 识别器胜出时的位置——大幅拖动已远离纸角，热区判定失真）
+                onPanDown: (d) => _panDownPoint = d.localPosition,
+                onPanStart: (d) {
+                  if (_anim.isAnimating) return; // 动画中不接新手势
+                  final origin = _panDownPoint ?? d.localPosition;
+                  if (_inCornerHotzone(origin, sheetSize)) {
+                    widget.controller.beginPeel(origin);
+                  } else {
+                    widget.controller.beginStroke(origin);
+                  }
+                },
+                onPanUpdate: (d) {
+                  if (widget.controller.isPeeling) {
+                    widget.controller.updatePeel(d.localPosition);
+                  } else if (widget.controller.phase == FogPhase.idle) {
+                    widget.controller.erase(d.localPosition);
+                  }
+                },
+                onPanEnd: (d) {
+                  if (widget.controller.phase == FogPhase.peeling) {
+                    _endPeel(sheetSize, d.velocity.pixelsPerSecond.distance);
+                  }
+                },
+                onTapUp: (d) {
+                  // 纸角热区内点击（未拖动）= 自动掀页
+                  if (_inCornerHotzone(
+                      _panDownPoint ?? d.localPosition, sheetSize)) {
+                    _autoPeel(sheetSize);
+                  }
+                },
+                child: CustomPaint(
+                  painter: _FogPainter(
+                    controller: widget.controller,
+                    corner: _corner(sheetSize),
                   ),
                 ),
               ),
             ),
+          );
+
+      // 答案内容（雾激活期间不可滚——锁定在纸片可视范围内，ClipRect 裁掉
+      // 超出部分；掀页/评分后由 cleared 滚动视图接管）
+      Widget content(Size sheetSize) => Positioned.fromRect(
+            rect: Offset.zero & sheetSize,
+            child: ClipRect(
+              child: SingleChildScrollView(
+                physics: const NeverScrollableScrollPhysics(),
+                child: widget.child,
+              ),
+            ),
+          );
+
+      if (widget.sheetMode == FogSheetMode.fill) {
+        // 盖满区域：纸 = 整个答案区剩余空间（恒定大纸）
+        widget.controller.sheetHeight = avail.height;
+        return Stack(children: [content(avail), fogLayer(avail)]);
+      }
+
+      // 贴答案文字：纸高 = clamp(文字实际高度, 120dp, 可用高度)；
+      // 文字高度用 Offstage 副本测量（首帧用下限起步，测后更新）
+      final measured = _measuredTextHeight;
+      final sheetH = measured == null
+          ? kFogSheetMinHeight
+          : measured.clamp(kFogSheetMinHeight, avail.height).toDouble();
+      widget.controller.sheetHeight = sheetH;
+      return Stack(
+        children: [
+          content(Size(avail.width, sheetH)),
+          fogLayer(Size(avail.width, sheetH)),
+          // 测量副本：布局但不绘制（Offstage），约束 = 同宽 + 高度无界
+          Positioned(
+            left: 0,
+            top: 0,
+            width: avail.width,
+            child: Offstage(
+              child: _MeasureTextHeight(
+                onHeight: (h) {
+                  if (mounted && _measuredTextHeight != h) {
+                    setState(() => _measuredTextHeight = h);
+                  }
+                },
+                child: widget.child,
+              ),
+            ),
+          ),
         ],
       );
     });
@@ -535,4 +603,54 @@ class _FogPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_FogPainter oldDelegate) => false; // repaint 挂 controller
+}
+
+
+/// hugText 模式的文字高度测量：子项按「同宽 + 固有高度」布局，高度经
+/// postFrame 回调上报（layout 期间不可 setState）。Offstage 承载（布局
+/// 但不绘制）。
+class _MeasureTextHeight extends SingleChildRenderObjectWidget {
+  const _MeasureTextHeight({required this.onHeight, required super.child});
+
+  final ValueChanged<double> onHeight;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderMeasureTextHeight(onHeight);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderMeasureTextHeight renderObject,
+  ) {
+    renderObject.onHeight = onHeight;
+  }
+}
+
+class _RenderMeasureTextHeight extends RenderProxyBox {
+  _RenderMeasureTextHeight(this.onHeight);
+
+  ValueChanged<double> onHeight;
+  double _last = -1;
+
+  @override
+  void performLayout() {
+    if (child == null) {
+      size = constraints.smallest;
+      return;
+    }
+    final h = child!.getMaxIntrinsicHeight(constraints.maxWidth);
+    final safe = h.isFinite && h > 0 ? h : 0.0;
+    child!.layout(
+      BoxConstraints.tightFor(width: constraints.maxWidth, height: safe),
+      parentUsesSize: true,
+    );
+    size = constraints.constrain(Size(constraints.maxWidth, safe));
+    if ((safe - _last).abs() > 0.5) {
+      _last = safe;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        onHeight(safe);
+      });
+    }
+  }
 }

@@ -17,6 +17,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 Future<FogPeelController> pumpFog(
   WidgetTester tester, {
   Size size = const Size(400, 600),
+  FogSheetMode sheetMode = FogSheetMode.fill,
+  String answer = 'ANSWER',
 }) async {
   final controller = FogPeelController();
   await tester.pumpWidget(
@@ -30,7 +32,8 @@ Future<FogPeelController> pumpFog(
               height: size.height,
               child: FogPeel(
                 controller: controller,
-                child: const Text('ANSWER'),
+                sheetMode: sheetMode,
+                child: Text(answer),
               ),
             ),
           ),
@@ -38,7 +41,8 @@ Future<FogPeelController> pumpFog(
       ),
     ),
   );
-  await tester.pump();
+  await tester.pump(); // 首帧（hugText 下限起步）
+  await tester.pump(); // 测量 postFrame 回调落地
   return controller;
 }
 
@@ -141,6 +145,36 @@ void main() {
     expect(c.phase, FogPhase.idle);
     expect(c.strokes, isEmpty);
     await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('hugText：短答案 → 纸片高度=下限 120dp；长答案 → 钳到可用高度', (tester) async {
+    // 短答案：一行字（固有高度 < 120）→ 纸片 = 120 下限
+    final c1 = await pumpFog(tester, sheetMode: FogSheetMode.hugText);
+    expect(c1.sheetHeight, 120.0, reason: '短答案纸片钳到 120dp 下限');
+    await tester.pumpWidget(const SizedBox.shrink());
+
+    // 长答案：文字实际高度超过可用 600 → 纸片 = 600（可用高度上限）
+    final long = '长答案。' * 600; // 固有高度远超可用 600
+    final c2 = await pumpFog(
+      tester,
+      sheetMode: FogSheetMode.hugText,
+      answer: long,
+    );
+    expect(c2.sheetHeight, 600.0, reason: '长答案纸片钳到可用高度上限');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('fill：纸片高度恒等于可用区域（与答案长短无关）', (tester) async {
+    final c1 = await pumpFog(tester, sheetMode: FogSheetMode.fill);
+    expect(c1.sheetHeight, 600.0);
+    await tester.pumpWidget(const SizedBox.shrink());
+    final c2 = await pumpFog(
+      tester,
+      answer: '长答案。' * 200,
+      sheetMode: FogSheetMode.fill,
+    );
+    expect(c2.sheetHeight, 600.0, reason: 'fill 模式纸片不随答案缩短');
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

@@ -234,9 +234,10 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
   DateTime _revealedAt = DateTime.now();
 
   // #12 雾气模式（2026-09-13）：翻面后答案被纸白暖雾覆盖，擦雾/掀页/评分
-  // 清雾见 fog_reveal.dart；开关存 shared_preferences（默认关）
+  // 清雾见 fog_reveal.dart；开关与纸片模式存 shared_preferences（默认关/盖满）
   final FogPeelController _fog = FogPeelController();
   bool _fogEnabled = false;
+  bool _fogHug = false; // 纸片大小：false=盖满区域（默认），true=贴答案文字
 
   @override
   void initState() {
@@ -250,7 +251,10 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (!mounted) return;
-      setState(() => _fogEnabled = prefs.getBool('hengya.review.fog') ?? false);
+      setState(() {
+        _fogEnabled = prefs.getBool('hengya.review.fog') ?? false;
+        _fogHug = prefs.getBool('hengya.review.fog.hug') ?? false;
+      });
     } catch (_) {
       // 测试宿主无 prefs 插件/读取失败 → 默认关（功能优雅缺席）
     }
@@ -503,12 +507,11 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
         Expanded(
           child: FogPeel(
             controller: _fog,
-            child: SingleChildScrollView(
-              physics: const NeverScrollableScrollPhysics(),
-              child: Text(
-                card.back,
-                style: const TextStyle(fontSize: 16, height: 1.6),
-              ),
+            sheetMode:
+                _fogHug ? FogSheetMode.hugText : FogSheetMode.fill,
+            child: Text(
+              card.back,
+              style: const TextStyle(fontSize: 16, height: 1.6),
             ),
           ),
         ),
