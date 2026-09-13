@@ -51,6 +51,7 @@ class _InboxSheetState extends State<_InboxSheet> {
   // 无罗盘/拉取失败 → 空列表，保持自由输入现状。点选集提交时并入章节条目。
   List<SubjectChapterStatus> _quickChapters = const [];
   final Set<String> _pickedChapters = {};
+  bool _chaptersExpanded = false; // 默认收起（一章芯片一行，几十章会占满弹层）
 
   /// 辅文章标题归一集（与 local_backend/_nonContentExact 同口径的 UI 侧
   /// 最小集——快捷点选不该报「目录/前言」）
@@ -371,15 +372,43 @@ class _InboxSheetState extends State<_InboxSheet> {
                 ),
               ),
               // #8（2026-09-13）章节快捷点选：未学正文章 → 点选即报学，
-              // 免手打章名（章名须与教材目录一致，手打极易对不上检索）
+              // 免手打章名（章名须与教材目录一致，手打极易对不上检索）。
+              // 默认收起为一行摘要（几十章的芯片区会占满弹层——真机反馈），
+              // 点摘要行展开/收起；已选数量随选随显。
               if (_quickChapters.isNotEmpty) ...[
                 const SizedBox(height: 10),
-                Text(
-                  '快捷点选（未学章节，点选即报学）',
-                  style: TextStyle(fontSize: 12, color: scheme.outline),
+                InkWell(
+                  onTap: () =>
+                      setState(() => _chaptersExpanded = !_chaptersExpanded),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _chaptersExpanded
+                            ? Icons.expand_less
+                            : Icons.expand_more,
+                        size: 18,
+                        color: scheme.outline,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          '快捷点选：未学 ${_quickChapters.length} 章'
+                          '${_pickedChapters.isEmpty ? '' : '，已选 ${_pickedChapters.length}'}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: _pickedChapters.isEmpty
+                                ? FontWeight.w400
+                                : FontWeight.w600,
+                            color: scheme.outline,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 6),
-                Wrap(
+                if (_chaptersExpanded) ...[
+                  const SizedBox(height: 6),
+                  Wrap(
                   spacing: 8,
                   runSpacing: 8,
                   children: [
@@ -404,6 +433,7 @@ class _InboxSheetState extends State<_InboxSheet> {
                       ),
                   ],
                 ),
+                ],
               ],
               const SizedBox(height: 16),
               // ③ 重点关键词：换行/顿号/逗号分隔均可

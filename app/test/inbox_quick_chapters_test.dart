@@ -96,11 +96,15 @@ void main() {
     await boot();
     await openSheet(tester, preset: 'endo');
 
-    // 未学正文章两章在列；已越过的辅文「目录」不在快捷区
+    // 默认收起：一行摘要（未学 2 章）在，芯片区不在；辅文「目录」永不出现
+    expect(find.text('快捷点选：未学 2 章'), findsOneWidget);
+    expect(find.text('第一章 绪论'), findsNothing);
+    expect(find.text('目录'), findsNothing);
+    // 展开 → 未学正文章两章在列
+    await tester.tap(find.text('快捷点选：未学 2 章'));
+    await tester.pump();
     expect(find.text('第一章 绪论'), findsOneWidget);
     expect(find.text('第二章 龋病'), findsOneWidget);
-    expect(find.text('快捷点选（未学章节，点选即报学）'), findsOneWidget);
-    expect(find.text('目录'), findsNothing);
   });
 
   testWidgets('点选提交 → study-log 章节条目入箱（章名与目录一致）', (tester) async {
@@ -109,8 +113,14 @@ void main() {
 
     await tester.ensureVisible(find.text('存入收件箱'));
     await tester.pump();
+    await tester.tap(find.text('快捷点选：未学 2 章')); // 展开
+    await tester.pump();
+    await tester.ensureVisible(find.text('第二章 龋病'));
+    await tester.pump();
     await tester.tap(find.text('第二章 龋病'));
     await tester.pump();
+    expect(find.textContaining('已选 1'), findsOneWidget,
+        reason: '已选数量须随点选更新');
     await tester.tap(find.text('存入收件箱'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
