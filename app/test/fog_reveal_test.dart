@@ -105,6 +105,31 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('擦雾空洞随纸角掀走：掀起渲染不炸、笔画保留、平摊区空洞仍在', (tester) async {
+    final c = await pumpFog(tester);
+    final size = tester.getSize(find.byType(FogPeel));
+    final corner = tester.getBottomRight(find.byType(FogPeel));
+    // 先在非纸角区擦两笔（留空洞）
+    final gesture = await tester.startGesture(size.center(Offset.zero));
+    await tester.pump();
+    await gesture.moveBy(const Offset(-60, -30));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    expect(c.strokes, hasLength(1));
+    // 再拖纸角小幅掀起（未过阈值 → 弹回）：卷起渲染含空洞冒烟
+    final peel = await tester.startGesture(corner - const Offset(20, 20));
+    await tester.pump();
+    await peel.moveBy(const Offset(-60, -60));
+    await tester.pump();
+    expect(c.isPeeling, true);
+    await peel.up();
+    await tester.pumpAndSettle();
+    expect(c.phase, FogPhase.idle, reason: '未过阈值弹回');
+    expect(c.strokes, hasLength(1), reason: '擦除空洞是纸的一部分，弹回后仍在');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('markCleared 幂等；reset 重雾', (tester) async {
     final c = await pumpFog(tester);
     c.markCleared();

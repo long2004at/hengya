@@ -476,10 +476,13 @@ class _FogPainter extends CustomPainter {
     canvas.drawRect(bounds, foldShadow);
     canvas.restore();
 
-    // ② 掀起侧：折线镜像绘制「纸背」（深一档 + 曲面明暗：折线处最暗）
+    // ② 掀起侧：折线镜像绘制「纸背」（深一档 + 曲面明暗：折线处最暗）。
+    // 用户拍板（2026-09-13）：手动擦出的空洞是「纸上的洞」，随纸卷走——
+    // 镜像空间内同样渲染擦除笔画（clear 抠穿 → 洞的位置露出底下的答案）
     canvas.save();
     canvas.transform(_mirrorAcross(m, u).storage);
     canvas.clipPath(_halfPlane(m, u, 1, big)); // 镜像后即掀起区
+    canvas.saveLayer(bounds, Paint());
     canvas.drawRect(bounds, Paint()..color = kFogBack);
     for (final (gx, gy, tone) in _grain) {
       canvas.drawCircle(
@@ -498,6 +501,8 @@ class _FogPainter extends CustomPainter {
         [const Color(0x2E000000), const Color(0x00000000)],
       );
     canvas.drawRect(bounds, curlShade);
+    _paintStrokes(canvas); // 空洞随纸卷走（镜像位置即物理位置）
+    canvas.restore();
     canvas.restore();
 
     // ③ 折线高光（细亮线：卷曲棱）
