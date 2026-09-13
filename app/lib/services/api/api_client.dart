@@ -1663,13 +1663,24 @@ class SubjectProgress {
     this.textbook,
     required this.learnedThrough,
     required this.total,
+    this.effectiveLearned,
+    this.effectiveTotal,
     this.nextChapter,
   });
 
   final String id;
   final String? textbook; // 教材名；null = 未配置教材（无罗盘，如 derm 占位）
-  final int learnedThrough; // 已学到第几章
+  final int learnedThrough; // 已学到第几章（原始前缀指针口径，审计 e 拍板原样）
   final int total; // 章节总数（原样含目录/索引等辅文章）
+
+  /// #1（2026-09-13）：有效已学 = 真实正文章计数（剔辅文与跳过）——稀疏
+  /// 编号下指针可越过列表长度，展示口径一律用本字段；后端未提供（旧
+  /// remote/demo）时回退 learnedThrough。
+  final int? effectiveLearned;
+
+  /// 有效总量 = 章列表长度 − 跳过数；后端未提供时回退 total。
+  final int? effectiveTotal;
+
   final NextChapterInfo? nextChapter; // 学完 → null（服务端契约）
 
   /// 有罗盘（textbook 非空）——复习提示/进度条只对罗盘科目生效
@@ -1678,9 +1689,15 @@ class SubjectProgress {
   /// 学完态：无下一章即学完（服务端 §7.5 契约，含尾部辅文章读完的情形）
   bool get completed => nextChapter == null;
 
-  /// 进度比例 0.0~1.0（total=0 防除零）
+  /// 展示口径（有效优先，旧后端回退原样）
+  int get displayLearned => effectiveLearned ?? learnedThrough;
+  int get displayTotal => effectiveTotal ?? total;
+
+  /// 进度比例 0.0~1.0（total=0 防除零；展示口径）
   double get fraction =>
-      total > 0 ? (learnedThrough / total).clamp(0.0, 1.0) : 0;
+      displayTotal > 0
+      ? (displayLearned / displayTotal).clamp(0.0, 1.0)
+      : 0;
 
   factory SubjectProgress.fromJson(Map<String, dynamic> json) =>
       SubjectProgress(
@@ -1688,6 +1705,8 @@ class SubjectProgress {
         textbook: json['textbook'] as String?,
         learnedThrough: json['learned_through'] as int? ?? 0,
         total: json['total'] as int? ?? 0,
+        effectiveLearned: json['effective_learned'] as int?,
+        effectiveTotal: json['effective_total'] as int?,
         nextChapter: json['next_chapter'] is Map
             ? NextChapterInfo.fromJson(
                 Map<String, dynamic>.from(json['next_chapter'] as Map),

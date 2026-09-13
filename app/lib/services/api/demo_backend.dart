@@ -608,6 +608,9 @@ class DemoBackend {
                   // 与 local 主视图同口径：指针原样（减跳过），非正文章计数
                   'learned_through': lt - sk.where((s) => s <= lt).length,
                   'total': v['effective_total'],
+                  // #1：展示口径补充字段（与 local 主视图一致）
+                  'effective_learned': v['effective_learned'],
+                  'effective_total': v['effective_total'],
                   'next_chapter': v['next_chapter'],
                 };
               }()

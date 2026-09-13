@@ -1725,6 +1725,11 @@ if (svc == 'llm' || svc == 'llm_backup') {
           'learned_through':
               learnedThrough - skipped.where((s) => s <= learnedThrough).length,
           'total': chapters.length - skipped.length,
+          // #1（2026-09-13）：展示口径补充字段——有效已学=正文章计数（UI 消费；
+          // 旧键语义不变，旧测试/旧客户端不受影响）
+          'effective_learned':
+              _effectiveLearned(chapters, learnedThrough, skipped),
+          'effective_total': chapters.length - skipped.length,
           'next_chapter': next,
         });
       }

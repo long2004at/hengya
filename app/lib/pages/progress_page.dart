@@ -219,9 +219,11 @@ class _ProgressHeroCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final compass = progress.subjects.where((p) => p.hasTextbook).toList();
-    final learned = compass.fold<int>(0, (a, p) => a + p.learnedThrough);
-    final total = compass.fold<int>(0, (a, p) => a + p.total);
-    final started = compass.where((p) => p.learnedThrough > 0).length;
+    // #1（2026-09-13）：展示用有效口径（正文章计数）——原始指针在稀疏
+    // 编号下可越过列表长度（「已学 > 总量」）
+    final learned = compass.fold<int>(0, (a, p) => a + p.displayLearned);
+    final total = compass.fold<int>(0, (a, p) => a + p.displayTotal);
+    final started = compass.where((p) => p.displayLearned > 0).length;
 
     return Container(
       decoration: const BoxDecoration(
@@ -749,7 +751,8 @@ class _SubjectProgressCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      '${p.learnedThrough}/${p.total}',
+                      // #1：有效口径展示（指针在稀疏编号下可越过列表长度）
+                      '${p.displayLearned}/${p.displayTotal}',
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w800,

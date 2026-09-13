@@ -191,7 +191,7 @@ void main() {
   });
 
   testWidgets(
-      'Q3+Q4 罗盘正常态：progress.json 就位后正常渲染（2/5、40%、下一章）；'
+      'Q3+Q4 罗盘正常态：progress.json 就位后正常渲染（1/5、20%、下一章）；'
       '新课程不进罗盘（设计使然）；derm 未配置教材标注；垃圾时间戳 → 「尚未更新」',
       (tester) async {
     await boot();
@@ -232,10 +232,11 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    // endo 行：教材名 / 2/5 / 40% / 下一章预告（辅文章被跳过 → 直指第二章 新航路）
+    // endo 行：教材名 / 1/5 / 20% / 下一章预告（辅文章被跳过 → 直指第二章 新航路）
+    // #1 新口径：指针 2 只越过 目录(no0)/前言(no1) 辅文 + 第一章(no2) → 有效已学 1
     expect(find.text('世界通史-第2版'), findsOneWidget);
-    expect(find.text('2/5'), findsOneWidget);
-    expect(find.text('40%'), findsOneWidget);
+    expect(find.text('1/5'), findsOneWidget);
+    expect(find.text('20%'), findsOneWidget);
     expect(find.textContaining('下一章：'), findsOneWidget);
     // 「下一章」预告在两处合法出现：联动卡预告行 + 科目进度行（Text.rich 子段）
     expect(find.textContaining('第二章 新航路'), findsNWidgets(2));
@@ -272,7 +273,7 @@ void main() {
     expect(find.text('罗盘外新课程'), findsNothing); // 空态同样不出现新课程
   });
 
-  testWidgets('Q4 异常进度防崩：learned_through 99 / 共 3 章 → 原样展示但钳制 100% + 学完态',
+  testWidgets('Q4 异常进度防崩：learned_through 99 / 共 3 章 → 展示收敛 3/3 + 学完态',
       (tester) async {
     await boot();
     final corpus = Directory('${tmp.path}/corpus')..createSync(recursive: true);
@@ -300,8 +301,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('99/3'), findsOneWidget); // 原样展示，不隐藏（数据诚实）
-    expect(find.text('100%'), findsOneWidget); // fraction 钳制 1.0，不出现 3300%
+    // #1 新口径：展示用有效已学（正文章计数 ≤ 指针）= 3 → '3/3'（不再
+    // 原样展示 99/3；API 层仍原样透传，收敛在展示层）
+    expect(find.text('3/3'), findsOneWidget);
+    expect(find.text('100%'), findsOneWidget);
     expect(find.text('已学完'), findsOneWidget); // 无下一章（全部 no ≤ 99）→ 学完
     expect(find.text('教材正文章已全部学完'), findsOneWidget);
     // LinearProgressIndicator value=1.0 正常渲染——未抛异常本身就是断言

@@ -49,8 +49,9 @@ double compassFractionOf(ProgressOverview progress) {
   var total = 0;
   for (final p in progress.subjects) {
     if (!p.hasTextbook) continue;
-    learned += p.learnedThrough;
-    total += p.total;
+    // #1：有效口径（与进度页 Hero 一致——原始指针在稀疏编号下可越界）
+    learned += p.displayLearned;
+    total += p.displayTotal;
   }
   return total > 0 ? (learned / total).clamp(0.0, 1.0).toDouble() : 0.0;
 }
