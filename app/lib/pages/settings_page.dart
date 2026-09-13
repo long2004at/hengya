@@ -600,29 +600,51 @@ class _SettingsPageState extends State<SettingsPage> {
       TopToast.show(context, '当前版本不支持调整（需 0.1.13+）', type: TopToastType.error);
       return;
     }
-    final action = await showDialog<String>(
+    // #3（2026-09-13）界面同步：与「每日提醒」设置弹层统一为底部面板 +
+    // 列表行形态（原居中 AlertDialog 四按钮与全 App 选择器风格不一致）
+    final action = await showModalBottomSheet<String>(
       context: context,
-      builder: (dlgCtx) => AlertDialog(
-        title: const Text('调整自动周扫计时'),
-        content: Text(_weeklyScheduleText),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dlgCtx, 'due'),
-            child: const Text('立即到期'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dlgCtx, 'postpone'),
-            child: const Text('推迟 7 天'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dlgCtx, 'custom'),
-            child: const Text('自定义时间'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dlgCtx),
-            child: const Text('取消'),
-          ),
-        ],
+      builder: (dlgCtx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('调整自动周扫计时',
+                style: Theme.of(dlgCtx)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            Text(_weeklyScheduleText,
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(dlgCtx).colorScheme.outline)),
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.bolt_outlined),
+              title: const Text('立即到期'),
+              subtitle: const Text('下次拆卡收尾马上执行真题周扫'),
+              onTap: () => Navigator.pop(dlgCtx, 'due'),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.schedule_outlined),
+              title: const Text('推迟 7 天'),
+              subtitle: const Text('以现在为起点重算一周节奏'),
+              onTap: () => Navigator.pop(dlgCtx, 'postpone'),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.edit_calendar_outlined),
+              title: const Text('自定义时间'),
+              subtitle: const Text('选日期与具体时刻'),
+              onTap: () => Navigator.pop(dlgCtx, 'custom'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
     if (action == null || !mounted) return;
