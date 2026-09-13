@@ -36,6 +36,9 @@ class FogPeelController extends ChangeNotifier {
   FogPhase _phase = FogPhase.idle;
   Offset _dragPoint = Offset.zero; // 纸角当前位置（局部坐标；idle 时 = 角点）
   bool _cleared = false;
+  int _generation = 0; // 代数：reset 使运行中的动画 tick 失效（防串卡）
+
+  int get generation => _generation;
 
   FogPhase get phase => _phase;
   Offset get dragPoint => _dragPoint;
@@ -115,12 +118,14 @@ class FogPeelController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 重新上雾（换卡）：全部状态归零。
+  /// 重新上雾（换卡）：全部状态归零。代数 +1 使运行中的动画 tick
+  /// （飞出/自动掀页/回弹）失效——否则旧卡的动画完成时会把新卡误清。
   void reset() {
     strokes.clear();
     _phase = FogPhase.idle;
     _dragPoint = Offset.zero;
     _cleared = false;
+    _generation++;
     notifyListeners();
   }
 }
@@ -145,6 +150,7 @@ class _FogPeelState extends State<FogPeel>
   Offset _animFrom = Offset.zero;
   Offset _animTo = Offset.zero;
   Offset? _panDownPoint; // 本轮拖动的按下点（手势分流用）
+  int _animGeneration = -1; // 当前动画绑定的控制器代数（reset 后 tick 自杀）
   double _fade = 1.0;
 
   @override
@@ -181,13 +187,16 @@ class _FogPeelState extends State<FogPeel>
 
   /// 点纸角 → 自动掀页：纸角沿对角线行进直至越过远端 + 淡出 → 全清。
   void _autoPeel(Size size) {
+    if (_anim.isAnimating) return; // 动画中忽略新手势（防双写拖点）
     final c = _corner(size);
+    final gen = widget.controller.generation;
     final diag = math.sqrt(size.width * size.width + size.height * size.height);
     final u = Offset(-size.width, -size.height) / diag; // 指向左上
     _animFrom = c;
     _animTo = c + u * (diag * 1.15);
     _fade = 1.0;
     widget.controller.startAutoPeel(c);
+    _animGeneration = gen;
     _anim
       ..duration = const Duration(milliseconds: 520)
       ..reset();
@@ -196,6 +205,7 @@ class _FogPeelState extends State<FogPeel>
   }
 
   void _autoPeelTick() {
+    if (widget.controller.generation != _animGeneration) return;
     final t = _anim.value;
     final p = Offset.lerp(_animFrom, _animTo, t)!;
     final diag = _animTo.distance;
@@ -214,6 +224,7 @@ class _FogPeelState extends State<FogPeel>
 
   /// 拖角松手：超阈值（距离/速度）→ 飞出全清；否则弹性拉回。
   void _endPeel(Size size, double flingSpeed) {
+    final gen = widget.controller.generation;
     final c = _corner(size);
     final diag = math.sqrt(size.width * size.width + size.height * size.height);
     final dragDist = (widget.controller.dragPoint - c).distance;
@@ -226,6 +237,7 @@ class _FogPeelState extends State<FogPeel>
       _animTo = c + u * (diag * 1.2);
       _fade = 1.0;
       widget.controller.startFlyOut(_animFrom);
+      _animGeneration = gen;
       _anim
         ..duration = const Duration(milliseconds: 260)
         ..reset();
@@ -235,6 +247,7 @@ class _FogPeelState extends State<FogPeel>
       _animFrom = widget.controller.dragPoint;
       _animTo = c;
       widget.controller.startSpringBack();
+      _animGeneration = gen;
       _anim
         ..duration = const Duration(milliseconds: 240)
         ..reset();
@@ -244,6 +257,7 @@ class _FogPeelState extends State<FogPeel>
   }
 
   void _flyOutTick() {
+    if (widget.controller.generation != _animGeneration) return;
     final t = _anim.value;
     widget.controller.setDragPoint(Offset.lerp(_animFrom, _animTo, t)!);
     _fade = 1.0 - t;
@@ -255,6 +269,7 @@ class _FogPeelState extends State<FogPeel>
   }
 
   void _springBackTick() {
+    if (widget.controller.generation != _animGeneration) return;
     final t = Curves.easeOutBack.transform(_anim.value);
     widget.controller.setDragPoint(Offset.lerp(_animFrom, _animTo, t)!);
     if (_anim.value >= 1.0) {
@@ -288,6 +303,7 @@ class _FogPeelState extends State<FogPeel>
                   // 识别器胜出时的位置——大幅拖动已远离纸角，热区判定失真）
                   onPanDown: (d) => _panDownPoint = d.localPosition,
                   onPanStart: (d) {
+                    if (_anim.isAnimating) return; // 动画中不接新手势
                     final origin = _panDownPoint ?? d.localPosition;
                     if (_inCornerHotzone(origin, size)) {
                       widget.controller.beginPeel(origin);

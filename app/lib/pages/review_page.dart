@@ -470,6 +470,61 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
     );
   }
 
+  /// #12 雾激活时的卡面布局：答案区（FogPeel）用 Expanded 占据剩余空间
+  /// ——约束有界（滚动容器内是无界高度，FogPeel 会静默退化为无雾）；
+  /// 雾盖住答案可视首屏，纸角可达；长答案超出部分在掀页/评分前不可见
+  /// （方案 A：掀开解锁滚动后由非雾布局接管）。
+  Widget _buildCardFogged(FlashCard card, ColorScheme scheme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _TypeChip(type: card.type),
+            const Spacer(),
+            Text(
+              '#${_index + 1}/${_cards.length}',
+              style: TextStyle(fontSize: 12, color: scheme.outline),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Text(
+          card.front,
+          style: const TextStyle(
+            fontSize: 20,
+            height: 1.5,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 24),
+        const Divider(),
+        const SizedBox(height: 12),
+        Expanded(
+          child: FogPeel(
+            controller: _fog,
+            child: SingleChildScrollView(
+              physics: const NeverScrollableScrollPhysics(),
+              child: Text(
+                card.back,
+                style: const TextStyle(fontSize: 16, height: 1.6),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 12,
+          runSpacing: 4,
+          children: [
+            _MetaChip(icon: Icons.anchor, label: '锚点 ${card.anchor}'),
+            _MetaChip(icon: Icons.menu_book_outlined, label: card.source),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildCard(ColorScheme scheme) {
     final card = _cards[_index];
     return Column(
@@ -500,82 +555,77 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
               margin: const EdgeInsets.all(16),
               child: Padding(
                 padding: const EdgeInsets.all(20),
-                child: SingleChildScrollView(
-                  // #12：雾未清时锁滚动——想看后续内容先擦开/掀页/评分
-                  physics: (_revealed && _fogEnabled && _fog.isFogged)
-                      ? const NeverScrollableScrollPhysics()
-                      : null,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          _TypeChip(type: card.type),
-                          const Spacer(),
-                          Text(
-                            '#${_index + 1}/${_cards.length}',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: scheme.outline,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        card.front,
-                        style: const TextStyle(
-                          fontSize: 20,
-                          height: 1.5,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      if (!_revealed)
-                        Center(
-                          child: Text(
-                            '想一想，点卡片翻面',
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: scheme.outline,
-                            ),
-                          ),
-                        ),
-                      if (_revealed) ...[
-                        const Divider(),
-                        const SizedBox(height: 12),
-                        if (_fogEnabled)
-                          FogPeel(
-                            controller: _fog,
-                            child: Text(
-                              card.back,
-                              style: const TextStyle(fontSize: 16, height: 1.6),
-                            ),
-                          )
-                        else
-                          Text(
-                            card.back,
-                            style: const TextStyle(fontSize: 16, height: 1.6),
-                          ),
-                        const SizedBox(height: 16),
-                        Wrap(
-                          spacing: 12,
-                          runSpacing: 4,
+                // #12（2026-09-13）：雾激活时答案区**移出滚动容器**——
+                // FogPeel 需有界约束（LayoutBuilder 无界高度会静默退化为
+                // 无雾），雾正好盖住答案的可视首屏，纸角可达；清雾后切回
+                // 滚动布局（整卡可滚）。方案 A 的落地形态。
+                child: (_revealed && _fogEnabled && _fog.isFogged)
+                    ? _buildCardFogged(card, scheme)
+                    : SingleChildScrollView(
+                        physics: null,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _MetaChip(
-                              icon: Icons.anchor,
-                              label: '锚点 ${card.anchor}',
+                            Row(
+                              children: [
+                                _TypeChip(type: card.type),
+                                const Spacer(),
+                                Text(
+                                  '#${_index + 1}/${_cards.length}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: scheme.outline,
+                                  ),
+                                ),
+                              ],
                             ),
-                            _MetaChip(
-                              icon: Icons.menu_book_outlined,
-                              label: card.source,
+                            const SizedBox(height: 16),
+                            Text(
+                              card.front,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                height: 1.5,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
+                            const SizedBox(height: 24),
+                            if (!_revealed)
+                              Center(
+                                child: Text(
+                                  '想一想，点卡片翻面',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: scheme.outline,
+                                  ),
+                                ),
+                              ),
+                            if (_revealed) ...[
+                              const Divider(),
+                              const SizedBox(height: 12),
+                              Text(
+                                card.back,
+                                style:
+                                    const TextStyle(fontSize: 16, height: 1.6),
+                              ),
+                              const SizedBox(height: 16),
+                              Wrap(
+                                spacing: 12,
+                                runSpacing: 4,
+                                children: [
+                                  _MetaChip(
+                                    icon: Icons.anchor,
+                                    label: '锚点 ${card.anchor}',
+                                  ),
+                                  _MetaChip(
+                                    icon: Icons.menu_book_outlined,
+                                    label: card.source,
+                                  ),
+                                ],
+                              ),
+                            ],
                           ],
                         ),
-                      ],
-                    ],
-                  ),
-                ),
+                      ),
               ),
             ),
           ),
