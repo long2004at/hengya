@@ -78,6 +78,9 @@ final _pSp = '{$_pNs}sp'; // <p:sp> 形状
 final _pPh = '{$_pNs}ph'; // <p:ph> 占位符
 const _titlePhTypes = ['title', 'ctrTitle'];
 
+final _aXfrm = '{$_aNs}xfrm'; // <a:xfrm> 变换（坐标容器）
+final _aOff = '{$_aNs}off'; // <a:off y x> 位置偏移（EMU）
+
 final _slideRe = RegExp(r'^ppt/slides/slide(\d+)\.xml$');
 final _coreCreatedRe = RegExp(
   r'<dcterms:created[^>]*>([^<]+)<',
@@ -314,7 +317,47 @@ String _fileDateFromPptx(ZipReader zf, String fallbackPath) {
       pages.add(PptxPage(no, '', ''));
       continue;
     }
-    final (lines, firstText) = _joinRuns(root);
+    // 按视觉坐标（Y 优先、同 Y 再按 X）对 <p:sp> 排序，修复 PPT 按创建序
+    // 存储形状导致视觉顺序颠倒的 bug（tie-breaking：同 Y → X 升序，左到右）。
+    final spWithPos = <(int, int, XElem)>[];
+    for (final sp in iterTag(root, _pSp)) {
+      XElem? offElem;
+      for (final xfrm in iterTag(sp, _aXfrm)) {
+        offElem = findChild(xfrm, _aOff);
+        break;
+      }
+      final y = int.tryParse(offElem?.attrs['y'] ?? '0') ?? 0;
+      final x = int.tryParse(offElem?.attrs['x'] ?? '0') ?? 0;
+      spWithPos.add((y, x, sp));
+    }
+    spWithPos.sort(
+      (a, b) => a.$1 != b.$1 ? a.$1.compareTo(b.$1) : a.$2.compareTo(b.$2),
+    );
+    // 坐标序各 sp 的段落
+    final lines = <String>[];
+    for (final (_, _, sp) in spWithPos) {
+      for (final pElem in iterTag(sp, _aP)) {
+        final buf = <String>[];
+        for (final t in iterTag(pElem, _aT)) {
+          final txt = pyStrip(t.text ?? '');
+          if (txt.isNotEmpty) buf.add(txt);
+        }
+        final line = pyStrip(buf.join());
+        if (line.isNotEmpty) lines.add(line);
+      }
+    }
+    // firstText：坐标序首个非空 a:t（_pageTitle 标题兜底用）
+    var firstText = '';
+    loop:
+    for (final (_, _, sp) in spWithPos) {
+      for (final t in iterTag(sp, _aT)) {
+        final txt = pyStrip(t.text ?? '');
+        if (txt.isNotEmpty) {
+          firstText = txt;
+          break loop;
+        }
+      }
+    }
     final title = _pageTitle(root, firstText);
     final extra = <String>[];
     for (final (rtype, target) in _readRels(zf, part)) {

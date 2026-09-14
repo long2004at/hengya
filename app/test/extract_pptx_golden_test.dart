@@ -173,9 +173,9 @@ void main() {
         as Map<String, dynamic>;
     // 守门：PPT 金样须仍为语义分块前基线（预期未变更，见 handoff）
     expect(g['chunk_count'], 92, reason: 'oms PPT 金样 chunk 数已变更——先核对语义分块节点 handoff');
-    expect(g['golden_md5'], 'b884a9d18ed1fb4dbbc848a15d041de9',
+    expect(g['golden_md5'], 'fdb1f17eb7846b1fadcdccd023ff3aed',
         reason: 'oms PPT 金样 md5 已变更——以新金样重核 Dart 语义后更新守门常量');
-    expect(g['golden_bytes'], 66403);
+    expect(g['golden_bytes'], 66337);
     expect(g['source_md5'], '60b35dffda63c69a25cffff9c3e8ec51');
     expect(g['source_size'], 20845733);
     expect(g['file_date'], '2025-09-16');

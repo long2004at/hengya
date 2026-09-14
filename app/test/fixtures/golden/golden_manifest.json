@@ -1,0 +1,67 @@
+{
+ "generated_by": "automation/server-pipeline Python 参考实现（金样基准）",
+ "purpose": "Dart 端上移植（Phase 3a/3b）回归 diff 基准；Dart 实现对同一源文件抽取后须与金样 jsonl 逐字节一致",
+ "chunks_fields": [
+  "chunk_id",
+  "subject_id",
+  "ppt_id",
+  "deck",
+  "page_start",
+  "page_end",
+  "title",
+  "text",
+  "source_type",
+  "file_date"
+ ],
+ "goldens": {
+  "oms_ch2_pptx_chunks.jsonl": {
+   "source_file": "content/ppt_raw/oms/(2.1.2)--第二章口腔颌面外科基本操作与基础知识 (1).pptx",
+   "source_size": 20845733,
+   "source_md5": "60b35dffda63c69a25cffff9c3e8ec51",
+   "file_date": "2025-09-16",
+   "subject_id": "oms",
+   "source_type": "ppt",
+   "chunk_count": 92,
+   "golden_bytes": 66337,
+   "golden_md5": "fdb1f17eb7846b1fadcdccd023ff3aed"
+  },
+  "endo_textbook_pdf_chunks.jsonl": {
+   "source_file": "content/ppt_raw/endo-textbook/牙体牙髓病学-第5版.pdf",
+   "source_size": 127640747,
+   "source_md5": "600618f82f4efe2331cbd2f2fdfccbed",
+   "file_date": "2021-01-14",
+   "subject_id": "endo",
+   "source_type": "textbook",
+   "chunk_count": 608,
+   "golden_bytes": 1395551,
+   "golden_md5": "67b4a8b2e10d4f0ac0926dbae7bfd133"
+  },
+  "exam_assistant2023_pdf_chunks.jsonl": {
+   "source_file": "content/ppt_raw/exam/试卷与模拟题/2023年口腔助理医师试题（网友回忆版）.pdf",
+   "source_size": 267080,
+   "source_md5": "5c3eda561bef67ff74ef48f47382e4f8",
+   "file_date": "2026-05-12",
+   "subject_id": "exam",
+   "source_type": "exam",
+   "chunk_count": 19,
+   "golden_bytes": 43572,
+   "golden_md5": "57952b25d5088329ffe546ea51a18b18"
+  },
+  "assistant_syllabus_docx_chunks.jsonl": {
+   "source_file": "content/ppt_raw/exam/大纲与考纲/6-口腔执业助理医师资格考试大纲.docx",
+   "source_size": 121954,
+   "source_md5": "f5653a413b83cfb08dfa3f48fca2e105",
+   "file_date": "2026-09-05",
+   "subject_id": "exam",
+   "source_type": "exam",
+   "chunk_count": 19,
+   "golden_bytes": 99878,
+   "golden_md5": "0179ad1c4dd2feaae463ed74c03228be"
+  }
+ },
+ "corpus_schema_sql": {
+  "source_db": "content/corpus/corpus.db",
+  "objects": 13,
+  "md5": "fbbf6f86a7bfacdb7aa6341511ec4ad8"
+ }
+}
