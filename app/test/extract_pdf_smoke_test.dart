@@ -272,6 +272,7 @@ void main() {
         '../content/ppt_raw/exam/试卷与模拟题/2023年口腔助理医师试题（网友回忆版）.pdf';
     final src = File(srcRel);
     if (!src.existsSync()) {
+      // ignore: avoid_print
       print('SKIP: 源 PDF 缺失（私有课件不随公开仓库分发）：$srcRel');
       return;
     }

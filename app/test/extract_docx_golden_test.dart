@@ -108,6 +108,7 @@ void main() {
         '../content/ppt_raw/exam/大纲与考纲/6-口腔执业助理医师资格考试大纲.docx';
     final src = File(srcRel);
     if (!src.existsSync()) {
+      // ignore: avoid_print
       print('SKIP: 源 docx 缺失（私有课件不随公开仓库分发）：$srcRel');
       return;
     }

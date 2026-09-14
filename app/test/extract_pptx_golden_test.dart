@@ -188,6 +188,7 @@ void main() {
         '../content/ppt_raw/oms/(2.1.2)--第二章口腔颌面外科基本操作与基础知识 (1).pptx';
     final src = File(srcRel);
     if (!src.existsSync()) {
+      // ignore: avoid_print
       print('SKIP: 源 pptx 缺失（私有课件不随公开仓库分发）：$srcRel');
       return;
     }
