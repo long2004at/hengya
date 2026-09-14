@@ -123,6 +123,13 @@ class FogRevealController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void endSpringBack() {
+    if (_phase == FogPhase.springback) {
+      _phase = FogPhase.idle;
+      notifyListeners();
+    }
+  }
+
   void setDragPoint(Offset p) {
     _dragPoint = p;
     notifyListeners();
@@ -306,6 +313,7 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
     if (_anim.value >= 1.0) {
       _anim.removeListener(_springBackTick);
       widget.controller.setDragPoint(_animTo);
+      widget.controller.endSpringBack();
     }
   }
 
