@@ -186,17 +186,20 @@ jobs:
           # Ed25519 清单签名（安全修复 B）：canonical payload 五字段竖线拼接，
           # 与 App 端 update_service.dart 逐字段一致；签名 base64 无换行注入
           # 顶层 signature 字段（新版 App 拒绝无签名清单）
-          printf '%s' "$UPDATE_SIGN_KEY" > /tmp/update_sign_key.pem
-          if [ ! -s /tmp/update_sign_key.pem ]; then
+          SIGN_KEY=$(mktemp); SIGN_PAYLOAD=$(mktemp); SIGN_BIN=$(mktemp)
+          trap 'rm -f "$SIGN_KEY" "$SIGN_PAYLOAD" "$SIGN_BIN"' EXIT
+          printf '%s' "$UPDATE_SIGN_KEY" > "$SIGN_KEY"
+          chmod 600 "$SIGN_KEY"
+          if [ ! -s "$SIGN_KEY" ]; then
             echo "::error::UPDATE_SIGN_KEY secret 未配置，拒绝产出无签名清单"; exit 1
           fi
-          printf '%s' "${VERSION}|${CODE}|${APK}|${SHA}|${SIZE}" > /tmp/manifest_payload.txt
-          openssl pkeyutl -sign -inkey /tmp/update_sign_key.pem -rawin \
-            -in /tmp/manifest_payload.txt -out /tmp/manifest_sig.bin
-          SIG=$(base64 -w0 /tmp/manifest_sig.bin)
+          printf '%s' "${VERSION}|${CODE}|${APK}|${SHA}|${SIZE}" > "$SIGN_PAYLOAD"
+          openssl pkeyutl -sign -inkey "$SIGN_KEY" -rawin \
+            -in "$SIGN_PAYLOAD" -out "$SIGN_BIN"
+          SIG=$(base64 -w0 "$SIGN_BIN")
           jq --arg sig "$SIG" '. + {signature: $sig}' latest.json > latest.json.tmp \
             && mv latest.json.tmp latest.json
-          rm -f /tmp/update_sign_key.pem /tmp/manifest_payload.txt /tmp/manifest_sig.bin
+          rm -f "$SIGN_KEY" "$SIGN_PAYLOAD" "$SIGN_BIN"
           cat latest.json
           mkdir -p ~/.ssh
           printf '%s\n' "$ECS_SSH_KEY" > ~/.ssh/ecs_key
@@ -236,17 +239,20 @@ jobs:
           # Ed25519 清单签名（安全修复 B）：canonical payload 五字段竖线拼接
           # （此通道 apk 字段为 Release 资产绝对链接 APK_URL），与 App 端
           # update_service.dart 逐字段一致；签名 base64 无换行注入顶层 signature
-          printf '%s' "$UPDATE_SIGN_KEY" > /tmp/update_sign_key.pem
-          if [ ! -s /tmp/update_sign_key.pem ]; then
+          SIGN_KEY=$(mktemp); SIGN_PAYLOAD=$(mktemp); SIGN_BIN=$(mktemp)
+          trap 'rm -f "$SIGN_KEY" "$SIGN_PAYLOAD" "$SIGN_BIN"' EXIT
+          printf '%s' "$UPDATE_SIGN_KEY" > "$SIGN_KEY"
+          chmod 600 "$SIGN_KEY"
+          if [ ! -s "$SIGN_KEY" ]; then
             echo "::error::UPDATE_SIGN_KEY secret 未配置，拒绝产出无签名清单"; exit 1
           fi
-          printf '%s' "${VERSION}|${CODE}|${APK_URL}|${SHA}|${SIZE}" > /tmp/manifest_payload.txt
-          openssl pkeyutl -sign -inkey /tmp/update_sign_key.pem -rawin \
-            -in /tmp/manifest_payload.txt -out /tmp/manifest_sig.bin
-          SIG=$(base64 -w0 /tmp/manifest_sig.bin)
+          printf '%s' "${VERSION}|${CODE}|${APK_URL}|${SHA}|${SIZE}" > "$SIGN_PAYLOAD"
+          openssl pkeyutl -sign -inkey "$SIGN_KEY" -rawin \
+            -in "$SIGN_PAYLOAD" -out "$SIGN_BIN"
+          SIG=$(base64 -w0 "$SIGN_BIN")
           jq --arg sig "$SIG" '. + {signature: $sig}' update/latest.json > update/latest.json.tmp \
             && mv update/latest.json.tmp update/latest.json
-          rm -f /tmp/update_sign_key.pem /tmp/manifest_payload.txt /tmp/manifest_sig.bin
+          rm -f "$SIGN_KEY" "$SIGN_PAYLOAD" "$SIGN_BIN"
           cat update/latest.json
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

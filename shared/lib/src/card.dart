@@ -2,6 +2,15 @@
 // 状态流转：pending(待审核) → active(复习中) → archived(拒绝/精熟退场)
 //           pending → rejected；active → rework(回炉重造) → pending
 
+/// 安全 enum 解析：未知值返回 null 而非抛 ArgumentError（数据库版本升降兼容）。
+T? _tryEnum<T extends Enum>(List<T> values, String? name) {
+  if (name == null) return null;
+  for (final v in values) {
+    if (v.name == name) return v;
+  }
+  return null;
+}
+
 /// 卡型（规范 §三：六种卡型）
 enum CardType {
   basic, // 基础问答（含定义/列举/对比，靠 tags 区分）
@@ -92,15 +101,18 @@ class FlashCard {
   factory FlashCard.fromJson(Map<String, dynamic> json) => FlashCard(
         id: json['id'] as String,
         subjectId: json['subjectId'] as String,
-        type: CardType.values.byName(json['type'] as String),
+        type: _tryEnum(CardType.values, json['type'] as String?) ??
+            CardType.basic,
         front: json['front'] as String,
         back: json['back'] as String,
         anchor: json['anchor'] as String,
         source: json['source'] as String,
-        sourceTier:
-            SourceTier.values.byName(json['sourceTier'] as String? ?? 'ppt'),
-        status:
-            CardStatus.values.byName(json['status'] as String? ?? 'pending'),
+        sourceTier: _tryEnum(
+                SourceTier.values, json['sourceTier'] as String? ?? 'ppt') ??
+            SourceTier.ppt,
+        status: _tryEnum(
+                CardStatus.values, json['status'] as String? ?? 'pending') ??
+            CardStatus.pending,
         tags: (json['tags'] as List<dynamic>? ?? const [])
             .map((e) => e as String)
             .toList(),

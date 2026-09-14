@@ -96,7 +96,15 @@ class UpdateManifest {
     if (versionName is! String || versionName.isEmpty) return null;
     if (versionCode is! int || versionCode <= 0) return null;
     if (apk is! String || apk.isEmpty) return null;
-    if (apk.contains('/') || apk.contains('\\')) return null;
+    // apk 可以是纯文件名（ECS 通道）或完整 http(s):// URL（GitHub 通道）。
+    // 纯文件名禁止路径分隔符（防穿越）；完整 URL 必须是合法 http(s) 链接。
+    final apkUri = Uri.tryParse(apk);
+    final isAbsoluteUrl = apkUri != null &&
+        (apkUri.scheme == 'http' || apkUri.scheme == 'https') &&
+        apkUri.host.isNotEmpty;
+    if (!isAbsoluteUrl && (apk.contains('/') || apk.contains('\\'))) {
+      return null; // 非 URL 又含路径分隔符 → 穿越
+    }
     if (sha256 is! String || !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(sha256)) {
       return null;
     }
@@ -121,6 +129,24 @@ class UpdateManifest {
   /// sizeBytes 为十进制整数字符串；sha256 用归一化后的小写 hex）。
   String get canonicalPayload =>
       '$versionName|$versionCode|$apk|$sha256|$sizeBytes';
+
+  /// apk 字段是否为完整 http(s) URL（GitHub 通道写入的是 Release 资产绝对链接）。
+  bool get isAbsoluteUrl {
+    final u = Uri.tryParse(apk);
+    return u != null &&
+        (u.scheme == 'http' || u.scheme == 'https') &&
+        u.host.isNotEmpty;
+  }
+
+  /// 本地落盘文件名：完整 URL 取末段路径（hengya-v0.1.17-release.apk），
+  /// 纯文件名原样返回。穿越防护已在 tryParse 完成，此处仅取段。
+  String get localFileName {
+    if (isAbsoluteUrl) {
+      final segments = Uri.parse(apk).pathSegments;
+      return segments.isNotEmpty ? segments.last : apk;
+    }
+    return apk;
+  }
 
   /// 大小展示：「76.8 MB」；sizeBytes 缺省 0 → 「大小未知」
   String get sizeDisplay =>
@@ -415,9 +441,12 @@ class UpdateService {
     return dir.path;
   }
 
-  /// APK 直链：apk 为相对源目录的文件名 → Uri.resolve 同目录拼接
+  /// APK 直链：apk 为完整 URL 时直接使用，为相对文件名时基于源目录拼接
   /// （源 .../latest.json + heng-x.apk → .../heng-x.apk）。
   Uri apkUrlOf(UpdateManifest manifest, String sourceUrl) {
+    // GitHub 通道：apk 字段已是完整 Release 资产 URL
+    if (manifest.isAbsoluteUrl) return Uri.parse(manifest.apk);
+    // ECS 通道：apk 为纯文件名，相对 sourceUrl 所在目录 resolve
     final base = Uri.tryParse(sourceUrl.trim());
     if (base == null || !base.hasScheme) {
       throw UpdateException(UpdateMessages.badSourceUrl);
@@ -510,7 +539,8 @@ class UpdateService {
     void Function(int received, int? total)? onProgress,
   }) async {
     final dir = await _downloadDir();
-    final dest = File('$dir/${manifest.apk}');
+    final fileName = manifest.localFileName;
+    final dest = File('$dir/$fileName');
     // 复用上次已下载且校验通过的安装包
     if (await _fileMatches(dest, manifest)) {
       final len = dest.lengthSync();
@@ -518,9 +548,9 @@ class UpdateService {
       return dest;
     }
     // 清扫其他版本的 .part 残留（换版本后孤儿不堆积占盘）
-    _sweepStaleParts(dir, manifest.apk);
-    final part = File('$dir/${manifest.apk}.part');
-    final partMeta = File('$dir/${manifest.apk}.part.json');
+    _sweepStaleParts(dir, fileName);
+    final part = File('$dir/$fileName.part');
+    final partMeta = File('$dir/$fileName.part.json');
     // 断点评估：part 在 + 指纹符 + 小于预期大小 → 可续传；否则弃之整包重下
     var resumeFrom = 0;
     if (part.existsSync()) {

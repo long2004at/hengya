@@ -118,7 +118,7 @@ Write-Host "[4/5] wrote: $latestPath"
 # Ed25519 via openssl pkeyutl -rawin; signature base64 (no line breaks) is
 # injected as top-level "signature" field. New app builds REJECT unsigned
 # manifests, so this step must not be skipped on release machines.
-$signKeyPem = Join-Path $repoRoot 'secrets\update_signing_key.pem'
+$signKeyPem = if ($env:UPDATE_SIGN_KEY_PATH) { $env:UPDATE_SIGN_KEY_PATH } else { Join-Path $repoRoot 'secrets\update_signing_key.pem' }
 $openssl = $null
 $cmdOpenssl = Get-Command openssl -ErrorAction SilentlyContinue
 $candidates = @()

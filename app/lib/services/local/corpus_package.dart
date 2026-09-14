@@ -1133,6 +1133,11 @@ final (progressCreated, progressSynced) =
   /// 数据绝不随包覆盖；incoming/ 是手机自有上传队列；chunks.jsonl 为建库
   /// 中间产物。package.json 只作元数据不落盘。
 void _extractContent(String zipPath, Directory outDir) {
+    // 资源边界常量（zip bomb 防护，对齐 full_backup.dart 的防护策略）
+    const maxFileBytes = 2 * 1024 * 1024 * 1024; // 单文件 2GB
+    const maxTotalBytes = 8 * 1024 * 1024 * 1024; // 总计 8GB
+    const maxFiles = 10000;
+
     // 流式解码 + 逐文件流式落盘（整包 readAsBytes+decodeBytes 在 100MB+
     // 语料包上会 OOM 闪退——native 层杀进程，Dart try/catch 拦不住）。
     final arc = ZipDecoder().decodeStream(InputFileStream(zipPath));
@@ -1143,6 +1148,8 @@ void _extractContent(String zipPath, Directory outDir) {
     } else {
       prefix = ''; // validatePackage 已保证 corpus.db 在某形态下存在
     }
+    var fileCount = 0;
+    var totalBytes = 0;
     for (final e in arc.files) {
       final n = _normalizeEntryName(e.name)!; // validate 已拒非法路径
       if (!e.isFile) continue;
@@ -1166,10 +1173,26 @@ void _extractContent(String zipPath, Directory outDir) {
         continue;
       }
       if (_isJunkPath(rel)) continue;
+      // zip bomb 防护：文件数上限
+      fileCount++;
+      if (fileCount > maxFiles) {
+        throw CorpusPackageException('语料包文件数超限（上限 $maxFiles）');
+      }
       final dest = File('${outDir.path}/$rel');
       dest.parent.createSync(recursive: true);
       // 流式写盘，不经过内存（192MB corpus.db 整包进内存 = OOM）
       _streamEntryToFile(e, dest.path);
+      // zip bomb 防护：单文件 / 总大小上限
+      final written = dest.lengthSync();
+      if (written > maxFileBytes) {
+        throw CorpusPackageException(
+            '单文件解压后超限（$rel: ${written ~/ (1024 * 1024)} MB，上限 2 GB）');
+      }
+      totalBytes += written;
+      if (totalBytes > maxTotalBytes) {
+        throw CorpusPackageException(
+            '解压总大小超限（${totalBytes ~/ (1024 * 1024)} MB，上限 8 GB）');
+      }
     }
   }
 
