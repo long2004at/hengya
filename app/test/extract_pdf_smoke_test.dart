@@ -271,7 +271,10 @@ void main() {
     const srcRel =
         '../content/ppt_raw/exam/试卷与模拟题/2023年口腔助理医师试题（网友回忆版）.pdf';
     final src = File(srcRel);
-    expect(src.existsSync(), isTrue, reason: '源 PDF 缺失：$srcRel');
+    if (!src.existsSync()) {
+      print('SKIP: 源 PDF 缺失（私有课件不随公开仓库分发）：$srcRel');
+      return;
+    }
     expect(src.lengthSync(), g['source_size'], reason: '源 PDF 大小与 manifest 不符');
     expect(md5File(src.path), g['source_md5'],
         reason: '源 PDF md5 与 manifest 不符（源文件已被替换？）');
