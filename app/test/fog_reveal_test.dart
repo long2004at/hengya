@@ -14,13 +14,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hengya/widgets/fog_reveal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-Future<FogPeelController> pumpFog(
+Future<FogRevealController> pumpFog(
   WidgetTester tester, {
   Size size = const Size(400, 600),
   FogSheetMode sheetMode = FogSheetMode.fill,
   String answer = 'ANSWER',
 }) async {
-  final controller = FogPeelController();
+  final controller = FogRevealController();
   await tester.pumpWidget(
     MediaQuery(
       data: MediaQueryData(size: size),
@@ -51,7 +51,7 @@ void main() {
 
   testWidgets('上雾遮盖：雾层在位，答案文本被盖（雾层命中而非答案），擦雾追加笔画', (tester) async {
     final c = await pumpFog(tester);
-    expect(c.isFogged, true);
+    expect(c.isCleared, false); // 初始有雾
     expect(c.isCleared, false);
     // 雾层 opaque：点中心命中雾层手势（非 child 文本）——由 fog 层 Positioned.fill 兜住
     final center = tester.getCenter(find.byType(FogPeel));
@@ -141,7 +141,7 @@ void main() {
     expect(c.isCleared, true);
     await tester.pump();
     c.reset();
-    expect(c.isFogged, true);
+    expect(c.isCleared, false); // reset 重雾
     expect(c.phase, FogPhase.idle);
     expect(c.strokes, isEmpty);
     await tester.pump();

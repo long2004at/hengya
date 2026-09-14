@@ -1,5 +1,5 @@
 // 复习页 —— 核心学习循环（M1）
-// 流程：选科目 → 拉队列（50 张）→ 题干 · 主动回忆 → 翻面（答案+锚点+出处）
+// 流程：选科目 → 拉队列（50 张）→ 题干+答案（雾覆盖）→ 擦雾/掀页 → 四档评分
 //       → 四档评分（重来/困难/良好/简单）→ 下一张；离线评分自动入队补传（13.6）
 // 回炉入口：卡右上角（选原因 → 自由输入 → POST /rework → 卡出队列）
 // 离线韧性（问1+5）：
@@ -227,7 +227,7 @@ class ReviewSessionPage extends StatefulWidget {
 class _ReviewSessionPageState extends State<ReviewSessionPage> {
   List<FlashCard> _cards = [];
   int _index = 0;
-  bool _revealed = false;
+  // _revealed 已移除：答案始终显示（被雾覆盖），不再有翻面步骤
   bool _loading = true;
   String? _error;
   DateTime? _cacheAt; // 非 null = 队列来自离线缓存回退（断网冷启动续背）
@@ -235,7 +235,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
 
   // #12 雾气模式（2026-09-13）：翻面后答案被纸白暖雾覆盖，擦雾/掀页/评分
   // 清雾见 fog_reveal.dart；开关与纸片模式存 shared_preferences（默认关/盖满）
-  final FogPeelController _fog = FogPeelController();
+  final FogRevealController _fog = FogRevealController();
   bool _fogEnabled = false;
   bool _fogHug = false; // 纸片大小：false=盖满区域（默认），true=贴答案文字
 
@@ -288,6 +288,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
         _cacheAt = ApiClient.instance.cacheServedAt(
           CacheKeys.queue(widget.subjectId, 50),
         );
+        _revealedAt = DateTime.now(); // 答案进入即显示，计时从此刻开始
         _loading = false;
       });
     } on ApiException catch (e) {
@@ -333,7 +334,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
     if (mounted) {
       setState(() {
         _index++;
-        _revealed = false;
+        _fog.reset(); // 换卡重新上雾
         _revealedAt = DateTime.now();
       });
     }
@@ -370,7 +371,8 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
             if (mounted) {
               setState(() {
                 _index++;
-                _revealed = false;
+                _fog.reset();
+                _revealedAt = DateTime.now();
               });
               // #10②：duplicate=true 幂等重复（该卡已在回炉队列——多半在别处
               // 已提交过）——提示明确文案，不暴露内部 id；卡已出复习队列照常跳过
@@ -406,7 +408,8 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
             if (mounted) {
               setState(() {
                 _index++;
-                _revealed = false;
+                _fog.reset();
+                _revealedAt = DateTime.now();
               });
               TopToast.show(context, '已删除整卡', type: TopToastType.success);
             }
@@ -448,7 +451,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
           IconButton(
             tooltip: '回炉重造',
             icon: const Icon(Icons.restart_alt_outlined),
-            onPressed: _index < _cards.length && _revealed ? _rework : null,
+            onPressed: _index < _cards.length ? _rework : null,
           ),
         ],
       ),
@@ -511,7 +514,55 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
                 _fogHug ? FogSheetMode.hugText : FogSheetMode.fill,
             child: Text(
               card.back,
-              style: const TextStyle(fontSize: 16, height: 1.6),
+              style: const TextStyle(fontSize: 18, height: 1.6),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 12,
+          runSpacing: 4,
+          children: [
+            _MetaChip(icon: Icons.anchor, label: '锚点 ${card.anchor}'),
+            _MetaChip(icon: Icons.menu_book_outlined, label: card.source),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// 无雾卡面布局：题干 + 答案直接显示，锚点固定在卡片底部（不随内容滚动）
+  Widget _buildCardNormal(FlashCard card, ColorScheme scheme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _TypeChip(type: card.type),
+            const Spacer(),
+            Text(
+              '#${_index + 1}/${_cards.length}',
+              style: TextStyle(fontSize: 12, color: scheme.outline),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Text(
+          card.front,
+          style: const TextStyle(
+            fontSize: 20,
+            height: 1.5,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 24),
+        const Divider(),
+        const SizedBox(height: 12),
+        Expanded(
+          child: SingleChildScrollView(
+            child: Text(
+              card.back,
+              style: const TextStyle(fontSize: 18, height: 1.6),
             ),
           ),
         ),
@@ -544,140 +595,63 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
             child: OfflineDataBar(savedAt: _cacheAt),
           ),
         Expanded(
-          child: GestureDetector(
-            onTap: () {
-              if (!_revealed) {
-                _fog.reset(); // 每次翻面重新上雾（#12）
-                setState(() {
-                  _revealed = true;
-                  _revealedAt = DateTime.now();
-                });
-              }
-            },
-            child: Card(
-              margin: const EdgeInsets.all(16),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                // #12（2026-09-13）：雾激活时答案区**移出滚动容器**——
-                // FogPeel 需有界约束（LayoutBuilder 无界高度会静默退化为
-                // 无雾），雾正好盖住答案的可视首屏，纸角可达；清雾后切回
-                // 滚动布局（整卡可滚）。方案 A 的落地形态。
-                child: (_revealed && _fogEnabled && _fog.isFogged)
-                    ? _buildCardFogged(card, scheme)
-                    : SingleChildScrollView(
-                        physics: null,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                _TypeChip(type: card.type),
-                                const Spacer(),
-                                Text(
-                                  '#${_index + 1}/${_cards.length}',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: scheme.outline,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              card.front,
-                              style: const TextStyle(
-                                fontSize: 20,
-                                height: 1.5,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            if (!_revealed)
-                              Center(
-                                child: Text(
-                                  '想一想，点卡片翻面',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: scheme.outline,
-                                  ),
-                                ),
-                              ),
-                            if (_revealed) ...[
-                              const Divider(),
-                              const SizedBox(height: 12),
-                              Text(
-                                card.back,
-                                style:
-                                    const TextStyle(fontSize: 16, height: 1.6),
-                              ),
-                              const SizedBox(height: 16),
-                              Wrap(
-                                spacing: 12,
-                                runSpacing: 4,
-                                children: [
-                                  _MetaChip(
-                                    icon: Icons.anchor,
-                                    label: '锚点 ${card.anchor}',
-                                  ),
-                                  _MetaChip(
-                                    icon: Icons.menu_book_outlined,
-                                    label: card.source,
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-              ),
+          child: Card(
+            margin: const EdgeInsets.all(16),
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              // #12：雾激活时答案区始终包裹在 FogPeel 里（不再因 isFogged
+              // 切换布局导致锚点跳动）；无雾走 _buildCardNormal。
+              child: _fogEnabled
+                  ? _buildCardFogged(card, scheme)
+                  : _buildCardNormal(card, scheme),
             ),
           ),
         ),
-        if (_revealed)
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _RateButton(
-                      label: '重来',
-                      color: scheme.errorContainer,
-                      fg: scheme.onErrorContainer,
-                      onPressed: () => _rate(ReviewRating.again),
-                    ),
+        // 评分按钮始终显示（不再有翻面守门条件）
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _RateButton(
+                    label: '重来',
+                    color: scheme.errorContainer,
+                    fg: scheme.onErrorContainer,
+                    onPressed: () => _rate(ReviewRating.again),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _RateButton(
-                      label: '困难',
-                      color: scheme.tertiaryContainer,
-                      fg: scheme.onTertiaryContainer,
-                      onPressed: () => _rate(ReviewRating.hard),
-                    ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _RateButton(
+                    label: '困难',
+                    color: scheme.tertiaryContainer,
+                    fg: scheme.onTertiaryContainer,
+                    onPressed: () => _rate(ReviewRating.hard),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _RateButton(
-                      label: '良好',
-                      color: scheme.primaryContainer,
-                      fg: scheme.onPrimaryContainer,
-                      onPressed: () => _rate(ReviewRating.good),
-                    ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _RateButton(
+                    label: '良好',
+                    color: scheme.primaryContainer,
+                    fg: scheme.onPrimaryContainer,
+                    onPressed: () => _rate(ReviewRating.good),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _RateButton(
-                      label: '简单',
-                      color: scheme.secondaryContainer,
-                      fg: scheme.onSecondaryContainer,
-                      onPressed: () => _rate(ReviewRating.easy),
-                    ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _RateButton(
+                    label: '简单',
+                    color: scheme.secondaryContainer,
+                    fg: scheme.onSecondaryContainer,
+                    onPressed: () => _rate(ReviewRating.easy),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
+        ),
       ],
     );
   }
