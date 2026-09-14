@@ -223,13 +223,13 @@ class DataManager {
       scrub.execute("DELETE FROM settings WHERE key LIKE '%.apiKey'");
       scrub.execute('VACUUM');
     } catch (_) {
+      if (out.existsSync()) out.deleteSync();
+      throw DataManagerException('导出失败：密钥剥离异常，本次导出已取消');
+    } finally {
       try {
         scrub?.dispose();
       } catch (_) {}
-      if (out.existsSync()) out.deleteSync();
-      throw DataManagerException('导出失败：密钥剥离异常，本次导出已取消');
     }
-    scrub.dispose();
     return out.path;
   }
 

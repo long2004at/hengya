@@ -166,7 +166,7 @@ int? _statvfsFreeMb(String path) {
         int Function(Pointer<Utf8>, Pointer<Uint8>)
       >('statvfs');
   final cPath = path.toNativeUtf8();
-  final buf = calloc<Uint8>(128); // 覆盖 64/32 位 struct 全字段
+  final buf = calloc<Uint8>(256); // 覆盖 64/32 位 struct 全字段（含保留字段余量）
   try {
     if (statvfs(cPath, buf) != 0) return null;
     final is64 = sizeOf<IntPtr>() == 8;

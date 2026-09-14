@@ -3,6 +3,15 @@
 
 enum ReviewRating { again, hard, good, easy }
 
+/// 安全 enum 解析：未知值返回 null 而非抛 ArgumentError。
+T? _tryEnum<T extends Enum>(List<T> values, String? name) {
+  if (name == null) return null;
+  for (final v in values) {
+    if (v.name == name) return v;
+  }
+  return null;
+}
+
 /// 单次复习记录（App 本地缓存 → 联网补传 POST /review/answer）
 class ReviewLog {
   const ReviewLog({
@@ -37,7 +46,8 @@ class ReviewLog {
   factory ReviewLog.fromJson(Map<String, dynamic> json) => ReviewLog(
         cardId: json['cardId'] as String,
         subjectId: json['subjectId'] as String,
-        rating: ReviewRating.values.byName(json['rating'] as String),
+        rating: _tryEnum(ReviewRating.values, json['rating'] as String?) ??
+            ReviewRating.again,
         reviewedAt: DateTime.parse(json['reviewedAt'] as String),
         latencyMs: json['latencyMs'] as int?,
         offlineQueued: json['offlineQueued'] as bool? ?? false,

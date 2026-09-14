@@ -210,6 +210,9 @@ class Db {
     String column,
     String ddl,
   ) {
+    assert(RegExp(r'^[a-zA-Z_]\w*$').hasMatch(table), 'unsafe table: $table');
+    assert(
+        RegExp(r'^[a-zA-Z_]\w*$').hasMatch(column), 'unsafe column: $column');
     final cols = db
         .select('PRAGMA table_info($table)')
         .map((r) => r['name'] as String)
