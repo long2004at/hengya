@@ -930,7 +930,7 @@ void main() {
     db.insertReviewLog(
       cardId: 'del-active-001',
       subjectId: 'delsubj',
-      rating: ReviewRating.again,
+      rating: ReviewRating.blackout,
       reviewedAt: DateTime.parse('2026-09-13T10:00:00'),
       offlineQueued: false,
       stateBefore: SchedulingState.newCard,

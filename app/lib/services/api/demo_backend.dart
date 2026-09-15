@@ -808,7 +808,7 @@ class DemoBackend {
       for (final raw in items) {
         final item = Map<String, dynamic>.from(raw as Map);
         final cardId = item['cardId'] as String;
-        final rating = ReviewRating.values.byName(item['rating'] as String);
+        final rating = ReviewRating.parse(item['rating'] as String);
         final reviewedAt =
             DateTime.tryParse(item['reviewedAt'] as String? ?? '') ??
             DateTime.now();
@@ -1234,7 +1234,11 @@ class DemoBackend {
                 )
                 .toList();
             final total = recent.length;
-            final again = recent.where((r) => r['rating'] == 'again').length;
+            // 遗忘口径与 db.dart 一致：旧 'again' + 新 blackout/foggy
+            final again = recent
+                .where((r) => const ['again', 'blackout', 'foggy']
+                    .contains(r['rating']))
+                .length;
             return {
               'days': d,
               'total': total,
@@ -1254,7 +1258,11 @@ class DemoBackend {
     final recent = _reviewLogs
         .where((r) => DateTime.parse(r['reviewedAt'] as String).isAfter(since))
         .toList();
-    final again = recent.where((r) => r['rating'] == 'again').length;
+    // 遗忘口径与 db.dart 一致：旧 'again' + 新 blackout/foggy
+    final again = recent
+        .where((r) =>
+            const ['again', 'blackout', 'foggy'].contains(r['rating']))
+        .length;
     return {
       'days': 7,
       'totalReviews': recent.length,

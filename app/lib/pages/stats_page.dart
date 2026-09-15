@@ -146,7 +146,7 @@ class _StatsPageState extends State<StatsPage> {
 }
 
 /// 保留率卡（近1天 / 近7天 / 近30天三档窗口）
-/// 口径：窗口内 rating ≠ again 的复习占比（again 视为遗忘）
+/// 口径：窗口内 rating 不属于遗忘档（blackout/foggy，含旧库 'again'）的复习占比
 class _RetentionCard extends StatelessWidget {
   const _RetentionCard({required this.retention, required this.scheme});
 

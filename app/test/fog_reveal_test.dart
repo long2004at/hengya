@@ -187,4 +187,28 @@ void main() {
     final prefs2 = await SharedPreferences.getInstance();
     expect(prefs2.getBool('hengya.review.fog'), true);
   });
+
+  testWidgets('v3 性能策略：静态态保留 BackdropFilter 真模糊，翻页动画态移除', (tester) async {
+    final c = await pumpFog(tester);
+    // 静态（idle/erasing）：BackdropFilter 在位（真模糊遮盖）
+    expect(find.byType(BackdropFilter), findsOneWidget,
+        reason: '静态态必须保留真模糊层');
+
+    // 拖纸角进入 peeling → 切换为不透明渐变遮罩，BackdropFilter 移除
+    final corner = tester.getBottomRight(find.byType(FogPeel));
+    final gesture = await tester.startGesture(corner - const Offset(20, 20));
+    await tester.pump();
+    await gesture.moveBy(const Offset(-60, -60));
+    await tester.pump();
+    expect(c.isPeeling, true);
+    expect(find.byType(BackdropFilter), findsNothing,
+        reason: '翻页动画态不应有 BackdropFilter（每帧重算开销）');
+
+    // 弹回结束回到静态 → BackdropFilter 恢复
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(c.phase, FogPhase.idle);
+    expect(find.byType(BackdropFilter), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }

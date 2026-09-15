@@ -108,22 +108,22 @@ Future<String> writeSyntheticSnapshot(String dirPath) async {
 
     // ── 12 复习日志：相对 now 整日回退（-1d/-2d/-3d/-5d）──
     // 整日 Duration 保证「昨天」恒有日志（当前时刻无论早晚，now-24h 必落
-    // 在昨日）——streak 断言永不失效；四档评分齐备（again/hard/good/easy）
-    // 供保留率/热力图有料。
+    // 在昨日）——streak 断言永不失效；六档评分齐备（blackout/struggled/
+    // smooth/instant）供保留率/热力图有料。
     const logDays = [1, 1, 1, 1, 1, 2, 2, 2, 3, 3, 5, 5];
-    const logRatings = [
-      ReviewRating.good,
-      ReviewRating.good,
-      ReviewRating.hard,
-      ReviewRating.good,
-      ReviewRating.easy,
-      ReviewRating.again,
-      ReviewRating.good,
-      ReviewRating.hard,
-      ReviewRating.good,
-      ReviewRating.good,
-      ReviewRating.easy,
-      ReviewRating.good,
+    final logRatings = [
+      ReviewRating.smooth,
+      ReviewRating.smooth,
+      ReviewRating.struggled,
+      ReviewRating.smooth,
+      ReviewRating.instant,
+      ReviewRating.blackout,
+      ReviewRating.smooth,
+      ReviewRating.struggled,
+      ReviewRating.smooth,
+      ReviewRating.smooth,
+      ReviewRating.instant,
+      ReviewRating.smooth,
     ];
     for (var i = 0; i < logDays.length; i++) {
       final cardId = activeIds[i % activeIds.length];

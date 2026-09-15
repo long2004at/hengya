@@ -865,19 +865,19 @@ class Db {
         .toIso8601String();
     final byDay = _db.select(
       "SELECT substr(reviewed_at, 1, 10) AS day, COUNT(*) AS n, "
-      "SUM(CASE WHEN rating = 'again' THEN 1 ELSE 0 END) AS again_n "
+      "SUM(CASE WHEN rating IN ('again','blackout','foggy') THEN 1 ELSE 0 END) AS again_n "
       'FROM review_logs WHERE reviewed_at >= ? GROUP BY day ORDER BY day',
       [since],
     );
     final bySubject = _db.select(
       'SELECT subject_id, COUNT(*) AS n, '
-      "SUM(CASE WHEN rating = 'again' THEN 1 ELSE 0 END) AS again_n "
+      "SUM(CASE WHEN rating IN ('again','blackout','foggy') THEN 1 ELSE 0 END) AS again_n "
       'FROM review_logs WHERE reviewed_at >= ? GROUP BY subject_id',
       [since],
     );
     final totalRow = _db.select(
       'SELECT COUNT(*) AS n, '
-      "SUM(CASE WHEN rating = 'again' THEN 1 ELSE 0 END) AS again_n "
+      "SUM(CASE WHEN rating IN ('again','blackout','foggy') THEN 1 ELSE 0 END) AS again_n "
       'FROM review_logs WHERE reviewed_at >= ?',
       [since],
     ).first;
@@ -970,9 +970,10 @@ class Db {
 
   /// 保留率统计（App 统计页「保留率」模块数据源）
   ///
-  /// 口径：近 N 天窗口内全部复习记录中，"当场回忆成功"（rating ≠ again）
-  /// 的比例 = (total - again) / total。FSRS 语境下 again 表示遗忘，
-  /// 其余三档（hard/good/easy）均视为保留成功。
+  /// 口径：近 N 天窗口内全部复习记录中，"当场回忆成功"（rating ∉ 遗忘档）
+  /// 的比例 = (total - again) / total。6 级评分下遗忘档为
+  /// blackout（=旧 again）与 foggy，二者均计入遗忘；旧库遗留的 'again'
+  /// 字符串同口径兼容（rating IN ('again','blackout','foggy')）。
   /// 窗口固定 [近1天, 近7天, 近30天]；无复习记录时 rate 为 null（App 显示"暂无数据"）。
   Map<String, dynamic> retentionStats() {
     return {
@@ -984,7 +985,7 @@ class Db {
                 .toIso8601String();
             final row = _db.select(
               'SELECT COUNT(*) AS total, '
-              "SUM(CASE WHEN rating = 'again' THEN 1 ELSE 0 END) AS again_n "
+              "SUM(CASE WHEN rating IN ('again','blackout','foggy') THEN 1 ELSE 0 END) AS again_n "
               'FROM review_logs WHERE reviewed_at >= ?',
               [since],
             ).first;

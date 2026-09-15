@@ -31,6 +31,11 @@ android {
     }
 
     buildTypes {
+        // debug 加包名后缀：与正式版共存（独立数据目录，需重新导一次语料库）
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             // 签名（与历史所有版本同一密钥，Android 禁止跨签名覆盖安装）：
             // · CI 发版：android/key.properties（由 CI 从 Secret 生成，绝不入库）

@@ -1,7 +1,28 @@
 // 复习记录与评分模型
-// 评分四档（Anki 语义）：again 重来 / hard 困难 / good 良好 / easy 简单
 
-enum ReviewRating { again, hard, good, easy }
+/// 6 级评分（SuperMemo 0-5 映射）：
+///   0 blackout  — 完全忘记（深红）
+///   1 foggy     — 只记得见过（橙红）
+///   2 struggled — 费力回忆（橙黄）
+///   3 hesitant  — 有点犹豫（黄绿）
+///   4 smooth    — 比较顺畅（浅绿）
+///   5 instant   — 秒答/完全掌握（翠绿）
+enum ReviewRating {
+  blackout, foggy, struggled, hesitant, smooth, instant;
+
+  /// 旧 4 级字符串 → 新 6 级映射（DB 兼容）
+  static ReviewRating fromLegacyName(String name) => switch (name) {
+    'again' => ReviewRating.blackout,
+    'hard' => ReviewRating.struggled,
+    'good' => ReviewRating.smooth,
+    'easy' => ReviewRating.instant,
+    _ => ReviewRating.blackout,
+  };
+
+  /// 兼容旧字符串：先按新枚举名解析，匹配不到再走 legacy 映射
+  static ReviewRating parse(String name) =>
+      _tryEnum(ReviewRating.values, name) ?? fromLegacyName(name);
+}
 
 /// 安全 enum 解析：未知值返回 null 而非抛 ArgumentError。
 T? _tryEnum<T extends Enum>(List<T> values, String? name) {
@@ -47,7 +68,9 @@ class ReviewLog {
         cardId: json['cardId'] as String,
         subjectId: json['subjectId'] as String,
         rating: _tryEnum(ReviewRating.values, json['rating'] as String?) ??
-            ReviewRating.again,
+            (json['rating'] is String
+                ? ReviewRating.fromLegacyName(json['rating'] as String)
+                : ReviewRating.blackout),
         reviewedAt: DateTime.parse(json['reviewedAt'] as String),
         latencyMs: json['latencyMs'] as int?,
         offlineQueued: json['offlineQueued'] as bool? ?? false,

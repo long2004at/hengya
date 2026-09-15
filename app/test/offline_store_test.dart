@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared/hengya_shared.dart';
 
 void main() {
-  ReviewLog log(String cardId, {String rating = 'good'}) => ReviewLog(
+  ReviewLog log(String cardId, {String rating = 'smooth'}) => ReviewLog(
         cardId: cardId,
         subjectId: 'oms',
         rating: ReviewRating.values.byName(rating),
@@ -47,11 +47,11 @@ void main() {
 
   test('队列条目结构完整（cardId/rating/reviewedAt/offlineQueued）', () async {
     final store = InMemoryAnswerStore();
-    await store.append({...log('c9', rating: 'again').toJson(),
+    await store.append({...log('c9', rating: 'blackout').toJson(),
       'offlineQueued': true});
     final item = store.drainPreview().single;
     expect(item['cardId'], 'c9');
-    expect(item['rating'], 'again');
+    expect(item['rating'], 'blackout');
     expect(item['offlineQueued'], isTrue);
     expect(item['reviewedAt'], isNotNull);
   });

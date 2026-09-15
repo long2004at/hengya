@@ -651,10 +651,21 @@ class LocalBackend {
           continue;
         }
         final rawRating = item['rating'];
-        final ratingMatches = ReviewRating.values.where(
-          (e) => e.name == rawRating,
-        );
-        if (ratingMatches.isEmpty) {
+        // 先按新 6 级枚举名解析，匹配不到再走旧 4 级 legacy 映射（DB 兼容）
+        ReviewRating? rating;
+        if (rawRating is String) {
+          for (final e in ReviewRating.values) {
+            if (e.name == rawRating) {
+              rating = e;
+              break;
+            }
+          }
+          if (rating == null &&
+              const ['again', 'hard', 'good', 'easy'].contains(rawRating)) {
+            rating = ReviewRating.fromLegacyName(rawRating);
+          }
+        }
+        if (rating == null) {
           skipped++;
           results.add({
             'cardId': cardId,
@@ -663,7 +674,6 @@ class LocalBackend {
           });
           continue;
         }
-        final rating = ratingMatches.first;
         final rawReviewedAt = item['reviewedAt'];
         final reviewedAt = rawReviewedAt is String
             ? (DateTime.tryParse(rawReviewedAt) ?? DateTime.now())

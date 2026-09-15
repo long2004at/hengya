@@ -1,6 +1,6 @@
-// 复习页 —— 核心学习循环（M1）
-// 流程：选科目 → 拉队列（50 张）→ 题干+答案（雾覆盖）→ 擦雾/掀页 → 四档评分
-//       → 四档评分（重来/困难/良好/简单）→ 下一张；离线评分自动入队补传（13.6）
+// 复习页 —— 核心学习循环（M1）·签名级卡片堆叠界面
+// 流程：选科目 → 拉队列（50 张）→ 纸质卡片堆叠 → 题干+答案（雾覆盖）→ 擦雾/掀页
+//       → 6 档评分滑轨（blackout/foggy/struggled/hesitant/smooth/instant）→ 下一张
 // 回炉入口：卡右上角（选原因 → 自由输入 → POST /rework → 卡出队列）
 // 离线韧性（问1+5）：
 //   · 科目列表/复习队列带缓存回退——断网冷启动可继续背（评分仍走既有离线
@@ -16,6 +16,7 @@ import 'package:shared/hengya_shared.dart';
 
 import '../services/api/api_client.dart';
 import '../widgets/fog_reveal.dart';
+import '../widgets/rating_slider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api/local_cache.dart';
 import '../services/review/session_store.dart';
@@ -23,13 +24,34 @@ import '../widgets/offline_data_bar.dart';
 import '../widgets/reason_action_dialog.dart';
 import '../widgets/top_toast.dart';
 
+// ─── 纸质美学色板 ───
+const _kPageBg = Color(0xFFFAF8F5); // 灰暖底色
+const _kCardColor = Color(0xFFF5F0E6); // 暖米色纸面
+const _kCardColorL2 = Color(0xFFEDE8DD); // 第 2 层卡片（略暗）
+const _kCardColorL3 = Color(0xFFE5E0D5); // 第 3 层卡片（更暗）
+const _kTextPrimary = Color(0xFF2C2C2C); // 题目文字（比纯黑柔和）
+const _kTextSecondary = Color(0xFF3A3A3A); // 答案文字
+const _kTextMuted = Color(0xFF999999); // 锚点/来源
+const _kChipBg = Color(0xFFEDE8DD); // 题型标签底色
+const _kChipText = Color(0xFF7A7060); // 题型标签文字
+
 class ReviewPage extends StatelessWidget {
   const ReviewPage({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('复习')),
+      backgroundColor: _kPageBg,
+      appBar: AppBar(
+        title: const Text(
+          '复习',
+          style: TextStyle(fontWeight: FontWeight.w600),
+        ),
+        backgroundColor: _kPageBg,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+      ),
       body: const _SubjectPicker(),
     );
   }
@@ -212,7 +234,7 @@ class _OfflineHint extends StatelessWidget {
   }
 }
 
-// ---------------- 复习会话 ----------------
+// ─────────────── 复习会话 ───────────────
 
 /// 复习会话页：/review-home/:subjectId
 class ReviewSessionPage extends StatefulWidget {
@@ -224,24 +246,34 @@ class ReviewSessionPage extends StatefulWidget {
   State<ReviewSessionPage> createState() => _ReviewSessionPageState();
 }
 
-class _ReviewSessionPageState extends State<ReviewSessionPage> {
+class _ReviewSessionPageState extends State<ReviewSessionPage>
+    with SingleTickerProviderStateMixin {
   List<FlashCard> _cards = [];
   int _index = 0;
-  // _revealed 已移除：答案始终显示（被雾覆盖），不再有翻面步骤
   bool _loading = true;
   String? _error;
-  DateTime? _cacheAt; // 非 null = 队列来自离线缓存回退（断网冷启动续背）
+  DateTime? _cacheAt;
   DateTime _revealedAt = DateTime.now();
 
-  // #12 雾气模式（2026-09-13）：翻面后答案被纸白暖雾覆盖，擦雾/掀页/评分
-  // 清雾见 fog_reveal.dart；开关与纸片模式存 shared_preferences（默认关/盖满）
+  // #12 雾气模式
   final FogRevealController _fog = FogRevealController();
   bool _fogEnabled = false;
-  bool _fogHug = false; // 纸片大小：false=盖满区域（默认），true=贴答案文字
+  bool _fogHug = false;
+
+  // 换卡动画
+  late final AnimationController _cardAnim;
+  bool _animatingOut = false;
+
+  // 防连点
+  bool _rating = false;
 
   @override
   void initState() {
     super.initState();
+    _cardAnim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 350),
+    );
     _load();
     _loadFogEnabled();
     _fog.addListener(_onFogChanged);
@@ -256,18 +288,19 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
         _fogHug = prefs.getBool('hengya.review.fog.hug') ?? false;
       });
     } catch (_) {
-      // 测试宿主无 prefs 插件/读取失败 → 默认关（功能优雅缺席）
+      // 测试宿主无 prefs 插件/读取失败 → 默认关
     }
   }
 
   void _onFogChanged() {
-    if (mounted) setState(() {}); // 雾状态驱动滚动锁/雾层重绘
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
     _fog.removeListener(_onFogChanged);
     _fog.dispose();
+    _cardAnim.dispose();
     super.dispose();
   }
 
@@ -277,8 +310,6 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
       _error = null;
     });
     try {
-      // 拉取成功 → api_client 异步把队列 JSON 落盘（复习队列持久化）；
-      // 断网 → 透明回退同一批卡，冷启动也能继续背
       final cards = await ApiClient.instance.fetchQueue(
         widget.subjectId,
         limit: 50,
@@ -288,7 +319,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
         _cacheAt = ApiClient.instance.cacheServedAt(
           CacheKeys.queue(widget.subjectId, 50),
         );
-        _revealedAt = DateTime.now(); // 答案进入即显示，计时从此刻开始
+        _revealedAt = DateTime.now();
         _loading = false;
       });
     } on ApiException catch (e) {
@@ -299,16 +330,19 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
     }
   }
 
-  /// 防连点：await 网络往返期间四档按钮仍在屏（remote 慢网必现连点），
-  /// 无重入保护时同一张卡会提交 N 条评分、FSRS 调度推进 N 次——
-  /// 直接造成「界面显示与库不对齐」。评分后乐观推进（先走 UI 再补传），
-  /// 4xx 仍按原设计不阻塞学习循环（仅气泡提示）。
-  bool _rating = false;
+  // ─── 评分映射 ───
+  ReviewRating _levelToRating(int level) => ReviewRating.values[level];
 
   Future<void> _rate(ReviewRating rating) async {
     if (_rating || _index >= _cards.length) return;
     _rating = true;
-    _fog.markCleared(); // #12：评分=清雾+评分一步完成（雾未擦完也可直接评）
+    _fog.markCleared(); // #12：评分=清雾+评分一步完成
+
+    // 换卡飞出动画
+    setState(() => _animatingOut = true);
+    await _cardAnim.forward(from: 0);
+    if (!mounted) return;
+
     final card = _cards[_index];
     final latency = DateTime.now().difference(_revealedAt).inMilliseconds;
     final log = ReviewLog(
@@ -321,9 +355,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
     try {
       await ApiClient.instance.submitAnswer(log);
     } on ApiException {
-      // 4xx 真错误：不阻塞学习循环，直接下一张
       if (mounted) {
-        // 2026-09-06：轻提示统一顶部气泡（快速淡化 + 底色随机氛围），替换灰色 SnackBar
         TopToast.show(
           context,
           '评分未受理（${card.front.characters.take(12)}…）',
@@ -334,18 +366,16 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
     if (mounted) {
       setState(() {
         _index++;
-        _fog.reset(); // 换卡重新上雾
+        _fog.reset();
         _revealedAt = DateTime.now();
+        _animatingOut = false;
       });
     }
     _rating = false;
-    // P1 语义保留：联网恢复后立即追平离线积压（原为每次评分前置 await，
-    // 现改评分后 fire-and-forget——不拖慢 UI 推进；flush 内部自捕获网络异常）
     unawaited(ApiClient.instance.flushPendingAnswers());
   }
 
-  // 回炉（与待审核池拒绝/题库详情回炉共用 ReasonActionDialog，强绑定同一版式）
-  // #9：底部面板承载（isScrollControlled + viewInsets 键盘安全，见组件头注释）
+  // 回炉（与待审核池拒绝/题库详情回炉共用 ReasonActionDialog）
   void _rework() {
     final card = _cards[_index];
     showModalBottomSheet<void>(
@@ -374,8 +404,6 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
                 _fog.reset();
                 _revealedAt = DateTime.now();
               });
-              // #10②：duplicate=true 幂等重复（该卡已在回炉队列——多半在别处
-              // 已提交过）——提示明确文案，不暴露内部 id；卡已出复习队列照常跳过
               if (res['duplicate'] == true) {
                 TopToast.show(
                   context,
@@ -395,8 +423,6 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
             }
           }
         },
-        // 删除整卡（2026-09-13）：active 卡物理删除（含学习记录），理由随
-        // 删除进日志；删除后卡出会话（同回炉跳过语义）
         deleteLabel: '删除整卡（含学习记录，不可恢复）',
         onDelete: (reason, note) async {
           try {
@@ -428,15 +454,25 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  BUILD
+  // ═══════════════════════════════════════════════════════════════
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    // 待补传角标：SessionStore 由 app.dart 经 ChangeNotifierProvider 注入
     final pending = context.watch<SessionStore>().pendingCount;
 
     return Scaffold(
+      backgroundColor: _kPageBg,
       appBar: AppBar(
-        title: const Text('复习'),
+        title: const Text(
+          '复习',
+          style: TextStyle(fontWeight: FontWeight.w600),
+        ),
+        backgroundColor: _kPageBg,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
         actions: [
           if (pending > 0)
             Padding(
@@ -458,43 +494,192 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-          // 错误态补实「下拉刷新」交互（原文案称可下拉，此前并无 RefreshIndicator）
-          ? RefreshIndicator(
-              onRefresh: _load,
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                children: [
-                  const SizedBox(height: 160),
-                  _OfflineHint(error: _error!),
-                ],
-              ),
-            )
-          : _cards.isEmpty
-          ? const _EmptyState()
-          : _index >= _cards.length
-          ? const _DoneState()
-          : _buildCard(scheme),
+              ? RefreshIndicator(
+                  onRefresh: _load,
+                  child: ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: [
+                      const SizedBox(height: 160),
+                      _OfflineHint(error: _error!),
+                    ],
+                  ),
+                )
+              : _cards.isEmpty
+                  ? const _EmptyState()
+                  : _index >= _cards.length
+                      ? const _DoneState()
+                      : _buildSession(),
     );
   }
 
-  /// #12 雾激活时的卡面布局：答案区（FogPeel）用 Expanded 占据剩余空间
-  /// ——约束有界（滚动容器内是无界高度，FogPeel 会静默退化为无雾）；
-  /// 雾盖住答案可视首屏，纸角可达；长答案超出部分在掀页/评分前不可见
-  /// （方案 A：掀开解锁滚动后由非雾布局接管）。
-  Widget _buildCardFogged(FlashCard card, ColorScheme scheme) {
+  /// 完整会话布局：进度条 + 卡片堆叠 + 评分滑轨
+  Widget _buildSession() {
+    return Column(
+      children: [
+        // ── 圆角渐变进度条 ──
+        _buildProgressBar(),
+        // 离线缓存回退提示条
+        if (_cacheAt != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: OfflineDataBar(savedAt: _cacheAt),
+          ),
+        // ── 卡片堆叠区 ──
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(0, 8, 0, 0),
+            child: _buildCardStack(),
+          ),
+        ),
+        // ── 评分滑轨 ──
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
+            child: RatingSlider(
+              onRated: (level) => _rate(_levelToRating(level)),
+              enabled: !_rating && _index < _cards.length,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 渐变圆角进度条（红 → 绿）
+  Widget _buildProgressBar() {
+    final progress = _cards.isEmpty ? 0.0 : (_index + 1) / _cards.length;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        height: 3,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(1.5),
+          color: const Color(0x15000000),
+        ),
+        child: FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: progress.clamp(0.0, 1.0),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(1.5),
+              gradient: const LinearGradient(
+                colors: [Color(0xFFE57373), Color(0xFF66BB6A)],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─── 卡片堆叠 ───
+
+  Widget _buildCardStack() {
+    final remaining = _cards.length - _index;
+    final layers = remaining.clamp(0, 3);
+
+    return Stack(
+      alignment: Alignment.topCenter,
+      children: [
+        // 从底层到顶层构建
+        for (int i = layers - 1; i >= 0; i--)
+          if (i > 0)
+            // 底层影子卡
+            Transform.translate(
+              offset: Offset(0, -i * 4.0),
+              child: Transform.scale(
+                scale: 1.0 - i * 0.03,
+                alignment: Alignment.topCenter,
+                child: _buildShadowCard(i),
+              ),
+            )
+          else
+            // 顶层：交互卡片（带飞出动画）
+            AnimatedBuilder(
+              animation: _cardAnim,
+              builder: (context, child) {
+                final t = _animatingOut ? _cardAnim.value : 0.0;
+                return Transform.translate(
+                  offset: Offset(-t * 300, -t * 40),
+                  child: Opacity(
+                    opacity: (1.0 - t).clamp(0.0, 1.0),
+                    child: child,
+                  ),
+                );
+              },
+              child: _buildTopCard(),
+            ),
+      ],
+    );
+  }
+
+  /// 底层影子卡片壳（纯装饰，无内容）
+  Widget _buildShadowCard(int layer) {
+    final color = layer == 2 ? _kCardColorL3 : _kCardColorL2;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      height: double.infinity,
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+        border: Border.all(
+          color: const Color(0x12000000),
+          width: 0.5,
+        ),
+      ),
+    );
+  }
+
+  /// 顶层完整交互卡片
+  Widget _buildTopCard() {
+    final card = _cards[_index];
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      decoration: BoxDecoration(
+        color: _kCardColor,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.10),
+            blurRadius: 20,
+            offset: const Offset(0, 6),
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+        border: Border.all(
+          color: const Color(0x12000000),
+          width: 0.5,
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: _fogEnabled
+              ? _buildCardFogged(card)
+              : _buildCardNormal(card),
+        ),
+      ),
+    );
+  }
+
+  /// 雾激活时的卡面布局
+  Widget _buildCardFogged(FlashCard card) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            _TypeChip(type: card.type),
-            const Spacer(),
-            Text(
-              '#${_index + 1}/${_cards.length}',
-              style: TextStyle(fontSize: 12, color: scheme.outline),
-            ),
-          ],
-        ),
+        _buildCardHeader(card),
         const SizedBox(height: 16),
         Text(
           card.front,
@@ -502,11 +687,13 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
             fontSize: 20,
             height: 1.5,
             fontWeight: FontWeight.w500,
+            color: _kTextPrimary,
           ),
         ),
         const SizedBox(height: 24),
-        const Divider(),
-        const SizedBox(height: 12),
+        // 极细渐变分隔线（从中心向两端淡出）
+        _buildSoftDivider(),
+        const SizedBox(height: 16),
         Expanded(
           child: FogPeel(
             controller: _fog,
@@ -514,38 +701,26 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
                 _fogHug ? FogSheetMode.hugText : FogSheetMode.fill,
             child: Text(
               card.back,
-              style: const TextStyle(fontSize: 18, height: 1.6),
+              style: const TextStyle(
+                fontSize: 18,
+                height: 1.6,
+                color: _kTextSecondary,
+              ),
             ),
           ),
         ),
-        const SizedBox(height: 16),
-        Wrap(
-          spacing: 12,
-          runSpacing: 4,
-          children: [
-            _MetaChip(icon: Icons.anchor, label: '锚点 ${card.anchor}'),
-            _MetaChip(icon: Icons.menu_book_outlined, label: card.source),
-          ],
-        ),
+        const SizedBox(height: 12),
+        _buildMetaRow(card),
       ],
     );
   }
 
-  /// 无雾卡面布局：题干 + 答案直接显示，锚点固定在卡片底部（不随内容滚动）
-  Widget _buildCardNormal(FlashCard card, ColorScheme scheme) {
+  /// 无雾卡面布局
+  Widget _buildCardNormal(FlashCard card) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            _TypeChip(type: card.type),
-            const Spacer(),
-            Text(
-              '#${_index + 1}/${_cards.length}',
-              style: TextStyle(fontSize: 12, color: scheme.outline),
-            ),
-          ],
-        ),
+        _buildCardHeader(card),
         const SizedBox(height: 16),
         Text(
           card.front,
@@ -553,109 +728,78 @@ class _ReviewSessionPageState extends State<ReviewSessionPage> {
             fontSize: 20,
             height: 1.5,
             fontWeight: FontWeight.w500,
+            color: _kTextPrimary,
           ),
         ),
         const SizedBox(height: 24),
-        const Divider(),
-        const SizedBox(height: 12),
+        _buildSoftDivider(),
+        const SizedBox(height: 16),
         Expanded(
           child: SingleChildScrollView(
             child: Text(
               card.back,
-              style: const TextStyle(fontSize: 18, height: 1.6),
+              style: const TextStyle(
+                fontSize: 18,
+                height: 1.6,
+                color: _kTextSecondary,
+              ),
             ),
           ),
         ),
-        const SizedBox(height: 16),
-        Wrap(
-          spacing: 12,
-          runSpacing: 4,
-          children: [
-            _MetaChip(icon: Icons.anchor, label: '锚点 ${card.anchor}'),
-            _MetaChip(icon: Icons.menu_book_outlined, label: card.source),
-          ],
+        const SizedBox(height: 12),
+        _buildMetaRow(card),
+      ],
+    );
+  }
+
+  /// 卡片头部：题型标签 + 进度
+  Widget _buildCardHeader(FlashCard card) {
+    return Row(
+      children: [
+        _TypeChip(type: card.type),
+        const Spacer(),
+        Text(
+          '#${_index + 1}/${_cards.length}',
+          style: const TextStyle(fontSize: 12, color: _kTextMuted),
         ),
       ],
     );
   }
 
-  Widget _buildCard(ColorScheme scheme) {
-    final card = _cards[_index];
-    return Column(
+  /// 题目 / 答案之间的渐变分隔线
+  Widget _buildSoftDivider() {
+    return Container(
+      height: 0.5,
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            Color(0x00000000),
+            Color(0x18000000),
+            Color(0x18000000),
+            Color(0x00000000),
+          ],
+          stops: [0.0, 0.3, 0.7, 1.0],
+        ),
+      ),
+    );
+  }
+
+  /// 锚点/来源区（FogPeel 外面，卡片底部）
+  Widget _buildMetaRow(FlashCard card) {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 4,
       children: [
-        LinearProgressIndicator(
-          value: (_index + 1) / _cards.length,
-          minHeight: 3,
-          backgroundColor: scheme.surfaceContainerHighest,
-        ),
-        // 离线缓存回退提示条（队列来自缓存时可见——断网冷启动续背的明确标记）
-        if (_cacheAt != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: OfflineDataBar(savedAt: _cacheAt),
-          ),
-        Expanded(
-          child: Card(
-            margin: const EdgeInsets.all(16),
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              // #12：雾激活时答案区始终包裹在 FogPeel 里（不再因 isFogged
-              // 切换布局导致锚点跳动）；无雾走 _buildCardNormal。
-              child: _fogEnabled
-                  ? _buildCardFogged(card, scheme)
-                  : _buildCardNormal(card, scheme),
-            ),
-          ),
-        ),
-        // 评分按钮始终显示（不再有翻面守门条件）
-        SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _RateButton(
-                    label: '重来',
-                    color: scheme.errorContainer,
-                    fg: scheme.onErrorContainer,
-                    onPressed: () => _rate(ReviewRating.again),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _RateButton(
-                    label: '困难',
-                    color: scheme.tertiaryContainer,
-                    fg: scheme.onTertiaryContainer,
-                    onPressed: () => _rate(ReviewRating.hard),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _RateButton(
-                    label: '良好',
-                    color: scheme.primaryContainer,
-                    fg: scheme.onPrimaryContainer,
-                    onPressed: () => _rate(ReviewRating.good),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _RateButton(
-                    label: '简单',
-                    color: scheme.secondaryContainer,
-                    fg: scheme.onSecondaryContainer,
-                    onPressed: () => _rate(ReviewRating.easy),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+        _MetaChip(icon: Icons.anchor, label: '锚点 ${card.anchor}'),
+        _MetaChip(icon: Icons.menu_book_outlined, label: card.source),
       ],
     );
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  小组件
+// ═══════════════════════════════════════════════════════════════
 
 class _TypeChip extends StatelessWidget {
   const _TypeChip({required this.type});
@@ -673,15 +817,12 @@ class _TypeChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.secondaryContainer,
-        borderRadius: BorderRadius.circular(12),
+        color: _kChipBg,
+        borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
         label,
-        style: TextStyle(
-          fontSize: 12,
-          color: Theme.of(context).colorScheme.onSecondaryContainer,
-        ),
+        style: const TextStyle(fontSize: 12, color: _kChipText),
       ),
     );
   }
@@ -698,43 +839,13 @@ class _MetaChip extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 14, color: Theme.of(context).colorScheme.outline),
+        Icon(icon, size: 13, color: _kTextMuted),
         const SizedBox(width: 4),
         Text(
           label,
-          style: TextStyle(
-            fontSize: 12,
-            color: Theme.of(context).colorScheme.outline,
-          ),
+          style: const TextStyle(fontSize: 11, color: _kTextMuted),
         ),
       ],
-    );
-  }
-}
-
-class _RateButton extends StatelessWidget {
-  const _RateButton({
-    required this.label,
-    required this.color,
-    required this.fg,
-    required this.onPressed,
-  });
-
-  final String label;
-  final Color color;
-  final Color fg;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return FilledButton(
-      style: FilledButton.styleFrom(
-        backgroundColor: color,
-        foregroundColor: fg,
-        padding: const EdgeInsets.symmetric(vertical: 14),
-      ),
-      onPressed: onPressed,
-      child: Text(label),
     );
   }
 }
@@ -751,12 +862,21 @@ class _EmptyState extends StatelessWidget {
           Icon(
             Icons.celebration_outlined,
             size: 56,
-            color: Theme.of(context).colorScheme.primary,
+            color: const Color(0xFFFFA726).withValues(alpha: 0.8),
           ),
           const SizedBox(height: 12),
-          const Text('该科目暂无到期卡', style: TextStyle(fontWeight: FontWeight.w600)),
+          const Text(
+            '该科目暂无到期卡',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              color: _kTextPrimary,
+            ),
+          ),
           const SizedBox(height: 4),
-          const Text('审核池通过的新卡才会出现', style: TextStyle(fontSize: 12)),
+          const Text(
+            '审核池通过的新卡才会出现',
+            style: TextStyle(fontSize: 12, color: _kTextMuted),
+          ),
         ],
       ),
     );
@@ -775,15 +895,35 @@ class _DoneState extends StatelessWidget {
           Icon(
             Icons.task_alt,
             size: 56,
-            color: Theme.of(context).colorScheme.primary,
+            color: const Color(0xFF66BB6A).withValues(alpha: 0.85),
           ),
           const SizedBox(height: 12),
-          const Text('本批复习完成！', style: TextStyle(fontWeight: FontWeight.w600)),
+          const Text(
+            '本批复习完成！',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              color: _kTextPrimary,
+            ),
+          ),
           const SizedBox(height: 4),
-          const Text('剩下的卡在未来的记忆曲线里等你', style: TextStyle(fontSize: 12)),
-          const SizedBox(height: 16),
-          FilledButton.tonal(
+          const Text(
+            '剩下的卡在未来的记忆曲线里等你',
+            style: TextStyle(fontSize: 12, color: _kTextMuted),
+          ),
+          const SizedBox(height: 20),
+          FilledButton(
             onPressed: () => context.pop(),
+            style: FilledButton.styleFrom(
+              backgroundColor: _kCardColorL2,
+              foregroundColor: _kTextPrimary,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 32,
+                vertical: 14,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
             child: const Text('返回'),
           ),
         ],

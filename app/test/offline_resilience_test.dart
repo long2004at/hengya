@@ -24,6 +24,7 @@ import 'package:hengya/pages/stats_page.dart';
 import 'package:hengya/services/api/api_client.dart';
 import 'package:hengya/services/api/local_cache.dart';
 import 'package:hengya/services/review/session_store.dart';
+import 'package:hengya/widgets/rating_slider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -357,13 +358,19 @@ void main() {
     expect(find.text('#1/2'), findsOneWidget);
     expect(find.textContaining('离线数据 · 更新于'), findsOneWidget);
 
-    // 翻面 → 评分（良好）→ 断网 POST 失败 → 入既有离线评分队列
+    // 翻面 → 滑轨点触评分 → 断网 POST 失败 → 入既有离线评分队列
     await tester.tap(find.text('干槽症的典型临床表现'));
     await tester.pump();
     expect(find.text('拔牙创剧烈疼痛向耳颞部放射'), findsOneWidget);
-    await tester.tap(find.text('良好'));
+    // 点触滑轨中部（hesitant 档）——_select 内部 180ms 反馈延迟后才回调，
+    // _rate 还要 await 350ms 换卡飞出动画后才 submitAnswer（断网 → 入队）
+    final slider = find.byType(RatingSlider);
+    expect(slider, findsOneWidget);
+    await tester.tap(slider);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 250)); // 180ms 反馈延迟
+    await tester.pump(const Duration(milliseconds: 500)); // 350ms 换卡动画
+    await tester.pump(const Duration(milliseconds: 100)); // POST 失败 → 入队
     expect(answerStore.count, 1); // 评分已入队（断网补传语义保持）
     expect(find.text('待补传 1'), findsOneWidget);
   });

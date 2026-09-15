@@ -1,12 +1,17 @@
-// 答案雾（#12 v2：毛玻璃模式）
+// 答案雾（#12 v3：预渲染模糊 + 渐变浓雾 + 擦除修复 + 纸角美化）
 // =====================================================================
-// 复习时答案被磨砂玻璃（BackdropFilter 真模糊）覆盖：
-//   · 可以隐约看到下方答案的位置/轮廓，但读不清具体文字；
-//   · 手指在雾面上滑动 = "擦玻璃"，沿轨迹擦开一条柔和渐变路径；
+// 复习时答案被磨砂玻璃覆盖：
+//   · 渐变浓雾：左上角淡（隐约可感）→ 右下角浓（完全遮盖）；
+//   · 手指在雾面上滑动 = "擦玻璃"，saveLayer+dstOut 无缝隙擦除；
 //   · 右下角纸角可拖动 → 纸页卷曲掀开，露出下面答案；
 //     松手超阈值 → 飞出全清；不足 → 弹性拉回；
 //   · 点纸角 = 自动掀页动画；
 //   · 换卡 reset() 重新上雾。
+//
+// v3 性能策略（方案 B 混合策略）：
+//   - 静态状态（idle/erasing）：保留 BackdropFilter 真模糊
+//   - 翻页动画（peeling/springback/flying）：切换为不透明渐变遮罩
+//     → 翻页 60fps，无 BackdropFilter 每帧重算开销
 // =====================================================================
 
 import 'dart:ui' as ui;
@@ -22,11 +27,20 @@ const double kFogBlurSigma = 10.0;
 /// 雾层暖色调叠加（半透明纸白，让模糊区有温暖质感）
 const Color kFogTintColor = Color(0x55F5F0E6);
 
+/// 渐变浓雾：左上角淡色
+const Color kFogGradientLight = Color(0x20F5F0E6);
+
+/// 渐变浓雾：右下角浓色
+const Color kFogGradientDense = Color(0x70F5F0E6);
+
 /// 擦除笔刷半径（dp）
 const double kEraseBrushRadius = 20.0;
 
 /// 擦除边缘柔和模糊半径
 const double kEraseSoftEdge = 6.0;
+
+/// 擦除边缘柔和消散过渡半径（dp）
+const double kEraseDissolveRadius = 10.0;
 
 /// 纸角触摸热区大小（dp）
 const double kCornerHitSize = 56.0;
@@ -383,82 +397,95 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
 
   Widget _buildFogStack(Widget answerContent, Size avail) {
     final ctrl = widget.controller;
+    final isAnimating = ctrl.isPeeling;
+    final fadeOpacity =
+        ctrl.phase == FogPhase.flying ? _fade.clamp(0.0, 1.0) : 1.0;
 
-    return SizedBox(
-      width: avail.width,
-      height: avail.height,
-      child: GestureDetector(
-        onPanDown: _onPanDown,
-        onPanStart: _onPanStart,
-        onPanUpdate: _onPanUpdate,
-        onPanEnd: _onPanEnd,
-        onTap: _onTap,
-        behavior: HitTestBehavior.opaque,
-        child: Stack(
-          children: [
-            // Layer 0：答案内容（始终渲染，被模糊遮盖）
-            Positioned.fill(child: answerContent),
+    // P4: ClipRect 兜底——翻页卷曲不溢出自身边界
+    return ClipRect(
+      child: SizedBox(
+        width: avail.width,
+        height: avail.height,
+        child: GestureDetector(
+          onPanDown: _onPanDown,
+          onPanStart: _onPanStart,
+          onPanUpdate: _onPanUpdate,
+          onPanEnd: _onPanEnd,
+          onTap: _onTap,
+          behavior: HitTestBehavior.opaque,
+          child: Stack(
+            children: [
+              // Layer 0：答案内容（始终渲染，被雾遮盖）
+              Positioned.fill(child: answerContent),
 
-            // Layer 1：毛玻璃模糊层（ClipPath 排除擦除区域和翻页区域）
-            Positioned.fill(
-              child: Opacity(
-                opacity: ctrl.phase == FogPhase.flying ? _fade.clamp(0.0, 1.0) : 1.0,
-                child: ClipPath(
-                  clipper: _FogClipper(
-                    strokes: ctrl.strokes,
-                    peelCorner: ctrl.isPeeling ? ctrl.dragPoint : null,
-                    sheetSize: avail,
-                  ),
-                  child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(
-                      sigmaX: kFogBlurSigma,
-                      sigmaY: kFogBlurSigma,
+              // Layer 1：模糊层
+              // P0 方案 B：静态用 BackdropFilter 真模糊，翻页动画切换为不透明遮罩
+              if (!isAnimating)
+                // 静态状态：BackdropFilter 真模糊（仅裁剪翻页区域，擦除由 tint 层处理）
+                Positioned.fill(
+                  child: Opacity(
+                    opacity: fadeOpacity,
+                    child: ClipPath(
+                      clipper: _PeelOnlyClipper(
+                        peelCorner: null, // 静态无翻页
+                        sheetSize: avail,
+                      ),
+                      child: BackdropFilter(
+                        filter: ui.ImageFilter.blur(
+                          sigmaX: kFogBlurSigma,
+                          sigmaY: kFogBlurSigma,
+                        ),
+                        child: const SizedBox.expand(),
+                      ),
                     ),
-                    child: Container(color: kFogTintColor),
+                  ),
+                ),
+
+              // Layer 2：渐变雾色叠加层（P1 渐变浓雾 + P2 擦除 + P5 柔和消散）
+              // 统一用 CustomPainter + saveLayer + dstOut 处理
+              Positioned.fill(
+                child: Opacity(
+                  opacity: fadeOpacity,
+                  child: CustomPaint(
+                    painter: _FogTintPainter(
+                      strokes: ctrl.strokes,
+                      peelCorner: ctrl.isPeeling ? ctrl.dragPoint : null,
+                      sheetSize: avail,
+                      isAnimating: isAnimating,
+                    ),
                   ),
                 ),
               ),
-            ),
 
-            // Layer 2：擦除边缘柔和发光（让擦除路径边缘更自然）
-            if (ctrl.strokes.isNotEmpty)
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: _SoftEdgePainter(strokes: ctrl.strokes),
-                ),
-              ),
-
-            // Layer 3：纸角提示 + 翻页卷曲视觉
-            if (!ctrl.isCleared)
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: _CornerPainter(
-                    phase: ctrl.phase,
-                    dragPoint: ctrl.dragPoint,
-                    sheetSize: avail,
-                    fade: ctrl.phase == FogPhase.flying
-                        ? _fade.clamp(0.0, 1.0)
-                        : 1.0,
+              // Layer 3：纸角提示 + 翻页卷曲视觉（P3 美化）
+              if (!ctrl.isCleared)
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: _CornerPainter(
+                      phase: ctrl.phase,
+                      dragPoint: ctrl.dragPoint,
+                      sheetSize: avail,
+                      fade: fadeOpacity,
+                    ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-// ---------------------------------------------------------- 雾区裁剪 ----
+// -------------------------------------------------- 翻页区域裁剪 ----
+// 仅处理翻页揭开区域裁剪，擦除由 _FogTintPainter 的 saveLayer+dstOut 处理
 
-class _FogClipper extends CustomClipper<Path> {
-  _FogClipper({
-    required this.strokes,
+class _PeelOnlyClipper extends CustomClipper<Path> {
+  _PeelOnlyClipper({
     this.peelCorner,
     required this.sheetSize,
   });
 
-  final List<List<Offset>> strokes;
   final Offset? peelCorner;
   final Size sheetSize;
 
@@ -466,12 +493,6 @@ class _FogClipper extends CustomClipper<Path> {
   Path getClip(Size size) {
     final rect = Offset.zero & size;
     Path fogPath = Path()..addRect(rect);
-
-    // 减去擦除笔画区域
-    if (strokes.isNotEmpty) {
-      final erasePath = _buildErasePath(strokes);
-      fogPath = Path.combine(PathOperation.difference, fogPath, erasePath);
-    }
 
     // 减去翻页揭开区域
     if (peelCorner != null) {
@@ -485,39 +506,8 @@ class _FogClipper extends CustomClipper<Path> {
   }
 
   @override
-  bool shouldReclip(covariant _FogClipper oldClipper) => true;
-
-  /// 构建所有擦除笔画的合并路径
-  static Path _buildErasePath(List<List<Offset>> strokes) {
-    final path = Path();
-    const r = kEraseBrushRadius;
-    for (final stroke in strokes) {
-      if (stroke.isEmpty) continue;
-      if (stroke.length == 1) {
-        path.addOval(Rect.fromCircle(center: stroke[0], radius: r));
-      } else {
-        // 沿笔画路径铺胶囊（圆角粗线）
-        for (int i = 0; i < stroke.length; i++) {
-          path.addOval(Rect.fromCircle(center: stroke[i], radius: r));
-        }
-        // 连接相邻点为矩形填充间隙
-        for (int i = 0; i < stroke.length - 1; i++) {
-          final a = stroke[i];
-          final b = stroke[i + 1];
-          final d = b - a;
-          final len = d.distance;
-          if (len < 1) continue;
-          final perp = Offset(-d.dy / len, d.dx / len) * r;
-          path.moveTo(a.dx + perp.dx, a.dy + perp.dy);
-          path.lineTo(b.dx + perp.dx, b.dy + perp.dy);
-          path.lineTo(b.dx - perp.dx, b.dy - perp.dy);
-          path.lineTo(a.dx - perp.dx, a.dy - perp.dy);
-          path.close();
-        }
-      }
-    }
-    return path;
-  }
+  bool shouldReclip(covariant _PeelOnlyClipper oldClipper) =>
+      oldClipper.peelCorner != peelCorner;
 
   /// 翻页揭开区域：从右下角到拖动点，用折线分割
   static Path? _buildPeelRevealPath(Offset drag, Size size) {
@@ -531,8 +521,8 @@ class _FogClipper extends CustomClipper<Path> {
     if (len < 2) return null;
 
     // 折线方向（垂直于 corner→drag）
-    final u = Offset(d.dx / len, d.dy / len); // corner → drag 方向
-    final v = Offset(-u.dy, u.dx); // 垂直方向
+    final u = Offset(d.dx / len, d.dy / len);
+    final v = Offset(-u.dy, u.dx);
 
     // 折线延伸足够长以覆盖整个 sheet
     final big = size.width + size.height;
@@ -553,41 +543,119 @@ class _FogClipper extends CustomClipper<Path> {
   }
 }
 
-// ------------------------------------------------------ 擦除柔和边缘 ----
+// ----------------------------------------- 渐变雾色 + 擦除 + 消散 ----
+// P1: 渐变浓雾（左上淡 → 右下浓）
+// P2: saveLayer + dstOut 无缝擦除
+// P5: 擦除边缘柔和消散（MaskFilter.blur）
 
-class _SoftEdgePainter extends CustomPainter {
-  _SoftEdgePainter({required this.strokes});
+class _FogTintPainter extends CustomPainter {
+  _FogTintPainter({
+    required this.strokes,
+    this.peelCorner,
+    required this.sheetSize,
+    required this.isAnimating,
+  });
 
   final List<List<Offset>> strokes;
+  final Offset? peelCorner;
+  final Size sheetSize;
+  final bool isAnimating;
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (strokes.isEmpty) return;
+    final rect = Offset.zero & size;
 
-    // 在擦除路径边缘画一圈柔和的半透明光晕
-    final glowPaint = Paint()
-      ..color = const Color(0x18F5F0E6)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = kEraseSoftEdge * 2
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, kEraseSoftEdge);
-
-    for (final stroke in strokes) {
-      if (stroke.length < 2) continue;
-      final path = Path()..moveTo(stroke[0].dx, stroke[0].dy);
-      for (int i = 1; i < stroke.length; i++) {
-        path.lineTo(stroke[i].dx, stroke[i].dy);
+    // 翻页时裁剪掉揭开区域
+    if (peelCorner != null) {
+      final peelPath = _PeelOnlyClipper._buildPeelRevealPath(
+          peelCorner!, size);
+      if (peelPath != null) {
+        final clipPath = Path()..addRect(rect);
+        final clipped =
+            Path.combine(PathOperation.difference, clipPath, peelPath);
+        canvas.save();
+        canvas.clipPath(clipped);
       }
-      canvas.drawPath(path, glowPaint);
+    }
+
+    // saveLayer 以支持 dstOut 擦除
+    canvas.saveLayer(rect, Paint());
+
+    // P1: 渐变浓雾底色 —— 左上淡，右下浓
+    final gradientPaint = Paint()
+      ..shader = const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [kFogGradientLight, kFogGradientDense],
+      ).createShader(rect);
+    canvas.drawRect(rect, gradientPaint);
+
+    // 翻页动画时叠加额外不透明度补偿（取代 BackdropFilter 的遮盖力）
+    if (isAnimating) {
+      final solidPaint = Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0x60E8E0D4), Color(0xC0E8E0D4)],
+        ).createShader(rect);
+      canvas.drawRect(rect, solidPaint);
+    }
+
+    // P2 + P5: 擦除（saveLayer 内 dstOut，无缝隙 + 柔和消散边缘）
+    if (strokes.isNotEmpty) {
+      final erasePaint = Paint()
+        ..blendMode = BlendMode.dstOut
+        ..color = const Color(0xFFFFFFFF)
+        ..strokeWidth = kEraseBrushRadius * 2
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        // P5: MaskFilter 让擦除边缘柔和过渡
+        ..maskFilter =
+            const MaskFilter.blur(BlurStyle.normal, kEraseDissolveRadius);
+
+      for (final stroke in strokes) {
+        if (stroke.isEmpty) continue;
+        if (stroke.length == 1) {
+          canvas.drawCircle(
+            stroke[0],
+            kEraseBrushRadius,
+            erasePaint
+              ..style = PaintingStyle.fill
+              ..strokeWidth = 0,
+          );
+        } else {
+          final path = Path()..moveTo(stroke[0].dx, stroke[0].dy);
+          for (int i = 1; i < stroke.length; i++) {
+            path.lineTo(stroke[i].dx, stroke[i].dy);
+          }
+          canvas.drawPath(
+            path,
+            erasePaint
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = kEraseBrushRadius * 2,
+          );
+        }
+      }
+    }
+
+    canvas.restore(); // saveLayer
+
+    // 恢复翻页裁剪
+    if (peelCorner != null) {
+      final peelPath = _PeelOnlyClipper._buildPeelRevealPath(
+          peelCorner!, size);
+      if (peelPath != null) {
+        canvas.restore();
+      }
     }
   }
 
   @override
-  bool shouldRepaint(covariant _SoftEdgePainter old) => true;
+  bool shouldRepaint(covariant _FogTintPainter old) => true;
 }
 
 // -------------------------------------------------------- 纸角绘制 ----
+// P3: 柔和「翘起纸角」——渐变填充 + 柔和阴影 + 卷曲高光弧线
 
 class _CornerPainter extends CustomPainter {
   _CornerPainter({
@@ -617,41 +685,77 @@ class _CornerPainter extends CustomPainter {
     }
   }
 
-  /// 静态纸角提示：右下角小三角 + 阴影
+  /// P3: 静态纸角——渐变填充 + 柔和阴影 + 卷曲高光弧线 + 极细分隔线
   void _paintCornerHint(Canvas canvas, Size size) {
     final br = Offset(size.width, size.height);
     const s = kCornerTriSize;
 
-    // 阴影
+    // 柔和阴影（MaskFilter.blur 替代 drawShadow 硬边）
     final shadowPath = Path()
       ..moveTo(br.dx, br.dy)
-      ..lineTo(br.dx - s * 1.1, br.dy)
-      ..lineTo(br.dx, br.dy - s * 1.1)
+      ..lineTo(br.dx - s * 1.2, br.dy)
+      ..lineTo(br.dx, br.dy - s * 1.2)
       ..close();
-    canvas.drawShadow(shadowPath, Colors.black54, 3.0, false);
+    canvas.drawPath(
+      shadowPath,
+      Paint()
+        ..color = const Color(0x22000000)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.0),
+    );
 
-    // 纸角三角形（翻起的一角）
+    // 纸角三角形 —— 渐变填充（从雾色过渡到略亮的纸白）
     final triPath = Path()
       ..moveTo(br.dx, br.dy)
       ..lineTo(br.dx - s, br.dy)
       ..lineTo(br.dx, br.dy - s)
       ..close();
-    canvas.drawPath(
-      triPath,
-      Paint()..color = Color.lerp(const Color(0xFFF5F0E6), Colors.white, 0.3)!,
+
+    final triBounds = Rect.fromLTRB(
+      br.dx - s, br.dy - s, br.dx, br.dy,
+    );
+    final triPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          const Color(0xFFFAF6F0), // 亮纸白
+          const Color(0xFFF0EBE2), // 雾色
+        ],
+      ).createShader(triBounds);
+    canvas.drawPath(triPath, triPaint);
+
+    // 极细分隔线（0.3px，低透明度）暗示纸页可掀
+    final dividerPaint = Paint()
+      ..color = const Color(0x28000000)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.3;
+    canvas.drawLine(
+      Offset(br.dx - s, br.dy),
+      Offset(br.dx, br.dy - s),
+      dividerPaint,
     );
 
-    // 纸角边线
-    canvas.drawPath(
-      triPath,
-      Paint()
-        ..color = const Color(0x33000000)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.5,
+    // 卷曲高光弧线：沿对角线内侧，微妙弧形暗示纸角翘起
+    final highlightPaint = Paint()
+      ..color = const Color(0x30FFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0
+      ..strokeCap = StrokeCap.round;
+    final arcPath = Path();
+    // 从三角形斜边内侧画一条微弧
+    const inset = 3.0;
+    final p1 = Offset(br.dx - s + inset * 1.5, br.dy - inset);
+    final p2 = Offset(br.dx - inset, br.dy - s + inset * 1.5);
+    final midArc = Offset(
+      (p1.dx + p2.dx) / 2 + inset * 0.5,
+      (p1.dy + p2.dy) / 2 + inset * 0.5,
     );
+    arcPath.moveTo(p1.dx, p1.dy);
+    arcPath.quadraticBezierTo(midArc.dx, midArc.dy, p2.dx, p2.dy);
+    canvas.drawPath(arcPath, highlightPaint);
   }
 
-  /// 翻页卷曲效果：折线 + 阴影 + 卷曲纸背面
+  /// 翻页卷曲效果：折线 + 柔和阴影 + 渐变卷曲纸背面 + 高光
   void _paintPeelCurl(Canvas canvas, Size size) {
     final corner = Offset(size.width, size.height);
     final d = corner - dragPoint;
@@ -666,36 +770,59 @@ class _CornerPainter extends CustomPainter {
     final v = Offset(-u.dy, u.dx);
     final big = size.width + size.height;
 
-    // 折线阴影
+    // 折线柔和阴影（MaskFilter.blur 代替硬阴影）
     final shadowPaint = Paint()
-      ..color = Color.fromRGBO(0, 0, 0, 0.15 * fade)
+      ..color = Color.fromRGBO(0, 0, 0, 0.12 * fade)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 6
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+      ..strokeWidth = 8
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
 
     final foldLine = Path()
       ..moveTo(mid.dx + v.dx * big, mid.dy + v.dy * big)
       ..lineTo(mid.dx - v.dx * big, mid.dy - v.dy * big);
     canvas.drawPath(foldLine, shadowPaint);
 
-    // 卷曲纸背面（翻过来的部分，用镜像路径 + 渐变色表现厚度感）
+    // 卷曲纸背面（翻过来的部分）——渐变填充表现厚度感
     final curlPath = _buildCurlPath(corner, dragPoint, mid, u, v, big, size);
     if (curlPath != null) {
-      // 裁剪到 sheet 范围
       canvas.save();
       canvas.clipRect(Offset.zero & size);
 
+      // 渐变填充：从折线处亮 → 向拖动点方向暗
+      final curlBounds = curlPath.getBounds();
       final curlPaint = Paint()
-        ..color = Color.fromRGBO(245, 240, 230, 0.7 * fade)
-        ..style = PaintingStyle.fill;
+        ..shader = LinearGradient(
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+          colors: [
+            Color.fromRGBO(250, 246, 240, 0.8 * fade), // 亮纸白
+            Color.fromRGBO(235, 228, 218, 0.6 * fade), // 暗雾色
+          ],
+        ).createShader(curlBounds);
       canvas.drawPath(curlPath, curlPaint);
 
-      // 卷曲高光条
+      // 卷曲高光条（折线处）
       final highlightPaint = Paint()
-        ..color = Color.fromRGBO(255, 255, 255, 0.4 * fade)
+        ..color = Color.fromRGBO(255, 255, 255, 0.35 * fade)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2;
+        ..strokeWidth = 1.5
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 0.5);
       canvas.drawPath(foldLine, highlightPaint);
+
+      // 卷曲内侧轻微阴影（增加立体感）
+      final innerShadowPaint = Paint()
+        ..color = Color.fromRGBO(0, 0, 0, 0.06 * fade)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2);
+      // 阴影画在折线靠卷曲一侧
+      final shadowOffset = -u * 3.0;
+      final innerShadowLine = Path()
+        ..moveTo(mid.dx + v.dx * big + shadowOffset.dx,
+            mid.dy + v.dy * big + shadowOffset.dy)
+        ..lineTo(mid.dx - v.dx * big + shadowOffset.dx,
+            mid.dy - v.dy * big + shadowOffset.dy);
+      canvas.drawPath(innerShadowLine, innerShadowPaint);
 
       canvas.restore();
     }
@@ -708,7 +835,6 @@ class _CornerPainter extends CustomPainter {
     final curlWidth = (corner - drag).distance * 0.3; // 卷曲宽度
     if (curlWidth < 2) return null;
 
-    // 从折线向拖动点方向偏移一个卷曲宽度的带状区域
     final a = mid + v * big;
     final b = mid - v * big;
     final c = Offset(mid.dx - u.dx * curlWidth, mid.dy - u.dy * curlWidth);

@@ -23,44 +23,46 @@ void main() {
         difficulty: difficulty,
       );
 
-  test('新卡首评 good：初始化 S0=w[2]、D0=w[4]，进 review 且间隔 ≈ S0', () {
-    final r = sched.schedule(card(), ReviewRating.good, now: now);
+  test('新卡首评 smooth：初始化 S0=lerp(w[2],w[3],0.5)、D0 中心 3.5，进 review', () {
+    final r = sched.schedule(card(), ReviewRating.smooth, now: now);
     expect(r.state, SchedulingState.review);
-    expect(r.stability, closeTo(3.7145, 0.001)); // w[2]
-    expect(r.difficulty, closeTo(5.1618, 0.001)); // w[4]
-    // I(0.9, S) = S → 到期间隔约 3.7 天
+    // g=5(smooth)：S0 = lerp(w[2]=3.7145, w[3]=13.8206, 0.5) = 8.76755
+    expect(r.stability, closeTo(8.7676, 0.001));
+    // D0 = w[4] − w[5]·(g−3.5) = 5.1618 − 1.2298×1.5 = 3.3171
+    expect(r.difficulty, closeTo(3.3171, 0.001));
+    // I(0.9, S) = S ≈ 8.77 → 取整 9 天
     final intervalDays = r.dueAt.difference(now).inDays;
-    expect(intervalDays, inInclusiveRange(3, 4));
+    expect(intervalDays, 9);
     expect(r.lapses, 0);
   });
 
-  test('新卡首评 again：卡在 learning 第一步（分钟级）', () {
-    final r = sched.schedule(card(), ReviewRating.again, now: now);
+  test('新卡首评 blackout：卡在 learning 第一步（分钟级）', () {
+    final r = sched.schedule(card(), ReviewRating.blackout, now: now);
     expect(r.state, SchedulingState.learning);
     expect(r.dueAt.difference(now).inMinutes, 1);
     expect(r.stability, closeTo(0.4872, 0.001)); // w[0] = S0(again)
   });
 
-  test('新卡首评 easy：S0=w[3] 间隔更长', () {
-    final rEasy = sched.schedule(card(), ReviewRating.easy, now: now);
-    final rGood = sched.schedule(card(), ReviewRating.good, now: now);
+  test('新卡首评 instant：S0=w[3] 间隔更长', () {
+    final rEasy = sched.schedule(card(), ReviewRating.instant, now: now);
+    final rGood = sched.schedule(card(), ReviewRating.smooth, now: now);
     expect(rEasy.stability, closeTo(13.8206, 0.001)); // w[3]
     expect(rEasy.dueAt.isAfter(rGood.dueAt), isTrue);
   });
 
-  test('learning good：毕业进 review，天数级间隔', () {
+  test('learning smooth：毕业进 review，天数级间隔', () {
     final c = card(
       state: SchedulingState.learning,
       dueAt: now.add(const Duration(minutes: 10)),
       stability: 0.4872,
       difficulty: 7.0,
     );
-    final r = sched.schedule(c, ReviewRating.good, now: now);
+    final r = sched.schedule(c, ReviewRating.smooth, now: now);
     expect(r.state, SchedulingState.review);
     expect(r.dueAt.difference(now).inDays, greaterThanOrEqualTo(1));
   });
 
-  test('连续 good 复习：stability 单调增长（间隔拉长）', () {
+  test('连续 smooth 复习：stability 单调增长（间隔拉长）', () {
     var c = card(
       state: SchedulingState.review,
       dueAt: now,
@@ -71,9 +73,9 @@ void main() {
     final stabilities = <double>[c.stability!];
     var t = now;
     for (var i = 0; i < 5; i++) {
-      final r = sched.schedule(c, ReviewRating.good, now: t);
+      final r = sched.schedule(c, ReviewRating.smooth, now: t);
       expect(r.stability, greaterThan(stabilities.last),
-          reason: '第 $i 次连续 good 后 S 应增长');
+          reason: '第 $i 次连续 smooth 后 S 应增长');
       stabilities.add(r.stability);
       t = r.dueAt; // 按调度到期时间复习
       c = card(
@@ -85,11 +87,11 @@ void main() {
         lapses: r.lapses,
       );
     }
-    // 五连 good 后间隔应显著长于初始（长期记忆形成）
+    // 五连 smooth 后间隔应显著长于初始（长期记忆形成）
     expect(stabilities.last, greaterThan(3.7145 * 2));
   });
 
-  test('review 中 again：遗忘 → relearning，lapse+1，stability 回落', () {
+  test('review 中 blackout：遗忘 → relearning，lapse+1，stability 回落', () {
     final c = card(
       state: SchedulingState.review,
       dueAt: now,
@@ -98,14 +100,14 @@ void main() {
       reps: 6,
       lapses: 0,
     );
-    final r = sched.schedule(c, ReviewRating.again, now: now);
+    final r = sched.schedule(c, ReviewRating.blackout, now: now);
     expect(r.state, SchedulingState.relearning);
     expect(r.lapses, 1);
     expect(r.stability, lessThan(30.0)); // 遗忘后稳定性大幅回落
     expect(r.dueAt.difference(now).inMinutes, 10); // 重学步长
   });
 
-  test('relearning good：重返 review，lapse 计数保持', () {
+  test('relearning smooth：重返 review，lapse 计数保持', () {
     final c = card(
       state: SchedulingState.relearning,
       dueAt: now,
@@ -113,10 +115,11 @@ void main() {
       difficulty: 7.5,
       lapses: 3,
     );
-    final r = sched.schedule(c, ReviewRating.good, now: now);
+    final r = sched.schedule(c, ReviewRating.smooth, now: now);
     expect(r.state, SchedulingState.review);
     expect(r.lapses, 3); // 不再增加
-    expect(r.difficulty, greaterThan(7.0)); // 高难度仍保留（回归有限）
+    // smooth(g=5)：D' = 7.5 − 0.8975×1.5 = 6.154，均值回归后 ≈ 6.123
+    expect(r.difficulty, closeTo(6.123, 0.001));
   });
 
   test('lapse 累计到 4 → 调用方可判 leech（数据通路验证）', () {
@@ -126,25 +129,25 @@ void main() {
       stability: 5.0,
       lapses: 3, // 已 3 次遗忘
     );
-    final r = sched.schedule(c, ReviewRating.again, now: now);
+    final r = sched.schedule(c, ReviewRating.blackout, now: now);
     expect(r.lapses, 4); // ≥4 → leech，进回炉重造（计划书 §四）
   });
 
-  test('easy 间隔 > good 间隔 > hard 间隔（同起点）', () {
+  test('instant 间隔 > smooth 间隔 > struggled 间隔（同起点）', () {
     final base = () => card(
           state: SchedulingState.review,
           dueAt: now,
           stability: 5.0,
           difficulty: 5.0,
         );
-    final rHard = sched.schedule(base(), ReviewRating.hard, now: now);
-    final rGood = sched.schedule(base(), ReviewRating.good, now: now);
-    final rEasy = sched.schedule(base(), ReviewRating.easy, now: now);
+    final rHard = sched.schedule(base(), ReviewRating.struggled, now: now);
+    final rGood = sched.schedule(base(), ReviewRating.smooth, now: now);
+    final rEasy = sched.schedule(base(), ReviewRating.instant, now: now);
     expect(rEasy.dueAt.isAfter(rGood.dueAt), isTrue);
     expect(rGood.dueAt.isAfter(rHard.dueAt), isTrue);
   });
 
-  test('难度区间始终 [1,10]，多次 again 不越界', () {
+  test('难度区间始终 [1,10]，多次 blackout 不越界', () {
     var d = 5.0;
     for (var i = 0; i < 10; i++) {
       final c = card(
@@ -154,7 +157,7 @@ void main() {
         difficulty: d,
         reps: 10,
       );
-      final r = sched.schedule(c, ReviewRating.again, now: now);
+      final r = sched.schedule(c, ReviewRating.blackout, now: now);
       d = r.difficulty;
       expect(d, inInclusiveRange(1, 10));
     }
