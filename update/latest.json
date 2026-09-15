@@ -1,10 +1,10 @@
 {
-  "versionName": "0.1.19+38",
-  "versionCode": 38,
-  "apk": "https://github.com/long2004at/hengya/releases/download/v0.1.19/hengya-v0.1.19-release.apk",
-  "sha256": "51aef01d23b01265737bd4c6a0305ced30aa3b8c6d810cf70fd57c583163f46c",
-  "sizeBytes": 84454405,
+  "versionName": "0.1.20+39",
+  "versionCode": 39,
+  "apk": "https://github.com/long2004at/hengya/releases/download/v0.1.20/hengya-v0.1.20-release.apk",
+  "sha256": "c04554a5d7841f3064df2e5a240543ab6f997a2b860f750de039db3ee4a5b053",
+  "sizeBytes": 84667397,
   "date": "2026-09-15",
-  "notes": "恒牙 v0.1.19：更新说明见 GitHub Release https://github.com/long2004at/hengya/releases/tag/v0.1.19",
-  "signature": "Eku0OSL5FAw6+AmDeZ7pjyXWsvk00gtjIYgTls5gvL3briCahWxF8f9Dqlb2P0n1fM6EG0Ej/H/DEPhNeyonAQ=="
+  "notes": "恒牙 v0.1.20：更新说明见 GitHub Release https://github.com/long2004at/hengya/releases/tag/v0.1.20",
+  "signature": "D8IO1ouHO5hUefyjRSa+4gA4DW1Krx4Yjzpwt3OLkibb9TEFeKP5HTNsvNn/ZKUGRBvG9+q5IkgEZwaAAMjSCg=="
 }
