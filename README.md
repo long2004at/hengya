@@ -13,8 +13,12 @@ Local-first 个人间隔复习（SRS）应用：课件 / 教材 / 真题在端�
 间隔复习（Anki 一类）被反复证明有效，但前提是「有好卡片」：手动做卡的时间远超复习的时间；AI 直出的卡片不可信、无法追溯；课件、教材、真题三类资料各司其职却互相打架。恒牙把「拆卡」交给 AI + 本地检索流水线，把「审核」留给人，把「复习节奏」交给 FSRS——日常压缩为：**上课记 3 个关键词 → 晚上自动出卡 → 审核批准 → 按天复习**。
 
 完整的产品说明（创作思路 / 技术方案 / 使用教程）见 [`docs/项目说明书.md`](docs/项目说明书.md)。
-huan欢迎加入qq群聊<img width="1370" height="2435" alt="qrcode_1789653008343" src="https://github.com/user-attachments/assets/0fa6ba5f-855d-48ed-ae42-355ca58612f3" />
-
+欢迎加入qq群
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/7b6b7d5f-1f06-4871-8608-5b44c478feb6"
+       alt="QQ群二维码"
+       width="200">
+</p>
 
 ## 核心机制
 
