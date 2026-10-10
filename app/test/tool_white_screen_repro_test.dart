@@ -135,18 +135,17 @@ void main() {
     await settle(tester);
     expect(tester.any(find.byType(BankDetailPage)), isTrue, reason: '必须进入题库详情页');
 
-    // 开回炉弹窗
+    // 开回炉弹窗（local 模式：新的回炉请求面板）
     await tester.tap(find.text('回炉'), warnIfMissed: false);
     await settle(tester);
-    expect(find.byType(ReasonActionDialog), findsOneWidget, reason: '回炉弹窗必须在场');
+    expect(find.text('交给回炉工作台'), findsOneWidget, reason: '回炉面板必须在场');
 
-    // 不选理由连点 ×8（每击 50ms 假时——真机连点节奏；空理由路径每次都发 toast）
+    // 不选理由连点 ×8（每击 50ms 假时——真机连点节奏；空理由路径每次都置错误文案）
     for (var i = 0; i < 8; i++) {
-      await tester.tap(find.text('送进回炉队列'), warnIfMissed: false);
+      await tester.tap(find.text('创建任务并查看'), warnIfMissed: false);
       await tester.pump(const Duration(milliseconds: 50));
     }
-    // 防呆提示在场（findTextContaining 兼容多选改造前后两版文案）
-    expect(find.textContaining('回炉原因'), findsOneWidget,
+    expect(find.text('至少选择一个问题'), findsOneWidget,
         reason: '空选必须出防呆提示');
 
     // 系统返回（handlePopRoute 与 Android 返回键同路）：应关掉弹窗而非卡死
@@ -155,7 +154,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400)); // pop 过渡走完
 
     expect(tester.takeException(), isNull, reason: '竞态路径不得产生 framework 异常');
-    expect(find.byType(ReasonActionDialog), findsNothing, reason: '系统返回必须关掉弹窗');
+    expect(find.text('交给回炉工作台'), findsNothing, reason: '系统返回必须关掉弹窗');
 
     // 页面仍可交互：备注入口必须能再开弹层
     await tester.ensureVisible(find.text('备注'));
@@ -187,18 +186,18 @@ void main() {
     await tester.tap(find.text('回炉'), warnIfMissed: false);
     await settle(tester);
 
-    // 第一击（toast 出场）→ 立即系统返回（弹窗 pop 过渡 150ms 进行中）→ 半途再点
-    await tester.tap(find.text('送进回炉队列'), warnIfMissed: false);
+    // 第一击（错误文案出场）→ 立即系统返回（弹窗 pop 过渡 150ms 进行中）→ 半途再点
+    await tester.tap(find.text('创建任务并查看'), warnIfMissed: false);
     await tester.pump(const Duration(milliseconds: 30));
     await tester.binding.handlePopRoute(); // 弹窗开始 pop
     await tester.pump(const Duration(milliseconds: 50)); // 过渡半途
-    await tester.tap(find.text('送进回炉队列'),
+    await tester.tap(find.text('创建任务并查看'),
         warnIfMissed: false); // 竞态一击（过渡中的击键）
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400)); // 过渡走完
 
     expect(tester.takeException(), isNull, reason: '过渡中的击键不得引发异常');
-    expect(find.byType(ReasonActionDialog), findsNothing, reason: '弹窗必须已关闭');
+    expect(find.text('交给回炉工作台'), findsNothing, reason: '弹窗必须已关闭');
 
     // 交互性收尾：active 卡编辑入口必须还能打开（编辑弹层三字段可定位）
     await tester.ensureVisible(find.text('编辑'));

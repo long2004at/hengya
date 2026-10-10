@@ -137,6 +137,7 @@ class FullBackupManager {
   static bool _defaultBusyCheck() =>
       PipelineRunner.instance.running ||
       LocalBackend.instance.corpusBuildRunning ||
+      LocalBackend.instance.corpusLibraryRunning ||
       CorpusPackageManager.instance.importRunning;
 
   Object _acquire(String operation) {
@@ -155,6 +156,9 @@ class FullBackupManager {
     String? appVersion,
     void Function(String message)? onProgress,
   }) async {
+    if (LocalBackend.instance.corpusDeletePending) {
+      throw const FullBackupException('请先在语料库完成上次删除清理，或恢复已有完整备份，再创建新备份');
+    }
     final token = _acquire('完整备份');
     try {
       final root = _dataRoot(dataDir);

@@ -143,6 +143,7 @@ void main() {
       'cardId': '$sid-life-001',
       'subjectId': sid,
       'rating': 'good',
+      'reviewedAt': DateTime.now().toIso8601String(),
     });
     expect((ans as Map)['ok'] ?? ans['applied'] != null, true);
     final summary = await be.get('/stats/summary');

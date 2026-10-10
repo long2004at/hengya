@@ -21,6 +21,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'demo_backend.dart';
 import '../local/local_backend.dart';
+import '../local/corpus_library.dart';
 import 'local_cache.dart';
 
 /// 后端模式（local-first，Phase 1）：
@@ -72,6 +73,7 @@ class SubjectWithDue {
 }
 
 class ApiClient {
+  static const int maxCoursewareBytes = 200 * 1024 * 1024;
   ApiClient._();
 
   static final ApiClient instance = ApiClient._();
@@ -92,6 +94,7 @@ class ApiClient {
   /// 离线评分队列持久层（审计 P0 整改：App 被杀不丢分）
   /// 生产由 main() 注入 SharedPreferences 实现；测试可注入内存假实现
   OfflineAnswerStore? offlineStore;
+  Future<int>? _answerFlush;
 
   /// 队列变化回调（UI 显示"待补传 N 条"）
   void Function(int count)? onQueueChanged;
@@ -365,8 +368,9 @@ class ApiClient {
   }) async {
     switch (currentBackendMode) {
       case BackendMode.local:
-        final data = await LocalBackend.instance
-            .get('/api/v1/cards/pending?limit=$limit&offset=$offset');
+        final data = await LocalBackend.instance.get(
+          '/api/v1/cards/pending?limit=$limit&offset=$offset',
+        );
         final rawList = data['list'] as List<dynamic>? ?? const [];
         final cards = [
           for (final e in rawList)
@@ -561,7 +565,16 @@ class ApiClient {
     final item = log.toJson();
     try {
       final res = await _postJson('/api/v1/review/answer', item);
-      return res['ok'] == true;
+      if (res['ok'] != true) return false;
+      final results = res['results'];
+      if (results is List) {
+        return results.any(
+          (r) => r is Map && r['cardId'] == log.cardId && r['ok'] == true,
+        );
+      }
+      final applied = res['applied'];
+      if (applied is num) return applied > 0;
+      return true; // 旧 remote 协议只有 ok，没有逐条结果。
     } on ApiException catch (e) {
       if (e.statusCode == 0 || e.statusCode >= 500) {
         await _enqueueAnswer({...item, 'offlineQueued': true}); // 持久化入队
@@ -572,7 +585,9 @@ class ApiClient {
   }
 
   Future<void> _enqueueAnswer(Map<String, dynamic> item) async {
-    await offlineStore?.append(item);
+    final store = offlineStore;
+    if (store == null) throw ApiException(0, '离线评分存储尚未初始化，请重试');
+    await store.append(item);
     onQueueChanged?.call(pendingAnswerCount);
   }
 
@@ -586,24 +601,65 @@ class ApiClient {
   }
 
   /// 联网后批量补传离线评分（启动/恢复联网时调）
-  Future<int> flushPendingAnswers() async {
+  Future<int> flushPendingAnswers() {
+    final active = _answerFlush;
+    if (active != null) return active;
     final store = offlineStore;
-    if (store == null || store.isEmpty) return 0;
+    if (store == null || store.isEmpty) return Future<int>.value(0);
+    final future = _flushAnswers(store).whenComplete(() => _answerFlush = null);
+    _answerFlush = future;
+    return future;
+  }
+
+  Future<int> _flushAnswers(OfflineAnswerStore store) async {
     final batch = List<Map<String, dynamic>>.from(store.drainPreview());
     try {
       final res = await _postJson('/api/v1/review/answer', batch);
-      if (res['ok'] == true) {
-        final applied = res['applied'] as int? ?? 0;
-        // 批量受理即清空（skipped 项属真错误，不重试）
-        await store.clear();
-        onQueueChanged?.call(0);
-        return applied;
-      }
+      if (res['ok'] != true) return 0;
+      // 仅确认本次快照。请求在途时新入队的评分必须保留；补传也必须单飞。
+      await store.acknowledge(batch);
+      if (identical(offlineStore, store)) onQueueChanged?.call(store.count);
+      return res['applied'] as int? ?? 0;
+    } catch (_) {
+      // 网络或持久化失败都保留队列，下次再补传，不丢弃尚未安全确认的条目。
       return 0;
-    } on ApiException {
-      return 0; // 仍离线，下轮再传
     }
   }
+
+  Future<Map<String, dynamic>> fetchReworkTasks({
+    String status = '',
+    int offset = 0,
+    int limit = 40,
+  }) => _getJson(
+    '/api/v1/rework/tasks?${Uri(queryParameters: {'status': status, 'offset': '$offset', 'limit': '$limit'}).query}',
+  );
+  Future<Map<String, dynamic>> fetchReworkTask(int id) =>
+      _getJson('/api/v1/rework/tasks/$id');
+  Future<({int taskId, bool alreadyExists})> createReworkTask(
+    String cardId, {
+    required String action,
+    required List<String> reasons,
+    String instructions = '',
+    int targetCount = 2,
+  }) async {
+    final result = await _postJson('/api/v1/rework/tasks', {
+      'cardId': cardId,
+      'action': action,
+      'reasons': reasons,
+      'instructions': instructions,
+      'targetCount': targetCount,
+    });
+    return (
+      taskId: (result['taskId'] as num).toInt(),
+      alreadyExists: result['alreadyExists'] == true,
+    );
+  }
+
+  Future<Map<String, dynamic>> reworkOperation(
+    int id,
+    String operation,
+    Map<String, Object?> payload,
+  ) => _postJson('/api/v1/rework/tasks/$id/$operation', payload);
 
   // ---------------- 回炉面 ----------------
 
@@ -664,9 +720,7 @@ class ApiClient {
   /// 自动周扫计时状态（local 0.1.13+：`GET /api/v1/pipeline/weekly`）。
   /// [lastRunAt] 为 null = 从未自动扫过（或已被清除）→ due=true。
   Future<WeeklyScanStatus> weeklyScanStatus() async {
-    return WeeklyScanStatus.fromJson(
-      await _getJson('/api/v1/pipeline/weekly'),
-    );
+    return WeeklyScanStatus.fromJson(await _getJson('/api/v1/pipeline/weekly'));
   }
 
   /// 自动周扫节流时间戳自由调整（local 0.1.13+：`PUT /api/v1/pipeline/weekly`）。
@@ -745,6 +799,27 @@ class ApiClient {
   /// → {totalChunks, subjects:{短码:块数}, lastBuild, pendingFiles,
   ///    reworkPending(⑦), storageMB}。
   /// 旧服务器（0.2.0）→ 404，由调用方降级提示「需服务器 0.3.0+」。
+  Future<CorpusInventory> fetchCorpusLibrary() async =>
+      CorpusInventory.fromMap(await _getJson('/api/v1/corpus/library'));
+  Future<Map<String, dynamic>> fetchCorpusContent(
+    String id, {
+    int offset = 0,
+    int limit = 40,
+    String query = '',
+  }) => _getJson(
+    '/api/v1/corpus/library/content?${Uri(queryParameters: {'id': id, 'offset': '$offset', 'limit': '$limit', 'query': query}).query}',
+  );
+  Future<void> deleteCorpusDocument(CorpusDocument document) async {
+    await _postJson('/api/v1/corpus/library/delete', {
+      'id': document.id,
+      'revision': document.revision,
+    });
+  }
+
+  Future<void> recoverCorpusDeletion() async {
+    await _postJson('/api/v1/corpus/library/recover', {});
+  }
+
   Future<CorpusStatus> fetchCorpusStatus() async {
     final json = await _getJson('/api/v1/corpus/status');
     return CorpusStatus.fromJson(json);
@@ -829,7 +904,7 @@ class ApiClient {
     return CorpusBuildStatus.fromJson(await _getJson('/api/v1/corpus/build'));
   }
 
-/// 触发建库：`POST /api/v1/corpus/build`（body {mode?}——缺省服务端按
+  /// 触发建库：`POST /api/v1/corpus/build`（body {mode?}——缺省服务端按
   /// embedding key 有无自动选路；[mode] 显式指定仅测试/演练用，如 'drill'）。
   /// [resetVectors]=true → 强制向量全量重建（2026-09-11「重建全部向量」：
   /// 清空 vectors + checkpoint 后按当前配置全量重嵌；incoming 无源文件时
@@ -838,8 +913,11 @@ class ApiClient {
   /// 单飞守卫：运行中重复触发 → triggered=false + running=true。
   /// 进度经 `LocalBackend.instance.corpusBuildState` 流订阅（local 专用旁路
   /// ——请求/响应通道装不下 Stream）。
-  Future<CorpusBuildTriggerResult> triggerCorpusBuild(
-      {String? mode, bool resetVectors = false, bool backfillVectors = false}) async {
+  Future<CorpusBuildTriggerResult> triggerCorpusBuild({
+    String? mode,
+    bool resetVectors = false,
+    bool backfillVectors = false,
+  }) async {
     final body = <String, dynamic>{
       if (mode != null && mode.isNotEmpty) 'mode': mode,
       if (resetVectors) 'resetVectors': true,
@@ -994,82 +1072,126 @@ abstract class OfflineAnswerStore {
   Future<int> restore();
   List<Map<String, dynamic>> drainPreview();
   Future<void> clear();
+
+  /// 只移除仍对应本次快照的队首；restore/clear 换代后宁可保留，也不能误删新条目。
+  Future<void> acknowledge(List<Map<String, dynamic>> accepted);
   bool get isEmpty;
   int get count;
 }
 
-/// 生产实现：SharedPreferences 单键 JSON 数组落盘
+bool _sameAnswerPrefix(
+  List<Map<String, dynamic>> current,
+  List<Map<String, dynamic>> accepted,
+) {
+  if (accepted.length > current.length) return false;
+  for (var i = 0; i < accepted.length; i++) {
+    if (!identical(current[i], accepted[i])) return false;
+  }
+  return true;
+}
+
 class SharedPrefsAnswerStore implements OfflineAnswerStore {
   SharedPrefsAnswerStore(this._prefs);
-
   final SharedPreferences _prefs;
-
   static const _key = 'hengya.offline_answers';
-
   List<Map<String, dynamic>> _cache = [];
+  bool _unreadable = false;
+  // 是否已从磁盘恢复：未恢复前 _cache 为空，直接 _save 会覆盖磁盘上尚未读入
+  // 的旧队列。append/clear 必须先确保完成一次 restore。
+  bool _hydrated = false;
+  Future<void> _writes = Future<void>.value();
 
-  @override
-  Future<void> append(Map<String, dynamic> item) async {
-    _cache.add(item);
-    await _save();
+  Future<T> _serial<T>(Future<T> Function() action) {
+    final result = _writes.then((_) => action());
+    _writes = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return result;
+  }
+
+  Future<void> _save(List<Map<String, dynamic>> next) async {
+    if (_unreadable) throw StateError('离线评分记录损坏，原始内容已保留；请修复后再离线评分');
+    try {
+      final ok = await _prefs.setString(_key, jsonEncode(next));
+      if (!ok) throw StateError('离线评分未能写入磁盘');
+    } catch (_) {
+      // SharedPreferences 自身会先更新内存缓存，失败时也要恢复它，避免 restore 读回失败条目。
+      try {
+        await _prefs.reload();
+      } catch (_) {}
+      rethrow;
+    }
+    _cache = next; // 持久化成功后才提交内存状态，失败不会留下幽灵评分。
   }
 
   @override
-  Future<int> restore() async {
+  Future<void> append(Map<String, dynamic> item) async {
+    if (!_hydrated) await restore(); // 先恢复磁盘旧队列，避免覆盖丢失
+    return _serial(() => _save([..._cache, Map<String, dynamic>.from(item)]));
+  }
+
+  @override
+  Future<void> clear() async {
+    if (!_hydrated) await restore();
+    return _serial(() => _save([]));
+  }
+  @override
+  Future<void> acknowledge(List<Map<String, dynamic>> accepted) =>
+      _serial(() async {
+        if (_sameAnswerPrefix(_cache, accepted)) {
+          await _save(_cache.sublist(accepted.length));
+        }
+      });
+  @override
+  Future<int> restore() => _serial(() async {
+    _unreadable = true; // 读取失败也不能让随后写入覆盖未知的旧队列。
+    await _prefs.reload();
     final raw = _prefs.getString(_key);
     if (raw == null || raw.isEmpty) {
       _cache = [];
+      _unreadable = false;
+      _hydrated = true;
       return 0;
     }
     try {
       final list = jsonDecode(raw) as List<dynamic>;
       _cache = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      _unreadable = false;
+      _hydrated = true;
       return _cache.length;
     } catch (_) {
-      _cache = []; // 磁盘数据损坏 → 弃掉，不让坏数据卡死评分
-      return 0;
+      _unreadable = true;
+      throw StateError('离线评分记录损坏，原始内容已保留；请修复后再离线评分');
+    }
+  });
+  @override
+  List<Map<String, dynamic>> drainPreview() => List.of(_cache);
+  @override
+  bool get isEmpty => _cache.isEmpty;
+  @override
+  int get count => _cache.length;
+}
+
+class InMemoryAnswerStore implements OfflineAnswerStore {
+  final List<Map<String, dynamic>> _items = [];
+  @override
+  Future<void> append(Map<String, dynamic> item) async {
+    _items.add(Map<String, dynamic>.from(item));
+  }
+
+  @override
+  Future<int> restore() async => _items.length;
+  @override
+  List<Map<String, dynamic>> drainPreview() => List.of(_items);
+  @override
+  Future<void> clear() async => _items.clear();
+  @override
+  Future<void> acknowledge(List<Map<String, dynamic>> accepted) async {
+    if (_sameAnswerPrefix(_items, accepted)) {
+      _items.removeRange(0, accepted.length);
     }
   }
 
   @override
-  List<Map<String, dynamic>> drainPreview() => List.from(_cache);
-
-  @override
-  Future<void> clear() async {
-    _cache = [];
-    await _save();
-  }
-
-  @override
-  bool get isEmpty => _cache.isEmpty;
-
-  @override
-  int get count => _cache.length;
-
-  Future<void> _save() async {
-    await _prefs.setString(_key, jsonEncode(_cache));
-  }
-}
-
-/// 测试实现：纯内存
-class InMemoryAnswerStore implements OfflineAnswerStore {
-  final List<Map<String, dynamic>> _items = [];
-
-  @override
-  Future<void> append(Map<String, dynamic> item) async => _items.add(item);
-
-  @override
-  Future<int> restore() async => _items.length;
-
-  @override
-  List<Map<String, dynamic>> drainPreview() => List.from(_items);
-
-  @override
-  Future<void> clear() async => _items.clear();
-
-  @override
   bool get isEmpty => _items.isEmpty;
-
   @override
   int get count => _items.length;
 }
@@ -1297,7 +1419,7 @@ class AiSettings {
     );
   }
 
-/// 按服务名取配置（service ∈ llm | llm_backup | embedding | reranker）
+  /// 按服务名取配置（service ∈ llm | llm_backup | embedding | reranker）
   AiServiceConfig of(String service) => switch (service) {
     'embedding' => embedding,
     'reranker' => reranker,
@@ -1704,9 +1826,7 @@ class SubjectProgress {
 
   /// 进度比例 0.0~1.0（total=0 防除零；展示口径）
   double get fraction =>
-      displayTotal > 0
-      ? (displayLearned / displayTotal).clamp(0.0, 1.0)
-      : 0;
+      displayTotal > 0 ? (displayLearned / displayTotal).clamp(0.0, 1.0) : 0;
 
   factory SubjectProgress.fromJson(Map<String, dynamic> json) =>
       SubjectProgress(
@@ -1796,8 +1916,7 @@ class SubjectChapters {
   final NextChapterInfo? nextChapter; // 跳过感知的下一章；学完 → null
 
   /// 进度比例 0.0~1.0（effectiveTotal=0 防除零）
-  double get fraction =>
-      effectiveTotal > 0
+  double get fraction => effectiveTotal > 0
       ? (effectiveLearned / effectiveTotal).clamp(0.0, 1.0)
       : 0;
 

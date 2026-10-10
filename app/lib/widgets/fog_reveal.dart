@@ -15,6 +15,9 @@
 // =====================================================================
 
 import 'dart:ui' as ui;
+import 'dart:math' as math;
+
+import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -34,7 +37,7 @@ const Color kFogGradientLight = Color(0x20F5F0E6);
 const Color kFogGradientDense = Color(0x70F5F0E6);
 
 /// 擦除笔刷半径（dp）
-const double kEraseBrushRadius = 20.0;
+const double kEraseBrushRadius = 26.0;
 
 /// 擦除边缘柔和模糊半径
 const double kEraseSoftEdge = 6.0;
@@ -71,6 +74,29 @@ class FogRevealController extends ChangeNotifier {
   Offset _dragPoint = Offset.zero;
   int _generation = 0;
   double sheetHeight = 0;
+  Path _erasePath = Path();
+  int _strokeRevision = 0;
+  int _pointCount = 0;
+  Path get erasePath => _erasePath;
+  bool isErased(Offset position) => _erasePath.contains(position);
+  int get strokeRevision => _strokeRevision;
+
+  void _appendMask(Offset p, [Offset? previous]) {
+    _erasePath.addOval(Rect.fromCircle(center: p, radius: kEraseBrushRadius));
+    if (previous != null && (p - previous).distance > .01) {
+      final delta = p - previous;
+      final normal =
+          Offset(delta.dy, -delta.dx) / delta.distance * kEraseBrushRadius;
+      _erasePath.addPolygon([
+        previous + normal,
+        p + normal,
+        p - normal,
+        previous - normal,
+      ], true);
+    }
+    _pointCount++;
+    _strokeRevision++;
+  }
 
   FogPhase get phase => _phase;
   bool get isCleared => _phase == FogPhase.cleared;
@@ -84,6 +110,9 @@ class FogRevealController extends ChangeNotifier {
   void reset() {
     _phase = FogPhase.idle;
     strokes.clear();
+    _erasePath = Path();
+    _pointCount = 0;
+    _strokeRevision++;
     _dragPoint = Offset.zero;
     _generation++;
     notifyListeners();
@@ -95,12 +124,17 @@ class FogRevealController extends ChangeNotifier {
     if (_phase == FogPhase.cleared || isPeeling) return;
     _phase = FogPhase.erasing;
     strokes.add([p]);
+    _appendMask(p);
     notifyListeners();
   }
 
   void erase(Offset p) {
     if (_phase != FogPhase.erasing || strokes.isEmpty) return;
+    final previous = strokes.last.last;
+    // 空间采样，避免手指静止时不断堆积点；所有路径段均为连续圆头笔刷。
+    if ((p - previous).distance < 2.5 || _pointCount >= 6000) return;
     strokes.last.add(p);
+    _appendMask(p, previous);
     notifyListeners();
   }
 
@@ -150,6 +184,7 @@ class FogRevealController extends ChangeNotifier {
   }
 
   void markCleared() {
+    if (isCleared) return;
     _phase = FogPhase.cleared;
     notifyListeners();
   }
@@ -179,8 +214,12 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
   Offset _animTo = Offset.zero;
   Offset? _panDownPoint;
   int _animGeneration = -1;
+  int _seenGeneration = 0;
+  bool _motionActive = false;
+  bool _flying = false;
   double _fade = 1.0;
   double? _measuredTextHeight;
+  Size _sheetSize = Size.zero;
 
   @override
   void initState() {
@@ -189,6 +228,8 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
       vsync: this,
       duration: const Duration(milliseconds: 450),
     );
+    _seenGeneration = widget.controller.generation;
+    _anim.addListener(_motionTick);
     widget.controller.addListener(_onChanged);
   }
 
@@ -196,7 +237,10 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
   void didUpdateWidget(covariant FogPeel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
+      _stopMotion();
       oldWidget.controller.removeListener(_onChanged);
+      _seenGeneration = widget.controller.generation;
+      _measuredTextHeight = null;
       widget.controller.addListener(_onChanged);
     }
   }
@@ -208,14 +252,28 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
     super.dispose();
   }
 
-  void _onChanged() => setState(() {});
-
-  // ---- 手势 ----
-
-  bool _inCornerZone(Offset local, Size size) {
-    return local.dx >= size.width - kCornerHitSize &&
-        local.dy >= size.height - kCornerHitSize;
+  void _stopMotion() {
+    _motionActive = false;
+    _anim.stop();
   }
+
+  void _onChanged() {
+    final ctrl = widget.controller;
+    if (ctrl.generation != _seenGeneration || ctrl.isCleared) {
+      _stopMotion();
+      _fade = 1;
+      _panDownPoint = null;
+      if (ctrl.generation != _seenGeneration) {
+        _measuredTextHeight = null;
+      }
+      _seenGeneration = ctrl.generation;
+    }
+    if (mounted) setState(() {});
+  }
+
+  bool _inCornerZone(Offset p, Size size) =>
+      p.dx >= size.width - kCornerHitSize &&
+      p.dy >= size.height - kCornerHitSize;
 
   void _onPanDown(DragDownDetails d) {
     _panDownPoint = d.localPosition;
@@ -224,110 +282,130 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
   void _onPanStart(DragStartDetails d) {
     final ctrl = widget.controller;
     if (ctrl.isCleared) return;
-    final p = d.localPosition;
-    final sz = context.size ?? Size.zero;
-    if (_inCornerZone(_panDownPoint ?? p, sz)) {
-      ctrl.beginPeel(p);
-    } else {
-      ctrl.beginErase(p);
+    final size = _sheetSize;
+    if (_inCornerZone(_panDownPoint ?? d.localPosition, size)) {
+      _stopMotion();
+      _fade = 1;
+      HapticFeedback.selectionClick();
+      ctrl.beginPeel(d.localPosition);
+    } else if (!ctrl.isPeeling) {
+      ctrl.beginErase(_panDownPoint ?? d.localPosition);
+      ctrl.erase(d.localPosition);
     }
   }
 
   void _onPanUpdate(DragUpdateDetails d) {
     final ctrl = widget.controller;
+    final size = _sheetSize;
     if (ctrl.phase == FogPhase.peeling) {
-      ctrl.updatePeel(d.localPosition);
+      ctrl.updatePeel(
+        Offset(
+          d.localPosition.dx.clamp(-size.width, size.width),
+          d.localPosition.dy.clamp(-size.height, size.height),
+        ),
+      );
     } else if (ctrl.phase == FogPhase.erasing) {
       ctrl.erase(d.localPosition);
     }
   }
 
-  void _onPanEnd(DragEndDetails d) {
+  void _onPanCancel() {
+    _panDownPoint = null;
     final ctrl = widget.controller;
-    final gen = ctrl.generation;
+    if (ctrl.phase == FogPhase.erasing) ctrl.endErase();
+    if (ctrl.phase == FogPhase.peeling) _startMotion(fly: false);
+  }
+
+  void _onPanEnd(DragEndDetails d) {
+    _panDownPoint = null;
+    final ctrl = widget.controller;
     if (ctrl.phase == FogPhase.erasing) {
       ctrl.endErase();
       return;
     }
     if (ctrl.phase != FogPhase.peeling) return;
-
-    final sz = context.size ?? Size.zero;
-    final c = Offset(sz.width, sz.height); // 右下角原点
-    final diag = c.distance;
-    final dragDist = (ctrl.dragPoint - c).distance;
-    final vel = d.velocity.pixelsPerSecond.distance;
-
-    if (dragDist >= diag * kFlyOutThreshold || vel >= kFlyOutVelocity) {
-      // 飞出
-      final dir = (ctrl.dragPoint - c);
-      final norm = dir / dir.distance;
-      final target = c + norm * diag * 1.5;
-      _animFrom = ctrl.dragPoint;
-      _animTo = target;
-      ctrl.startFlyOut(target);
-      _animGeneration = gen;
-      _anim
-        ..duration = const Duration(milliseconds: 350)
-        ..reset();
-      _fade = 1.0;
-      _anim.addListener(_flyOutTick);
-      _anim.forward();
-    } else {
-      // 弹回
-      _animFrom = ctrl.dragPoint;
-      _animTo = c;
-      ctrl.startSpringBack();
-      _animGeneration = gen;
-      _anim
-        ..duration = const Duration(milliseconds: 240)
-        ..reset();
-      _anim.addListener(_springBackTick);
-      _anim.forward();
-    }
+    final size = _sheetSize;
+    final corner = Offset(size.width, size.height);
+    final direction = ctrl.dragPoint - corner;
+    final distance = direction.distance;
+    final velocity = distance < 1
+        ? 0.0
+        : (d.velocity.pixelsPerSecond.dx * direction.dx +
+                  d.velocity.pixelsPerSecond.dy * direction.dy) /
+              distance;
+    final fly =
+        corner.distance > 0 &&
+        distance > 20 &&
+        (distance >= corner.distance * kFlyOutThreshold ||
+            velocity >= kFlyOutVelocity);
+    _startMotion(fly: fly);
   }
 
   void _onTap() {
     final ctrl = widget.controller;
-    if (ctrl.isCleared) return;
-    final sz = context.size ?? Size.zero;
-    final c = Offset(sz.width, sz.height);
-    // 自动掀页：从右下角到左上方
-    final gen = ctrl.generation;
-    ctrl.beginPeel(c);
-    _animFrom = c;
-    _animTo = Offset(-sz.width * 0.3, -sz.height * 0.3);
-    ctrl.startFlyOut(_animTo);
-    _animGeneration = gen;
-    _anim
-      ..duration = const Duration(milliseconds: 450)
-      ..reset();
-    _fade = 1.0;
-    _anim.addListener(_flyOutTick);
+    if (ctrl.isCleared || ctrl.isPeeling) return;
+    final size = _sheetSize;
+    ctrl.beginPeel(Offset(size.width, size.height));
+    _startMotion(fly: true, fromTap: true);
+  }
+
+  void _startMotion({required bool fly, bool fromTap = false}) {
+    final ctrl = widget.controller;
+    final size = _sheetSize;
+    final corner = Offset(size.width, size.height);
+    _stopMotion();
+    if (MediaQuery.disableAnimationsOf(context) || corner.distance < 1) {
+      if (fly) {
+        ctrl.markCleared();
+      } else {
+        ctrl.startSpringBack();
+        ctrl.setDragPoint(corner);
+        ctrl.endSpringBack();
+      }
+      return;
+    }
+    _animFrom = ctrl.dragPoint;
+    final direction = _animFrom - corner;
+    _animTo = !fly
+        ? corner
+        : fromTap || direction.distance < 1
+        ? Offset(-size.width * .3, -size.height * .3)
+        : corner + direction / direction.distance * corner.distance * 1.5;
+    _animGeneration = ctrl.generation;
+    _flying = fly;
+    _fade = 1;
+    _anim.duration = Duration(milliseconds: fly ? 280 : 240);
+    _anim.value = 0;
+    _motionActive = true;
+    if (fly) {
+      HapticFeedback.lightImpact();
+      ctrl.startFlyOut(_animFrom);
+    } else {
+      ctrl.startSpringBack();
+    }
     _anim.forward();
   }
 
-  void _flyOutTick() {
-    if (widget.controller.generation != _animGeneration) return;
-    final t = Curves.easeOut.transform(_anim.value);
-    widget.controller
-        .setDragPoint(Offset.lerp(_animFrom, _animTo, t)!);
-    _fade = 1.0 - t;
-    if (_anim.value >= 1.0) {
-      _anim.removeListener(_flyOutTick);
-      widget.controller.markCleared();
-      setState(() => _fade = 1.0);
+  // 固定注册的单一监听器。取消/换卡不会留下重复监听或过期回调。
+  void _motionTick() {
+    if (!_motionActive || widget.controller.generation != _animGeneration) {
+      return;
     }
-  }
-
-  void _springBackTick() {
-    if (widget.controller.generation != _animGeneration) return;
-    final t = Curves.elasticOut.transform(_anim.value);
-    widget.controller
-        .setDragPoint(Offset.lerp(_animFrom, _animTo, t)!);
-    if (_anim.value >= 1.0) {
-      _anim.removeListener(_springBackTick);
-      widget.controller.setDragPoint(_animTo);
-      widget.controller.endSpringBack();
+    final ctrl = widget.controller;
+    final t = (_flying ? Curves.easeOutCubic : Curves.easeOutBack).transform(
+      _anim.value,
+    );
+    _fade = _flying ? 1 - _anim.value : 1;
+    ctrl.setDragPoint(Offset.lerp(_animFrom, _animTo, t)!);
+    if (_anim.value >= 1) {
+      _motionActive = false;
+      if (_flying) {
+        ctrl.markCleared();
+      } else {
+        ctrl.setDragPoint(_animTo);
+        ctrl.endSpringBack();
+      }
+      _fade = 1;
     }
   }
 
@@ -337,73 +415,93 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
   Widget build(BuildContext context) {
     final ctrl = widget.controller;
 
-    return LayoutBuilder(builder: (context, constraints) {
-      final avail = Size(constraints.maxWidth,
-          constraints.maxHeight.isFinite ? constraints.maxHeight : 400);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final avail = Size(
+          constraints.maxWidth,
+          constraints.maxHeight.isFinite ? constraints.maxHeight : 400,
+        );
 
-      Widget answerContent(Size sz) => SizedBox(
-            width: sz.width,
-            child: widget.child,
-          );
+        Widget answerContent(Size sz) => SizedBox(
+          width: sz.width,
+          height: sz.height,
+          child: ExcludeSemantics(
+            excluding: !ctrl.isCleared,
+            child: SingleChildScrollView(child: widget.child),
+          ),
+        );
 
-      if (ctrl.isCleared) {
-        return answerContent(avail);
-      }
+        if (ctrl.isCleared) {
+          return answerContent(avail);
+        }
 
-      if (widget.sheetMode == FogSheetMode.fill) {
-        ctrl.sheetHeight = avail.height;
-        return _buildFogStack(answerContent(avail), avail);
-      }
+        if (widget.sheetMode == FogSheetMode.fill) {
+          ctrl.sheetHeight = avail.height;
+          return _buildFogStack(answerContent(avail), avail);
+        }
 
-      // hugText 模式：测量文字高度
-      final measured = _measuredTextHeight;
-      final sheetH = measured == null
-          ? kFogSheetMinHeight
-          : measured.clamp(kFogSheetMinHeight, avail.height);
-      ctrl.sheetHeight = sheetH;
+        // hugText 模式：测量文字高度
+        final measured = _measuredTextHeight;
+        final sheetH =
+            (measured == null
+                    ? math.min(kFogSheetMinHeight, avail.height)
+                    : measured.clamp(
+                        math.min(kFogSheetMinHeight, avail.height),
+                        avail.height,
+                      ))
+                .toDouble();
+        ctrl.sheetHeight = sheetH;
 
-      return SizedBox(
-        width: avail.width,
-        height: sheetH,
-        child: Stack(
-          children: [
-            // Offstage 副本测量文字实际高度
-            Positioned(
-              left: 0,
-              right: 0,
-              top: 0,
-              child: _HugTextMeasurer(
-                width: avail.width,
-                onHeight: (h) {
-                  if ((_measuredTextHeight == null ||
-                          (h - _measuredTextHeight!).abs() > 1)) {
-                    setState(() => _measuredTextHeight = h);
-                  }
-                },
-                child: widget.child,
+        return SizedBox(
+          width: avail.width,
+          height: sheetH,
+          child: Stack(
+            children: [
+              // Offstage 副本测量文字实际高度
+              Positioned(
+                left: 0,
+                right: 0,
+                top: 0,
+                child: _HugTextMeasurer(
+                  width: avail.width,
+                  onHeight: (h) {
+                    if (mounted &&
+                        (_measuredTextHeight == null ||
+                            (h - _measuredTextHeight!).abs() > 1)) {
+                      setState(() => _measuredTextHeight = h);
+                    }
+                  },
+                  child: widget.child,
+                ),
               ),
-            ),
-            SizedBox(
-              width: avail.width,
-              height: sheetH,
-              child: _buildFogStack(answerContent(Size(avail.width, sheetH)),
-                  Size(avail.width, sheetH)),
-            ),
-          ],
-        ),
-      );
-    });
+              SizedBox(
+                width: avail.width,
+                height: sheetH,
+                child: _buildFogStack(
+                  answerContent(Size(avail.width, sheetH)),
+                  Size(avail.width, sheetH),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   Widget _buildFogStack(Widget answerContent, Size avail) {
+    // hugText 的手势局部坐标属于小纸片，不能拿外层 Expanded 的尺寸判定纸角。
+    _sheetSize = avail;
     final ctrl = widget.controller;
     final isAnimating = ctrl.isPeeling;
-    final fadeOpacity =
-        ctrl.phase == FogPhase.flying ? _fade.clamp(0.0, 1.0) : 1.0;
+    final fadeOpacity = ctrl.phase == FogPhase.flying
+        ? _fade.clamp(0.0, 1.0)
+        : 1.0;
 
     // P4: ClipRect 兜底——翻页卷曲不溢出自身边界
     return ClipRect(
       child: SizedBox(
+        key: const ValueKey('fog-sheet'),
         width: avail.width,
         height: avail.height,
         child: GestureDetector(
@@ -411,6 +509,7 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
           onPanStart: _onPanStart,
           onPanUpdate: _onPanUpdate,
           onPanEnd: _onPanEnd,
+          onPanCancel: _onPanCancel,
           onTap: _onTap,
           behavior: HitTestBehavior.opaque,
           child: Stack(
@@ -427,6 +526,8 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
                     opacity: fadeOpacity,
                     child: ClipPath(
                       clipper: _PeelOnlyClipper(
+                        erasePath: ctrl.erasePath,
+                        revision: ctrl.strokeRevision,
                         peelCorner: null, // 静态无翻页
                         sheetSize: avail,
                       ),
@@ -483,10 +584,14 @@ class _FogPeelState extends State<FogPeel> with SingleTickerProviderStateMixin {
 class _PeelOnlyClipper extends CustomClipper<Path> {
   _PeelOnlyClipper({
     this.peelCorner,
+    this.erasePath,
+    this.revision = 0,
     required this.sheetSize,
   });
 
   final Offset? peelCorner;
+  final Path? erasePath;
+  final int revision;
   final Size sheetSize;
 
   @override
@@ -502,20 +607,22 @@ class _PeelOnlyClipper extends CustomClipper<Path> {
       }
     }
 
+    if (erasePath != null) {
+      fogPath = Path.combine(PathOperation.difference, fogPath, erasePath!);
+    }
     return fogPath;
   }
 
   @override
   bool shouldReclip(covariant _PeelOnlyClipper oldClipper) =>
-      oldClipper.peelCorner != peelCorner;
+      oldClipper.peelCorner != peelCorner ||
+      oldClipper.revision != revision ||
+      oldClipper.sheetSize != sheetSize;
 
   /// 翻页揭开区域：从右下角到拖动点，用折线分割
   static Path? _buildPeelRevealPath(Offset drag, Size size) {
     final corner = Offset(size.width, size.height);
-    final mid = Offset(
-      (corner.dx + drag.dx) / 2,
-      (corner.dy + drag.dy) / 2,
-    );
+    final mid = Offset((corner.dx + drag.dx) / 2, (corner.dy + drag.dy) / 2);
     final d = corner - drag;
     final len = d.distance;
     if (len < 2) return null;
@@ -567,12 +674,14 @@ class _FogTintPainter extends CustomPainter {
 
     // 翻页时裁剪掉揭开区域
     if (peelCorner != null) {
-      final peelPath = _PeelOnlyClipper._buildPeelRevealPath(
-          peelCorner!, size);
+      final peelPath = _PeelOnlyClipper._buildPeelRevealPath(peelCorner!, size);
       if (peelPath != null) {
         final clipPath = Path()..addRect(rect);
-        final clipped =
-            Path.combine(PathOperation.difference, clipPath, peelPath);
+        final clipped = Path.combine(
+          PathOperation.difference,
+          clipPath,
+          peelPath,
+        );
         canvas.save();
         canvas.clipPath(clipped);
       }
@@ -610,8 +719,10 @@ class _FogTintPainter extends CustomPainter {
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         // P5: MaskFilter 让擦除边缘柔和过渡
-        ..maskFilter =
-            const MaskFilter.blur(BlurStyle.normal, kEraseDissolveRadius);
+        ..maskFilter = const MaskFilter.blur(
+          BlurStyle.normal,
+          kEraseDissolveRadius,
+        );
 
       for (final stroke in strokes) {
         if (stroke.isEmpty) continue;
@@ -642,8 +753,7 @@ class _FogTintPainter extends CustomPainter {
 
     // 恢复翻页裁剪
     if (peelCorner != null) {
-      final peelPath = _PeelOnlyClipper._buildPeelRevealPath(
-          peelCorner!, size);
+      final peelPath = _PeelOnlyClipper._buildPeelRevealPath(peelCorner!, size);
       if (peelPath != null) {
         canvas.restore();
       }
@@ -674,7 +784,8 @@ class _CornerPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (phase == FogPhase.cleared) return;
 
-    final isPeeling = phase == FogPhase.peeling ||
+    final isPeeling =
+        phase == FogPhase.peeling ||
         phase == FogPhase.flying ||
         phase == FogPhase.springback;
 
@@ -710,9 +821,7 @@ class _CornerPainter extends CustomPainter {
       ..lineTo(br.dx, br.dy - s)
       ..close();
 
-    final triBounds = Rect.fromLTRB(
-      br.dx - s, br.dy - s, br.dx, br.dy,
-    );
+    final triBounds = Rect.fromLTRB(br.dx - s, br.dy - s, br.dx, br.dy);
     final triPaint = Paint()
       ..shader = LinearGradient(
         begin: Alignment.topLeft,
@@ -818,10 +927,14 @@ class _CornerPainter extends CustomPainter {
       // 阴影画在折线靠卷曲一侧
       final shadowOffset = -u * 3.0;
       final innerShadowLine = Path()
-        ..moveTo(mid.dx + v.dx * big + shadowOffset.dx,
-            mid.dy + v.dy * big + shadowOffset.dy)
-        ..lineTo(mid.dx - v.dx * big + shadowOffset.dx,
-            mid.dy - v.dy * big + shadowOffset.dy);
+        ..moveTo(
+          mid.dx + v.dx * big + shadowOffset.dx,
+          mid.dy + v.dy * big + shadowOffset.dy,
+        )
+        ..lineTo(
+          mid.dx - v.dx * big + shadowOffset.dx,
+          mid.dy - v.dy * big + shadowOffset.dy,
+        );
       canvas.drawPath(innerShadowLine, innerShadowPaint);
 
       canvas.restore();
@@ -830,8 +943,14 @@ class _CornerPainter extends CustomPainter {
 
   /// 构建卷曲纸背面路径（折线到拖动点之间的带状区域）
   Path? _buildCurlPath(
-      Offset corner, Offset drag, Offset mid, Offset u, Offset v,
-      double big, Size size) {
+    Offset corner,
+    Offset drag,
+    Offset mid,
+    Offset u,
+    Offset v,
+    double big,
+    Size size,
+  ) {
     final curlWidth = (corner - drag).distance * 0.3; // 卷曲宽度
     if (curlWidth < 2) return null;
 
@@ -851,9 +970,7 @@ class _CornerPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _CornerPainter old) =>
-      old.phase != phase ||
-      old.dragPoint != dragPoint ||
-      old.fade != fade;
+      old.phase != phase || old.dragPoint != dragPoint || old.fade != fade;
 }
 
 // ------------------------------------------------ 文字高度测量 ----
@@ -874,7 +991,9 @@ class _HugTextMeasurer extends SingleChildRenderObjectWidget {
 
   @override
   void updateRenderObject(
-      BuildContext context, covariant _HugTextRenderBox renderObject) {
+    BuildContext context,
+    covariant _HugTextRenderBox renderObject,
+  ) {
     renderObject
       ..width = width
       ..onHeight = onHeight;
@@ -902,10 +1021,7 @@ class _HugTextRenderBox extends RenderBox
       size = constraints.constrain(Size.zero);
       return;
     }
-    c.layout(
-      BoxConstraints.tightFor(width: _width),
-      parentUsesSize: true,
-    );
+    c.layout(BoxConstraints.tightFor(width: _width), parentUsesSize: true);
     final h = c.size.height;
     size = constraints.constrain(Size(_width, h));
     if ((h - _last).abs() > 0.5) {
@@ -917,8 +1033,11 @@ class _HugTextRenderBox extends RenderBox
   }
 
   @override
+  void visitChildrenForSemantics(RenderObjectVisitor visitor) {}
+
+  @override
   void paint(PaintingContext context, Offset offset) {
-    // Offstage — 不绘制
+    // Offstage — 不绘制，也不把被遮盖的答案读给屏幕阅读器。
   }
 
   @override

@@ -25,6 +25,7 @@ import 'dart:io';
 
 import 'package:hengya/services/local/db.dart';
 import 'package:shared/hengya_shared.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 /// 在 [dirPath] 下生成 `hengya-synthetic-snapshot.db`，返回文件路径。
 ///
@@ -97,7 +98,10 @@ Future<String> writeSyntheticSnapshot(String dirPath) async {
     for (final e in rejectedBySubject.entries) {
       for (var i = 0; i < e.value; i++) {
         final id = 'synth-rej-${e.key}-${i.toString().padLeft(3, '0')}';
-        db.importCard(synth(id, e.key, CardStatus.rejected));
+        // 2026-10-10：新回炉协议要求「仅 active/pending 可创建修复任务」——
+        // 先以待审卡导入，再经 rejectCardWithReason 转 rejected 并登记回炉任务，
+        // 终态与原快照一致（rejected 卡 + rework_queue 条目）。
+        db.importCard(synth(id, e.key, CardStatus.pending));
         db.rejectCardWithReason(id, '答案有误（合成演示）', '合成演示批注');
       }
     }
@@ -141,10 +145,16 @@ Future<String> writeSyntheticSnapshot(String dirPath) async {
       );
     }
 
-    // ── data_version = 78：对齐原快照水位（e2e 断言导入后 '78'、
-    // 写操作 bump 后 > 78、导出往返保持）。
-    for (var i = 0; i < 78; i++) {
-      db.bumpDataVersion();
+    // ── data_version = 78：对齐原快照水位（e2e 断言导入后 '78'、写操作
+    // bump 后 > 78、导出往返保持）。**直接置为 78 而非循环 bump**——上方
+    // 的 rejectCardWithReason 等写操作也会 bump（次数随实现变化），
+    // 循环 bump 无法保证终值恰为 78。
+    db.close();
+    final raw = sqlite3.open(path);
+    try {
+      raw.execute("UPDATE meta SET value = '78' WHERE key = 'data_version'");
+    } finally {
+      raw.dispose();
     }
   } finally {
     db.close(); // 最后一个连接关闭：WAL 自动 checkpoint 收编单文件

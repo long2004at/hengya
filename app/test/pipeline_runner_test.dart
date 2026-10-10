@@ -15,6 +15,7 @@
 // 本文件为纯 dart test（非 testWidgets）：真实异步 IO 合法（假异步纪律
 // 仅约束 widget 测试）；Windows 宿主 sqlite3.dll 加载同 local_backend_test。
 import 'dart:async';
+import 'helpers/rework_fixture.dart';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -237,11 +238,7 @@ void main() {
             ],
           });
         case 'rework':
-          return jsonEncode({
-            'front': '重写后的回炉题干',
-            'back': '重写后的三点答案',
-            'evidenceChunkId': 'r1',
-          });
+          return validReworkLlm(user);
         case 'synonym':
           return '{"queries": []}';
         case 'weekly':
@@ -250,9 +247,13 @@ void main() {
       throw LlmException('未知 tag: $tag');
     }
 
+    final corpus = sqlite3.openInMemory();
+    seedReworkEvidence(corpus);
+    addTearDown(corpus.dispose);
     final result = await runCatchup(
       deps: PipelineDeps(
         db: db,
+        port: LocalDbPort(db, corpusDb: corpus),
         runSearch: runSearch,
         llmChat: llmChat,
         prompts: const {},
@@ -282,8 +283,8 @@ void main() {
     expect(ic['inserted'], 2);
     expect(ic['skipped'], 0);
     expect(ic['consumed'], 1);
-    expect(counts['reworkDone'], 1);
-    expect(counts['reworkDraft'], 0);
+    expect(counts['reworkDone'], 0);
+    expect(counts['reworkDraft'], 1);
     // compass 行（含 hit 即计，≈run.py L1108）+ studylog advancedCount（≈L1266）
     expect(counts['compassAdvances'], 2);
     expect(counts['pendingPool'], 0); // 上下文取自开跑前（种子卡处于 rework 态）
@@ -318,11 +319,16 @@ void main() {
     expect(db.inboxPending(), isEmpty); // 关键词 + 学习记录条目均已消费
     expect(db.reworkPending(), isEmpty);
     final reworked = db.cardById('endo-orig-001')!;
-    expect(reworked.status, CardStatus.pending); // 回炉完成 → 回待审核池
-    expect(reworked.front, '重写后的回炉题干');
-    expect(reworked.back, '重写后的三点答案');
-    expect(reworked.anchor, '回炉章 p30-32'); // composeAnchor(evidenceChunkId)
-    expect(db.unreadAiNotes(), isEmpty); // done 后自动标已读（契约 3）
+    expect(reworked.status, CardStatus.rework); // 未应用之前原卡保持不变
+    expect(reworked.front, '原始回炉题干');
+    expect(reworked.back, '原始答案');
+    expect(reworked.anchor, '绪论 p1');
+    final task = db.getReworkTask(db.activeReworkTask(reworked.id)!)!;
+    expect(task['status'], 'draft');
+    final draft = ((task['draft'] as Map)['cards'] as List).single as Map;
+    expect(draft['front'], '重写后的回炉题干');
+    expect(draft['anchor'], '回炉章 p30-32');
+    expect(db.unreadAiNotes(), isNotEmpty, reason: '生成草案并非用户已确认应用');
     final examCard = db.cardById('exam-endo-2023-42')!;
     expect(examCard.sourceTier, SourceTier.exam);
     expect(examCard.examYear, '2023');
@@ -677,38 +683,41 @@ void main() {
     db.settingSet('embedding.instructQuery', '1');
     expect(assembleEmbedConfig(db, apiKey: key)!.queryInstruct, isNull);
 
-// 端到端：闭包装配形态不受影响（embed 注入 + 真实 model 透传）
+    // 端到端：闭包装配形态不受影响（embed 注入 + 真实 model 透传）
     final wired = assembleEmbedder(db, apiKey: key);
     expect(wired.embed, isNotNull);
     expect(wired.embedModel, 'Qwen/Qwen3-VL-Embedding-8B');
   });
 
-  test('reranker 两形态兼容：assembleEmbedConfig 装配 settings reranker.baseUrl', () async {
-    // 2026-09-11 修复：修复前 rerankUrl 恒走默认 kRerankApiUrl，用户设置页配的
-    // reranker.baseUrl/model 对运行时检索重排不生效。现统一经
-    // normalizeRerankEndpoint 规范化（基址 …/v1 → 补 /rerank）+ 透传 model。
-    final db = await openDb();
-    addTearDown(db.close);
-    const key = 'sk-embed-test-123456';
-    db.settingSet('embedding.model', 'Qwen/Qwen3-VL-Embedding-8B');
+  test(
+    'reranker 两形态兼容：assembleEmbedConfig 装配 settings reranker.baseUrl',
+    () async {
+      // 2026-09-11 修复：修复前 rerankUrl 恒走默认 kRerankApiUrl，用户设置页配的
+      // reranker.baseUrl/model 对运行时检索重排不生效。现统一经
+      // normalizeRerankEndpoint 规范化（基址 …/v1 → 补 /rerank）+ 透传 model。
+      final db = await openDb();
+      addTearDown(db.close);
+      const key = 'sk-embed-test-123456';
+      db.settingSet('embedding.model', 'Qwen/Qwen3-VL-Embedding-8B');
 
-    // 缺省：reranker 未配置 → 回退默认端点 + 默认模型
-    final def = assembleEmbedConfig(db, apiKey: key);
-    expect(def!.rerankUrl, kRerankApiUrl);
-    expect(def.rerankModel, kRerankModelDefault);
+      // 缺省：reranker 未配置 → 回退默认端点 + 默认模型
+      final def = assembleEmbedConfig(db, apiKey: key);
+      expect(def!.rerankUrl, kRerankApiUrl);
+      expect(def.rerankModel, kRerankModelDefault);
 
-    // 基址形态（…/v1，用户实际填的 404 根因）→ 自动补 /rerank
-    db.settingSet('reranker.baseUrl', 'https://api.siliconflow.cn/v1');
-    db.settingSet('reranker.model', 'Qwen/Qwen3-Reranker-4B');
-    final base = assembleEmbedConfig(db, apiKey: key);
-    expect(base!.rerankUrl, 'https://api.siliconflow.cn/v1/rerank');
-    expect(base.rerankModel, 'Qwen/Qwen3-Reranker-4B');
+      // 基址形态（…/v1，用户实际填的 404 根因）→ 自动补 /rerank
+      db.settingSet('reranker.baseUrl', 'https://api.siliconflow.cn/v1');
+      db.settingSet('reranker.model', 'Qwen/Qwen3-Reranker-4B');
+      final base = assembleEmbedConfig(db, apiKey: key);
+      expect(base!.rerankUrl, 'https://api.siliconflow.cn/v1/rerank');
+      expect(base.rerankModel, 'Qwen/Qwen3-Reranker-4B');
 
-    // 完整端点形态 → 原样（幂等不重复补）
-    db.settingSet('reranker.baseUrl', 'https://api.siliconflow.cn/v1/rerank');
-    final full = assembleEmbedConfig(db, apiKey: key);
-    expect(full!.rerankUrl, 'https://api.siliconflow.cn/v1/rerank');
-  });
+      // 完整端点形态 → 原样（幂等不重复补）
+      db.settingSet('reranker.baseUrl', 'https://api.siliconflow.cn/v1/rerank');
+      final full = assembleEmbedConfig(db, apiKey: key);
+      expect(full!.rerankUrl, 'https://api.siliconflow.cn/v1/rerank');
+    },
+  );
 
   test('#8 查询嵌入异常 → 降级词面单路出真结果 + notes 标注（不炸穿）', () async {
     // 最小合成库（同「嵌入装配」测试款）：chunks + vectors + meta 一致模型
@@ -882,7 +891,11 @@ void main() {
       return {'results': <Object?>[]};
     }
 
-    Future<String> llmChat(String system, String user, {String tag = ''}) async {
+    Future<String> llmChat(
+      String system,
+      String user, {
+      String tag = '',
+    }) async {
       if (tag == 'weekly') {
         llmCalls++;
         return jsonEncode({
@@ -973,7 +986,11 @@ void main() {
       return {'results': <Object?>[]};
     }
 
-    Future<String> llmChat(String system, String user, {String tag = ''}) async {
+    Future<String> llmChat(
+      String system,
+      String user, {
+      String tag = '',
+    }) async {
       if (tag == 'weekly') {
         return jsonEncode({
           'cards': [
@@ -1023,8 +1040,9 @@ void main() {
     var llmCalls = 0;
     final deps = PipelineDeps(
       db: db,
-      runSearch: (query, {subject, sourceType, k}) async =>
-          {'results': <Object?>[]},
+      runSearch: (query, {subject, sourceType, k}) async => {
+        'results': <Object?>[],
+      },
       llmChat: (system, user, {tag = ''}) async {
         llmCalls++;
         throw LlmException('不应调用');
@@ -1066,32 +1084,35 @@ void main() {
     expect((r['notes'] as List).join('\n'), contains('周扫检索降级'));
   });
 
-  test('⑤ runWeeklyScan 装配：技能五站常量注入（subject=<短码>、sourceType=exam 直检）', () async {
-    final db = await openDb();
-    addTearDown(db.close);
-    final calls = <String>[];
-    await runWeeklyScan(
-      deps: PipelineDeps(
-        db: db,
-        runSearch: (query, {subject, sourceType, k}) async {
-          if (sourceType == 'exam') calls.add('${subject ?? '-'}:$query');
-          return {'results': <Object?>[]};
-        },
-        llmChat: (system, user, {tag = ''}) async =>
-            throw LlmException('零候选不应调用 LLM'),
-        prompts: const {},
-        progressData: endoProgress(), // 已学第一章
-      ),
-    );
-    // 章节检索（subject=null）+ 技能五站直检（subject=<短码>、检索词=专题名）
-    expect(calls, contains('-:第一章 概述'));
-    expect(calls, contains('bingshi:病史采集类'));
-    expect(calls, contains('bingli:病例分析类'));
-    expect(calls, contains('jiancha:检查方法类'));
-    expect(calls, contains('caozuo:操作技能类'));
-    expect(calls, contains('jijiu:急救技术类'));
-    expect(calls.length, 6, reason: '1 已学章 + 5 技能专题，无多余检索');
-  });
+  test(
+    '⑤ runWeeklyScan 装配：技能五站常量注入（subject=<短码>、sourceType=exam 直检）',
+    () async {
+      final db = await openDb();
+      addTearDown(db.close);
+      final calls = <String>[];
+      await runWeeklyScan(
+        deps: PipelineDeps(
+          db: db,
+          runSearch: (query, {subject, sourceType, k}) async {
+            if (sourceType == 'exam') calls.add('${subject ?? '-'}:$query');
+            return {'results': <Object?>[]};
+          },
+          llmChat: (system, user, {tag = ''}) async =>
+              throw LlmException('零候选不应调用 LLM'),
+          prompts: const {},
+          progressData: endoProgress(), // 已学第一章
+        ),
+      );
+      // 章节检索（subject=null）+ 技能五站直检（subject=<短码>、检索词=专题名）
+      expect(calls, contains('-:第一章 概述'));
+      expect(calls, contains('bingshi:病史采集类'));
+      expect(calls, contains('bingli:病例分析类'));
+      expect(calls, contains('jiancha:检查方法类'));
+      expect(calls, contains('caozuo:操作技能类'));
+      expect(calls, contains('jijiu:急救技术类'));
+      expect(calls.length, 6, reason: '1 已学章 + 5 技能专题，无多余检索');
+    },
+  );
 
   test('编排 dry-run：全链只出草稿——不 import 不 consume 不推进不落盘', () async {
     final db = await openDb();
@@ -1193,38 +1214,53 @@ void main() {
     // toc sidecar 在、罗盘条目缺失（模拟既有语料装新版后首次拆卡）
     final tocDir = '${tmp.path}/corpus/toc';
     Directory(tocDir).createSync(recursive: true);
-    File('$tocDir/endo.json').writeAsStringSync(jsonEncode({
-      'version': 1,
-      'subject': 'endo',
-      'textbook': '世界通史-第2版',
-      'chapters': [
-        {'no': 1, 'title': '第一章 概述', 'page_start': 1},
-        {'no': 2, 'title': '第二章 启蒙思想', 'page_start': 20},
-        {'no': 3, 'title': '第三章 龋病', 'page_start': 40},
-      ],
-      'sections': <Object?>[],
-    }));
+    File('$tocDir/endo.json').writeAsStringSync(
+      jsonEncode({
+        'version': 1,
+        'subject': 'endo',
+        'textbook': '世界通史-第2版',
+        'chapters': [
+          {'no': 1, 'title': '第一章 概述', 'page_start': 1},
+          {'no': 2, 'title': '第二章 启蒙思想', 'page_start': 20},
+          {'no': 3, 'title': '第三章 龋病', 'page_start': 40},
+        ],
+        'sections': <Object?>[],
+      }),
+    );
     final progressData = emptyProgress();
     final progressPath = '${tmp.path}/progress.json';
     expect(progressEntryOf(progressData, 'endo'), isNull, reason: '前置：条目缺失');
 
     // fake 检索：仅「第二章」教材查询命中（罗盘链显示名回退查询不命中——
     // 推进归 studylog 链，断言聚焦懒初始化语义）
-    Future<Map<String, Object?>> runSearch(String query,
-        {String? subject, String? sourceType, int? k}) async {
+    Future<Map<String, Object?>> runSearch(
+      String query, {
+      String? subject,
+      String? sourceType,
+      int? k,
+    }) async {
       if (sourceType == 'textbook' && query.contains('第二章')) {
         return {
           'results': [
-            hit('t2', '世界通史', '第二章 启蒙思想·兴起', '20-39', 0.9,
-                sourceType: 'textbook'),
+            hit(
+              't2',
+              '世界通史',
+              '第二章 启蒙思想·兴起',
+              '20-39',
+              0.9,
+              sourceType: 'textbook',
+            ),
           ],
         };
       }
       return {'results': <Object?>[]};
     }
 
-    Future<String> llmChat(String system, String user, {String tag = ''}) async =>
-        '{"chapters": ["第二章 启蒙思想"]}';
+    Future<String> llmChat(
+      String system,
+      String user, {
+      String tag = '',
+    }) async => '{"chapters": ["第二章 启蒙思想"]}';
 
     // ── dry-run 先行：懒初始化跳过（零落盘口径），推进链守卫如实报缺条目 ──
     final dryResult = await runCatchup(
@@ -1239,12 +1275,18 @@ void main() {
         tocDir: tocDir,
       ),
     );
-    expect(progressEntryOf(progressData, 'endo'), isNull,
-        reason: 'dry-run 不做懒初始化（零变更口径）');
-    final dryStep = (dryResult['steps'] as Map)['studyLog'] as Map<String, Object?>;
-    expect('${((dryStep['subjects'] as List).single as Map)['note']}',
-        contains('进度库无该科目'),
-        reason: '未 init 时推进链静默失败口径原样（修复前行为基线）');
+    expect(
+      progressEntryOf(progressData, 'endo'),
+      isNull,
+      reason: 'dry-run 不做懒初始化（零变更口径）',
+    );
+    final dryStep =
+        (dryResult['steps'] as Map)['studyLog'] as Map<String, Object?>;
+    expect(
+      '${((dryStep['subjects'] as List).single as Map)['note']}',
+      contains('进度库无该科目'),
+      reason: '未 init 时推进链静默失败口径原样（修复前行为基线）',
+    );
 
     // ── 真跑：catchup 装配懒初始化（进度库缺条目 + sidecar 在 → init）──
     final result = await runCatchup(
@@ -1260,14 +1302,16 @@ void main() {
     );
 
     // 懒初始化建条目 + studylog 推进 0→2 + ⑧ 落盘步持久（含 init 变更）
-    final endo = (progressData['subjects'] as Map)['endo'] as Map<String, Object?>;
+    final endo =
+        (progressData['subjects'] as Map)['endo'] as Map<String, Object?>;
     expect(endo, isNotNull, reason: '懒初始化应从 toc sidecar 建条目');
     expect(endo['textbook'], '世界通史-第2版');
     expect((endo['chapters'] as List).length, 3);
     expect(endo['learned_through'], 2, reason: 'init 后推进链可用：study-log 0→2');
     expect((endo['history'] as List).length, 1);
     final saved = loadProgress(progressPath);
-    final savedEndo = ((saved['subjects'] as Map)['endo']) as Map<String, Object?>;
+    final savedEndo =
+        ((saved['subjects'] as Map)['endo']) as Map<String, Object?>;
     expect(savedEndo['learned_through'], 2, reason: 'progress.json 落盘（进度页可见）');
     final counts = result['counts'] as Map<String, Object?>;
     final slc = counts['studyLog'] as Map<String, Object?>;
@@ -1291,8 +1335,11 @@ void main() {
       ),
     );
     expect('${endo['updated_at']}', updatedAt, reason: '已有条目懒路径不重刷');
-    expect((result2['meta'] as Map)['progressSaved'], false,
-        reason: '无推进无 init → 零变更不落盘');
+    expect(
+      (result2['meta'] as Map)['progressSaved'],
+      false,
+      reason: '无推进无 init → 零变更不落盘',
+    );
     expect(db.inboxPending(), isEmpty, reason: '学习记录已消费');
   });
 
@@ -1313,7 +1360,8 @@ void main() {
     // 换关键词 + 换 examMeta 年份，否则 importCard 幂等跳过、带标卡不落库。
     var splitCalls = 0;
     Future<Map<String, Object?>> runOnce(
-        List<String> Function(String, String, List<Object?>)? tagger) {
+      List<String> Function(String, String, List<Object?>)? tagger,
+    ) {
       return runCatchup(
         deps: PipelineDeps(
           db: db,
@@ -1354,12 +1402,14 @@ void main() {
     final kws0 = ((r0['steps'] as Map)['keywords'] as List)
         .cast<Map<String, Object?>>();
     for (final c in (kws0.single['cards'] as List)) {
-      expect(((c as Map)['tags'] as List?)
-              ?.whereType<String>()
-              .any((t) => t.startsWith('大纲：')) ??
-          false,
-          isFalse,
-          reason: '无大纲数据不打标（未命中不强推同态）');
+      expect(
+        ((c as Map)['tags'] as List?)?.whereType<String>().any(
+              (t) => t.startsWith('大纲：'),
+            ) ??
+            false,
+        isFalse,
+        reason: '无大纲数据不打标（未命中不强推同态）',
+      );
     }
     // 干净重跑（收件箱已消费 → 再插一条；换关键词避开 ppt/占位卡 id 幂等）
     db.insertKeyword(
@@ -1385,8 +1435,11 @@ void main() {
     // pptHit=false 且 fake LLM 未给占位卡 → 引擎兜底补 1 张：共 3 张
     expect(cards.length, 3);
     for (final c in cards) {
-      expect(c['tags'], contains('大纲：龋病＞临床表现及诊断'),
-          reason: '该关键词全部卡（ppt + exam + 占位）都打标');
+      expect(
+        c['tags'],
+        contains('大纲：龋病＞临床表现及诊断'),
+        reason: '该关键词全部卡（ppt + exam + 占位）都打标',
+      );
     }
     // 落库为真：FlashCard.tags 持久化（exam id 换年份避开第一轮幂等冲突）
     final exam = db.cardById('exam-endo-2024-7')!;

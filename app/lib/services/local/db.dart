@@ -11,10 +11,14 @@
 // 既有库 subjects.is_builtin 全部归 0（列保留仅为既有库 schema 兼容，
 // 代码不再写 1；新库零科目，科目全部用户自建）。
 import 'dart:io';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:shared/hengya_shared.dart';
 import 'package:sqlite3/sqlite3.dart';
+import '../review/rework_models.dart';
+
+part 'rework_store.dart';
 
 /// 占位卡题干前缀（与 run_engine kPlaceholderBack 的前缀一致）：
 /// 占位卡无实质内容，不参与查重（不入比对域、不嵌向量）。
@@ -26,22 +30,33 @@ class Db {
   final Database _db;
 
   static Future<Db> open(String path) {
+    return Future.sync(() => openSync(path));
+  }
+
+  /// 同步打开（测试宿主/假异步环境用：不返回 Future，避免 await 不恢复）。
+  /// 与 [open] 逐行同构。
+  static Db openSync(String path) {
     final parent = File(path).parent;
     if (parent.path.isNotEmpty && !parent.existsSync()) {
       parent.createSync(recursive: true);
     }
     final db = sqlite3.open(path);
-    return Future.sync(() {
-      db.execute('PRAGMA journal_mode = WAL;');
-      db.execute('PRAGMA foreign_keys = ON;');
-      _migrate(db);
-      return Db._(db);
-    });
+    db.execute('PRAGMA journal_mode = WAL;');
+    db.execute('PRAGMA foreign_keys = ON;');
+    // 主 isolate 与流水线 worker 双连接并发写 hengya.db（WAL）时，
+    // busy_timeout 编译默认为 0 → 写锁碰撞立即抛 SqliteException(5)。
+    // 与 corpus_library/data_manager/full_backup 一致设 3000ms 退避。
+    db.execute('PRAGMA busy_timeout = 3000;');
+    _migrate(db);
+    final result = Db._(db);
+    result.adoptLegacyRework();
+    return result;
   }
 
   // ---------------- 迁移 ----------------
 
   static void _migrate(Database db) {
+    ensureReworkTables(db);
     db.execute('''
       CREATE TABLE IF NOT EXISTS meta (
         key   TEXT PRIMARY KEY,
@@ -157,6 +172,9 @@ class Db {
       'CREATE INDEX IF NOT EXISTS idx_logs_card ON review_logs(card_id);',
     );
     db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_logs_card_time ON review_logs(card_id,reviewed_at)',
+    );
+    db.execute(
       'CREATE INDEX IF NOT EXISTS idx_logs_time ON review_logs(reviewed_at);',
     );
 
@@ -212,7 +230,9 @@ class Db {
   ) {
     assert(RegExp(r'^[a-zA-Z_]\w*$').hasMatch(table), 'unsafe table: $table');
     assert(
-        RegExp(r'^[a-zA-Z_]\w*$').hasMatch(column), 'unsafe column: $column');
+      RegExp(r'^[a-zA-Z_]\w*$').hasMatch(column),
+      'unsafe column: $column',
+    );
     final cols = db
         .select('PRAGMA table_info($table)')
         .map((r) => r['name'] as String)
@@ -485,16 +505,12 @@ class Db {
   /// （INSERT rework_queue）失败时卡会卡死在 rework 状态且队列无行，
   /// 永不重造、永不回 pending（题库里只剩「重造中」徽标的僵尸卡）。
   void reworkCard(String id, String reason, String note) {
-    _tx(() {
-      _db.execute(
-        "UPDATE cards SET status = 'rework', updated_at = datetime('now') WHERE id = ?",
-        [id],
-      );
-      _db.execute(
-        'INSERT INTO rework_queue (card_id, reason, note) VALUES (?,?,?)',
-        [id, reason, note],
-      );
-    });
+    createReworkTask(
+      id,
+      action: suggestReworkAction(reason),
+      reasons: reworkIssues(reason).map((e) => e['label'] as String).toList(),
+      instructions: note,
+    );
   }
 
   /// 事务包裹（#15）：BEGIN IMMEDIATE / COMMIT / ROLLBACK——与
@@ -513,30 +529,9 @@ class Db {
   }
 
   /// 回炉队列（自动化拉取 GET /rework/pending）
-  List<Map<String, dynamic>> reworkPending({int limit = 50}) {
-    return _db
-        .select(
-          'SELECT r.id, r.card_id, r.reason, r.note, r.created_at, '
-          'c.front, c.back, c.subject_id FROM rework_queue r '
-          "JOIN cards c ON c.id = r.card_id WHERE r.status = 'pending' LIMIT ?",
-          [limit],
-        )
-        .map(
-          (r) => {
-            'id': r['id'],
-            'cardId': r['card_id'],
-            'reason': r['reason'],
-            'note': r['note'],
-            'createdAt': r['created_at'],
-            'front': r['front'],
-            'back': r['back'],
-            'subjectId': r['subject_id'],
-          },
-        )
-        .toList();
-  }
+  List<Map<String, dynamic>> reworkPending({int limit = 50}) =>
+      queuedReworkTasks(limit: limit);
 
-  /// 回炉队列项对应的卡 id（路由层响应用）
   String? reworkQueueCardId(int queueId) {
     final rows = _db.select('SELECT card_id FROM rework_queue WHERE id = ?', [
       queueId,
@@ -576,44 +571,15 @@ class Db {
   /// 回炉重造完成（自动化 `POST /rework/<queueId>/done`）：
   /// 重写 front/back/anchor（未传的字段保留原值）→ 卡回 pending 待审核池
   /// → 队列项标记 done。返回 null 成功；'not_found' / 'stale'
+  /// 旧接口不再允许覆盖原卡；必须通过工作台草案确认应用。
   String? reworkDone(
     int queueId, {
     String? front,
     String? back,
     String? anchor,
   }) {
-    final rows = _db.select(
-      "SELECT card_id, status FROM rework_queue WHERE id = ?",
-      [queueId],
-    );
-    if (rows.isEmpty) return 'not_found';
-    if (rows.first['status'] != 'pending') return 'stale';
-    final cardId = rows.first['card_id'] as String;
-    final sets = <String>["status = 'pending'", "updated_at = datetime('now')"];
-    final args = <Object>[];
-    if (front != null && front.isNotEmpty) {
-      sets.add('front = ?');
-      args.add(front);
-    }
-    if (back != null && back.isNotEmpty) {
-      sets.add('back = ?');
-      args.add(back);
-    }
-    if (anchor != null && anchor.isNotEmpty) {
-      sets.add('anchor = ?');
-      args.add(anchor);
-    }
-    args.add(cardId);
-    // #15（2026-09-13）：两写包事务——卡回 pending 与队列置 done 必须原子，
-    // 中断（如进程被杀）会造成「卡已回 pending 但队列仍 pending」的状态漂移
-    // （下轮重复重造）或反向漂移。
-    _tx(() {
-      _db.execute('UPDATE cards SET ${sets.join(', ')} WHERE id = ?', args);
-      _db.execute("UPDATE rework_queue SET status = 'done' WHERE id = ?", [
-        queueId,
-      ]);
-    });
-    return null;
+    if (reworkQueueCardId(queueId) == null) return 'not_found';
+    return 'workbench_required';
   }
 
   /// 删除整卡（2026-09-13 扩展）：物理删除，**任意状态**（pending/active/
@@ -628,9 +594,27 @@ class Db {
   String? deleteCard(String cardId) {
     final rows = _db.select('SELECT status FROM cards WHERE id = ?', [cardId]);
     if (rows.isEmpty) return 'not_found';
+    if (_db.select(
+      "SELECT 1 FROM rework_tasks WHERE card_id=? AND status NOT IN ('applied','cancelled','excluded') LIMIT 1",
+      [cardId],
+    ).isNotEmpty) {
+      return 'rework_active';
+    }
     _tx(() {
       _db.execute('DELETE FROM review_logs WHERE card_id = ?', [cardId]);
       _db.execute('DELETE FROM rework_queue WHERE card_id = ?', [cardId]);
+      // 结束态回炉任务（applied/cancelled/excluded）及其历史/链接一并清理，
+      // 避免留下指向已删卡的孤儿行（否则其撤销/恢复会抛「原卡已不存在」）。
+      final tasks = _db.select('SELECT id FROM rework_tasks WHERE card_id = ?', [
+        cardId,
+      ]);
+      for (final t in tasks) {
+        final tid = t['id'];
+        _db.execute('DELETE FROM rework_events WHERE task_id = ?', [tid]);
+        _db.execute('DELETE FROM rework_versions WHERE task_id = ?', [tid]);
+        _db.execute('DELETE FROM rework_card_links WHERE task_id = ?', [tid]);
+        _db.execute('DELETE FROM rework_tasks WHERE id = ?', [tid]);
+      }
       _db.execute('DELETE FROM card_notes WHERE card_id = ?', [cardId]);
       _db.execute('DELETE FROM cards WHERE id = ?', [cardId]);
     });
@@ -798,13 +782,11 @@ class Db {
   /// 审核拒绝带理由（设计稿 03b）：reject 时把理由塞进 rework_queue，
   /// 让次日自动化看到（功能等同回炉重造的反馈通道）
   void rejectCardWithReason(String id, String reason, String note) {
-    _db.execute(
-      "UPDATE cards SET status = 'rejected', updated_at = datetime('now') WHERE id = ?",
-      [id],
-    );
-    _db.execute(
-      'INSERT INTO rework_queue (card_id, reason, note) VALUES (?,?,?)',
-      [id, '审核拒绝：$reason', note],
+    createReworkTask(
+      id,
+      action: suggestReworkAction(reason),
+      reasons: reworkIssues(reason).map((e) => e['label'] as String).toList(),
+      instructions: note,
     );
   }
 
@@ -1062,12 +1044,8 @@ class Db {
       lastReviewedAt: row['m_last_review'] == null
           ? null
           : DateTime.tryParse(row['m_last_review'] as String),
-      stability: row['m_stability'] == null
-          ? null
-          : (row['m_stability'] as double),
-      difficulty: row['m_difficulty'] == null
-          ? null
-          : (row['m_difficulty'] as double),
+      stability: (row['m_stability'] as num?)?.toDouble(),
+      difficulty: (row['m_difficulty'] as num?)?.toDouble(),
     );
   }
 
@@ -1091,6 +1069,48 @@ class Db {
   }
 
   // ---------------- review logs ----------------
+
+  /// 同一张卡、同一作答时间只应用一次。记忆状态、账本、数据版本一并提交。
+  ScheduleResult? applyReviewOnce({
+    required String cardId,
+    required ReviewRating rating,
+    required DateTime reviewedAt,
+    required Scheduler scheduler,
+    int? latencyMs,
+    required bool offlineQueued,
+  }) {
+    ScheduleResult? applied;
+    _tx(() {
+      if (_db.select(
+        'SELECT 1 FROM review_logs WHERE card_id=? AND reviewed_at=? LIMIT 1',
+        [cardId, reviewedAt.toIso8601String()],
+      ).isNotEmpty) {
+        return;
+      }
+      final card = cardById(cardId);
+      final memory = memoryStateOf(cardId);
+      if (card == null || memory == null || card.status != CardStatus.active) {
+        throw StateError('卡片已不可评分，请刷新复习队列');
+      }
+      final result = scheduler.schedule(memory, rating, now: reviewedAt);
+      applySchedule(cardId, result);
+      insertReviewLog(
+        cardId: cardId,
+        subjectId: card.subjectId,
+        rating: rating,
+        reviewedAt: reviewedAt,
+        latencyMs: latencyMs,
+        offlineQueued: offlineQueued,
+        stateBefore: memory.state,
+        stateAfter: result.state,
+        stabilityAfter: result.stability,
+        intervalDays: result.intervalDays,
+      );
+      bumpDataVersion();
+      applied = result;
+    });
+    return applied;
+  }
 
   void insertReviewLog({
     required String cardId,

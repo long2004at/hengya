@@ -21,7 +21,6 @@ import 'package:share_plus/share_plus.dart';
 import '../services/api/api_client.dart';
 import '../services/local/app_log.dart';
 import '../services/local/cache_cleaner.dart';
-import '../services/local/corpus_package.dart';
 import '../services/local/data_manager.dart';
 import '../services/local/full_backup.dart';
 import '../services/local/local_backend.dart';
@@ -29,6 +28,7 @@ import '../services/notification/daily_reminder.dart';
 import '../services/update/update_service.dart';
 import '../widgets/top_toast.dart';
 import 'app_log_page.dart';
+import 'corpus_library_page.dart';
 import 'hengya_home_parts.dart';
 
 class AboutPage extends StatefulWidget {
@@ -78,11 +78,9 @@ class _AboutPageState extends State<AboutPage> {
   String? _latestBackupPath;
 
   /// 导入会替换数据库，必须与导出/备份互斥（含文件选择和确认阶段）。
-  bool get _dataBusy => _importing || _exporting || _backingUp || _pkgImporting;
+  bool get _dataBusy => _importing || _exporting || _backingUp;
 
   // ---------------- 语料包导入（批5 节点③，local 模式；自设置页迁入） ----------------
-  bool _pkgImporting = false;
-  String _pkgPhase = ''; // 后台校验/导入阶段文案（bg worker onProgress）
 
   // ---------------- M5：AI 服务配置（自设置页迁入） ----------------
   AiSettings? _ai;
@@ -775,103 +773,6 @@ class _AboutPageState extends State<AboutPage> {
   /// 校验临时库在 cache 目录）→ 二次确认（模型名对暗号不符时明确警示但不阻断）→
   /// importPackageBg（后台 isolate 准备 → 主 isolate 换库：备份+原子替换+补科目行
   /// +进度只补不改+失败回滚）→ 终态 disposeImportedZip 清理选文件缓存拷贝。
-  Future<void> _importCorpusPackage() async {
-    if (_dataBusy) return;
-    final dir = LocalBackend.instance.dataDir;
-    if (dir == null) return;
-    XFile? picked;
-    setState(() {
-      _pkgImporting = true;
-      _pkgPhase = '';
-    });
-    try {
-      picked = await openFile(
-        acceptedTypeGroups: [
-          XTypeGroup(label: '语料包', extensions: const ['zip']),
-        ],
-      );
-      if (!mounted || picked == null) return;
-      final appVersion = _updateVersionName.isEmpty ? null : _updateVersionName;
-      // 只读预览（后台 isolate；进度透传阶段文案，不动任何数据）
-      final summary = await CorpusPackageManager.instance.validatePackageBg(
-        picked.path,
-        appVersion: appVersion,
-        onProgress: (stage, msg) {
-          if (mounted) setState(() => _pkgPhase = msg);
-        },
-      );
-      if (!mounted) return;
-      // 模型名对暗号预检（确认框内警示；导入结果会再核一次）
-      final curModel = _ai?.embedding.model ?? '';
-      final modelWarn =
-          curModel.isNotEmpty &&
-          summary.modelName.isNotEmpty &&
-          curModel.toLowerCase() != summary.modelName.toLowerCase();
-      final sizeMb = (summary.packageBytes / 1048576).toStringAsFixed(1);
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('确认导入语料包？'),
-          content: Text(
-            '将导入 ${summary.subjects.length} 个科目的成品语料库'
-            '（${summary.chunks} 块、${summary.tocFiles} 份章节目录、'
-            '$sizeMb MB，向量模型 ${summary.modelName}）。\n\n'
-            '本机卡片、复习记录与学习进度分毫不动；'
-            '现有语料库将先备份到 corpus/bak-<时间>/ 再替换。'
-            '${modelWarn ? '\n\n注意：本机向量模型「$curModel」与语料包不一致，导入后向量检索路不可用（词面检索不受影响）。' : ''}',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('导入'),
-            ),
-          ],
-        ),
-      );
-      if (ok != true) {
-        setState(() => _pkgPhase = '');
-        return;
-      }
-      final result = await CorpusPackageManager.instance.importPackageBg(
-        dir,
-        picked.path,
-        appVersion: appVersion,
-        onBeforeSwap: () => LocalBackend.instance.reload(),
-        onProgress: (stage, msg) {
-          if (mounted) setState(() => _pkgPhase = msg);
-        },
-      );
-      if (!mounted) return;
-      TopToast.show(
-        context,
-        '语料包导入成功：${result.summary.subjects.length} 科、'
-        '${result.summary.chunks} 块'
-        '${result.backupPath == null ? '' : '，旧库已备份'}'
-        '${result.modelWarning == null ? '' : '；${result.modelWarning}'}',
-        type: result.modelWarning == null
-            ? TopToastType.success
-            : TopToastType.info,
-        stayDuration: kToastStayImportant,
-      );
-    } on CorpusPackageException catch (e) {
-      if (mounted) TopToast.show(context, '导入语料包失败：${e.message}');
-    } catch (e) {
-      if (mounted) TopToast.show(context, '导入语料包失败：$e');
-    } finally {
-      // 终态（成功/失败）务必清理 file_selector 拷贝的 zip 缓存
-      if (picked != null) CorpusPackageManager.disposeImportedZip(picked.path);
-      if (mounted) {
-        setState(() {
-          _pkgImporting = false;
-          _pkgPhase = '';
-        });
-      }
-    }
-  }
 
   // ---------------- M5：AI 服务配置（自设置页迁入） ----------------
 
@@ -1364,31 +1265,21 @@ class _AboutPageState extends State<AboutPage> {
                       ),
                       const Divider(height: 1, indent: 16, endIndent: 16),
                       ListTile(
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                        ),
-                        title: const Text(
-                          '导入语料包（成品语料库）',
-                          style: TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        subtitle: Text(
-                          _pkgPhase.isEmpty
-                              ? '选择 PC 端打包的语料包 zip（成品语料库+章节目录），替换本机语料库；'
-                                    '卡片、复习记录与学习进度分毫不动，旧库自动备份'
-                              : _pkgPhase,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        trailing: _pkgImporting
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.folder_zip_rounded),
+                        leading: const Icon(Icons.folder_copy_outlined),
+                        title: const Text('语料库与资料导入'),
+                        subtitle: const Text('统一管理原件与成品语料包，查看内容、建库和删除'),
+                        trailing: const Icon(Icons.chevron_right),
                         enabled: !_dataBusy,
-                        onTap: _dataBusy ? null : _importCorpusPackage,
+                        onTap: _dataBusy
+                            ? null
+                            : () => Navigator.of(context, rootNavigator: true)
+                                  .push(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => const CorpusLibraryPage(
+                                        initialTab: 1,
+                                      ),
+                                    ),
+                                  ),
                       ),
                       const Divider(height: 1, indent: 16, endIndent: 16),
                       ListTile(

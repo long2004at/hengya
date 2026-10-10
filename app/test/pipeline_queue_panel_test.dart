@@ -103,10 +103,10 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
-    for (var i = 0; i < 14 && !tester.any(find.text('开始建库')); i++) {
+    for (var i = 0; i < 14 && !tester.any(find.text('语料库与资料管理')); i++) {
       await tester.pump(const Duration(milliseconds: 200));
     }
-    expect(tester.any(find.text('开始建库')), isTrue, reason: '设置页建库面板应完成加载');
+    expect(tester.any(find.text('语料库与资料管理')), isTrue, reason: '设置页应显示统一资料管理入口');
   }
 
   // ---------------- 契约 fixture（#13 handoff 事件 Map / last_run.json 形态） ----
@@ -303,6 +303,19 @@ void main() {
     expect(find.text('· 扁平苔藓的临床表现（答案太啰嗦）'), findsOneWidget);
     // 汇总行
     expect(find.text('已生成 10/10 · 入库 12 张 · 消费 10 条'), findsOneWidget);
+  });
+
+  testWidgets('草案生成成功不能被展示为已经应用到原卡', (tester) async {
+    await boot();
+    Directory('${tmp.path}/corpus').createSync(recursive: true);
+    final snapshot = lastRunArchive(reworkDone: 0);
+    (snapshot['counts'] as Map)['reworkDraft'] = 1;
+    File(
+      '${tmp.path}/corpus/last_run.json',
+    ).writeAsStringSync(convert.jsonEncode(snapshot));
+    await openStats(tester);
+    expect(find.text('回炉 1 · 草案待确认 1'), findsOneWidget);
+    expect(find.text('回炉 1 · 重造完成 1'), findsNothing);
   });
 
   testWidgets('实时流：队列帧分组计数与条目 + 触发来源 + 失败帧 + 完成切换终态', (tester) async {
@@ -591,6 +604,21 @@ void main() {
     ).writeAsBytesSync(List.filled(100000, 0x25));
 
     await openSettings(tester);
+    // 待处理清单已随建库面板迁入统一资料工作台「导入与建库」Tab。
+    await tester.tap(find.text('语料库与资料管理'));
+    // 工作台含加载动画 → 固定 pump 而非 pumpAndSettle。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.widgetWithText(Tab, '导入与建库'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    for (
+      var i = 0;
+      i < 20 && !tester.any(find.text('待处理 2 个文件'));
+      i++
+    ) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
 
     expect(find.text('待处理 2 个文件'), findsOneWidget);
     // #4 逐字断言：课程名（短码） / 文件名（98 KB）
@@ -675,8 +703,11 @@ void main() {
       entries: 1,
       advanced: 0,
       refs: [
-        {'ref': '第一章，皮肤的结构与生理功能', 'ok': false,
-         'note': '教材未命中（低于低分线 0.30）——不推进'},
+        {
+          'ref': '第一章，皮肤的结构与生理功能',
+          'ok': false,
+          'note': '教材未命中（低于低分线 0.30）——不推进',
+        },
       ],
     );
     rev.value++;
@@ -721,11 +752,7 @@ void main() {
     await pumpCard(tester, fake, rev: rev);
 
     // ① 未拉到（null）→ 行不渲染（不阻断队列主视图）；终态快照其余照常
-    expect(
-      find.textContaining('回炉待重造'),
-      findsNothing,
-      reason: '未拉到计数 → 行隐藏',
-    );
+    expect(find.textContaining('回炉待重造'), findsNothing, reason: '未拉到计数 → 行隐藏');
     expect(find.text('已生成 2/2 · 入库 3 张 · 消费 2 条'), findsOneWidget);
 
     // ② 拉到计数（rev 自增重读）→「回炉待重造 3」常显（与运行内「回炉 N」
@@ -741,11 +768,7 @@ void main() {
     rev.value++;
     await tester.pump();
     await tester.pump();
-    expect(
-      find.text('回炉待重造 0'),
-      findsOneWidget,
-      reason: '归零后仍显示（N=0 态可见）',
-    );
+    expect(find.text('回炉待重造 0'), findsOneWidget, reason: '归零后仍显示（N=0 态可见）');
 
     // ④ 空态（无存档）也显示——待审核拒绝→回炉 / 回炉按钮提交后，无需
     //    跑过流水线即可见数值
@@ -754,21 +777,21 @@ void main() {
     rev.value++;
     await tester.pump();
     await tester.pump();
-    expect(find.text('暂无队列数据——收件箱存入关键词、设置页「强制开始拆卡 / 改卡」'
-        '触发后，这里实时展示生成进度'), findsOneWidget);
-    expect(find.text('回炉待重造 1'), findsOneWidget,
-        reason: '空态下计数行独立渲染（不依赖队列帧）');
+    expect(
+      find.text(
+        '暂无队列数据——收件箱存入关键词、设置页「强制开始拆卡 / 改卡」'
+        '触发后，这里实时展示生成进度',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('回炉待重造 1'), findsOneWidget, reason: '空态下计数行独立渲染（不依赖队列帧）');
 
     // ⑤ 拉取失败（null）→ 保持原值（离线韧性：瞬态失败不闪没行）
     fake.reworkPending = null;
     rev.value++;
     await tester.pump();
     await tester.pump();
-    expect(
-      find.text('回炉待重造 1'),
-      findsOneWidget,
-      reason: '拉取失败保持上一值，不隐藏行',
-    );
+    expect(find.text('回炉待重造 1'), findsOneWidget, reason: '拉取失败保持上一值，不隐藏行');
   });
 
   // ---------------- ⑤ 真题周扫摘要行（stage='weekly' 事件 / last_run.json weekly 块） ----------------
@@ -789,8 +812,11 @@ void main() {
     fake.snapshot = archiveWithWeekly({'ran': true, 'cards': 2, 'imported': 2});
     await pumpCard(tester, fake, rev: rev);
     expect(find.text('真题周扫：出卡 2 张 · 入库 2 张'), findsOneWidget);
-    expect(find.text('已生成 1/1 · 入库 2 张 · 消费 1 条'), findsOneWidget,
-        reason: '既有汇总行不受影响');
+    expect(
+      find.text('已生成 1/1 · 入库 2 张 · 消费 1 条'),
+      findsOneWidget,
+      reason: '既有汇总行不受影响',
+    );
 
     // ② ran=true 出卡 0 → 「本周无新增真题卡」
     fake.snapshot = archiveWithWeekly({'ran': true, 'cards': 0, 'imported': 0});
@@ -808,8 +834,11 @@ void main() {
     rev.value++;
     await tester.pump();
     await tester.pump();
-    expect(find.textContaining('真题周扫'), findsNothing,
-        reason: '节流/空态静默（细节只在 last_run.json weekly 块）');
+    expect(
+      find.textContaining('真题周扫'),
+      findsNothing,
+      reason: '节流/空态静默（细节只在 last_run.json weekly 块）',
+    );
 
     // ④ 无 weekly 块（旧存档）→ 不渲染
     fake.snapshot = archiveWithWeekly(null);
@@ -824,8 +853,7 @@ void main() {
     rev.value++; // 重读：⑦ 计数（2）+ 运行位切换
     await tester.pump();
     await tester.pump();
-    expect(find.text('回炉待重造 2'), findsOneWidget,
-        reason: '⑦ 行与 ⑤ 行共存互不影响');
+    expect(find.text('回炉待重造 2'), findsOneWidget, reason: '⑦ 行与 ⑤ 行共存互不影响');
     fake.emit(
       const IsolateProgressEvent(
         stage: 'weekly',

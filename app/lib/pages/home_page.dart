@@ -33,6 +33,8 @@ import '../widgets/compass_dial_button.dart';
 import '../widgets/hero_shimmer.dart';
 import '../widgets/offline_data_bar.dart';
 import 'inbox_sheet.dart';
+import 'corpus_library_page.dart';
+import 'rework_workbench_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -206,8 +208,9 @@ class _HomePageState extends State<HomePage> {
                                   '点右上角「记课堂重点」新建第一门课程',
                                   style: TextStyle(
                                     fontSize: 12,
-                                    color:
-                                        Theme.of(context).colorScheme.outline,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.outline,
                                   ),
                                 ),
                               ],
@@ -352,6 +355,34 @@ class _HeroHeader extends StatelessWidget {
                           ),
                         ],
                         const Spacer(),
+                        if (currentBackendMode == BackendMode.local)
+                          IconButton(
+                            tooltip: '全部语料与资料管理',
+                            icon: const Icon(
+                              Icons.folder_copy_outlined,
+                              color: Colors.white,
+                            ),
+                            onPressed: () =>
+                                Navigator.of(context, rootNavigator: true).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => const CorpusLibraryPage(),
+                                  ),
+                                ),
+                          ),
+                        if (currentBackendMode == BackendMode.local)
+                          IconButton(
+                            tooltip: '回炉工作台',
+                            icon: const Icon(
+                              Icons.build_circle_outlined,
+                              color: Colors.white,
+                            ),
+                            onPressed: () =>
+                                Navigator.of(context, rootNavigator: true).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => const ReworkWorkbenchPage(),
+                                  ),
+                                ),
+                          ),
                         // 学习罗盘表盘按钮：刻度环 + 进度弧 + 指针随罗盘
                         // 总进度走（点击整圈旋摆 → /progress）
                         CompassDialButton(
@@ -538,9 +569,7 @@ class _SubjectCard extends StatelessWidget {
                             ),
                             decoration: BoxDecoration(
                               color: s.isExamSubject
-                                  ? HengyaColors.warning.withValues(
-                                      alpha: 0.12,
-                                    )
+                                  ? HengyaColors.warning.withValues(alpha: 0.12)
                                   : HengyaColors.textSecondary.withValues(
                                       alpha: 0.10,
                                     ),
@@ -570,6 +599,17 @@ class _SubjectCard extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (currentBackendMode == BackendMode.local)
+                  IconButton(
+                    tooltip: '查看本科语料',
+                    icon: const Icon(Icons.folder_open_outlined),
+                    onPressed: () =>
+                        Navigator.of(context, rootNavigator: true).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => CorpusLibraryPage(subjectId: s.id),
+                          ),
+                        ),
+                  ),
                 const SizedBox(width: 8),
                 if (due > 0)
                   Row(

@@ -43,8 +43,7 @@ import 'ai_key_vault.dart';
 import 'card_dedup.dart' show dupThresholdOf, kDupThresholdSettingKey;
 import 'corpus/extract_all.dart' show CorpusEmbedMode, loadManifest;
 import 'corpus/exam_topics.dart';
-import 'corpus/outline_docx.dart'
-    show kMedSubjectCode, kOutlineUploadCode;
+import 'corpus/outline_docx.dart' show kMedSubjectCode, kOutlineUploadCode;
 import 'corpus/progress_db.dart'
     show
         initFromTocSidecar,
@@ -54,8 +53,13 @@ import 'corpus/progress_db.dart'
         setSubjectChapters,
         skippedChaptersOf,
         tocSidecarSubjects;
+import 'corpus/rework_evidence.dart';
+import '../review/rework_models.dart';
 import 'corpus/search_api.dart' show normalizeRerankEndpoint;
 import 'corpus_build_job.dart';
+import 'corpus_library.dart';
+import 'corpus_library_job.dart';
+import 'corpus_package.dart';
 import 'data_maintenance.dart';
 import 'db.dart';
 import 'app_log.dart';
@@ -76,7 +80,10 @@ class LocalBackend {
 
   /// 数据根目录（hengya.db 与 corpus/ 均挂其下）。
   String? _dataDir;
-  Future<Db>? _opening;
+
+  /// 已打开的连接（同步持有；SQLite 打开是同步操作，无需 Future 包装——
+  /// 测试宿主假异步下 await 一个已完成的 Future 可能不恢复，见 resetForTest）。
+  Db? _opening;
 
   final Scheduler _scheduler = const FsrsScheduler();
 
@@ -97,18 +104,15 @@ class LocalBackend {
     if (dir == null) {
       throw StateError('LocalBackend 未初始化：main() 需先 init(<数据目录>)');
     }
-    return _opening ??= Db.open(_dbPath);
+    return Future<Db>.value(_opening ??= Db.openSync(_dbPath));
   }
 
   /// 数据文件被替换后重载连接（Phase 2 导入/恢复后由调用方调用：
-  /// 关闭旧连接 → 下次访问重新 open 当前文件）。
+  /// 关闭旧连接 → 下次访问重新 open 当前文件）。同步关闭。
   Future<void> reload() async {
-    final opening = _opening;
+    final db = _opening;
     _opening = null;
-    if (opening != null) {
-      final db = await opening;
-      db.close();
-    }
+    db?.close();
   }
 
   /// 测试辅助：关闭底层连接并重置单例（跨用例隔离；须 await）。
@@ -118,7 +122,15 @@ class LocalBackend {
     _resetCorpusBuildState();
     _aiKeys.clear(); // AI key 缓存随单例重置（vault 状态由测试自行注入/清理）
     _aiKeysInit = null;
-    await reload();
+    // 不阻塞等待只读队列：测试内不应有在飞的语料请求；直接重置队列尾，
+    // 避免假异步环境下 await 一个悬空 Future 导致挂起。
+    _libraryTail = Future<void>.value();
+    _libraryRequests = 0;
+    corpusLibraryOverride = null;
+    // 同步关闭连接（不 await）：tearDown 阶段不驱动微任务，await 已完成的
+    // Future 也不恢复；同步关闭可确保文件句柄释放、临时目录可删除。
+    _opening?.close();
+    _opening = null;
     _dataDir = null;
   }
 
@@ -140,6 +152,218 @@ class LocalBackend {
     final db = await _db;
     _ensureDataAvailable(); // 初始化 await 期间也可能进入备份/恢复
     return db;
+  }
+
+  int _libraryRequests = 0;
+  Future<void> _libraryTail = Future<void>.value();
+  List<Map<String, Object?>> _taskEvidence(String subject, List<String> ids) {
+    if (ids.isEmpty) return [];
+    final file = File('$_corpusDir/corpus.db');
+    if (!file.existsSync()) throw const FormatException('尚未建立语料库，请先导入原文');
+    final corpus = sqlite3.open(file.path, mode: OpenMode.readOnly);
+    try {
+      return readReworkEvidence(corpus, subject, ids);
+    } finally {
+      corpus.dispose();
+    }
+  }
+
+  Future<Map<String, dynamic>> _handleReworkRequest(
+    Db db,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    for(final key in ['reasons','selectedIds','confirmedIssues']) {
+      final value=body[key];
+      if(value!=null && (value is! List || value.any((e)=>e is! String)))throw FormatException('$key 必须是文字列表');
+    }
+    final target=body['targetCount'];
+    if(target!=null && target is! int)throw const FormatException('拆分数量必须是整数');
+    for(final key in ['cardId','action','instructions']) {
+      if(body[key]!=null && body[key] is! String)throw FormatException('$key 必须是文字');
+    }
+    if (path == '/rework/tasks') {
+      final reasons = (body['reasons'] as List? ?? [])
+          .map((e) => e.toString())
+          .toList();
+      final action =
+          body['action']?.toString() ?? suggestReworkAction(reasons.join('、'));
+      final existing = db.activeReworkTask(_str(body['cardId']));
+      final id = db.createReworkTask(
+        _str(body['cardId']),
+        action: action,
+        reasons: reasons,
+        instructions: _str(body['instructions']),
+        targetCount: (body['targetCount'] as num?)?.toInt() ?? 2,
+      );
+      return {'ok': true, 'taskId': id, 'alreadyExists': existing != null};
+    }
+    final match = RegExp(
+      r'^/rework/tasks/([0-9]+)/(configure|generate|draft|apply|cancel)$',
+    ).firstMatch(path);
+    if (match == null) throw ApiException(404, '未知回炉操作');
+    final id = int.parse(match.group(1)!);
+    final revision = body['revision'];
+    if (revision is! int || revision < 1) {
+      throw const FormatException('需要有效的任务版本');
+    }
+    final task = db.getReworkTask(id);
+    if (task == null) throw ApiException(404, '回炉任务不存在');
+    final operation = match.group(2)!;
+    switch (operation) {
+      case 'configure':
+        final action = _str(body['action']);
+        final ids = (body['selectedIds'] as List? ?? [])
+            .map((e) => e.toString())
+            .toSet()
+            .toList();
+        final selected = ['rewrite', 'split'].contains(action)
+            ? _taskEvidence(task['subjectId'] as String, ids)
+            : <Map<String, Object?>>[];
+        db.configureRework(
+          id,
+          revision,
+          action: action,
+          instructions: _str(body['instructions']),
+          targetCount: (body['targetCount'] as num?)?.toInt() ?? 2,
+          selected: selected,
+        );
+        return {'ok': true};
+      case 'generate':
+        if (task['revision'] != revision || task['status'] != 'queued') {
+          throw StateError('请先保存方案，再生成草案');
+        }
+        if (PipelineRunner.instance.running ||
+            _corpusBuildRunning ||
+            CorpusPackageManager.instance.importRunning ||
+            corpusDeletePending) {
+          throw StateError('出卡、建库、导入或语料清理正在进行，请稍后再试');
+        }
+        unawaited(
+          PipelineRunner.instance.generateRework(id, revision).catchError((
+            Object e,
+          ) {
+            AppLog.instance.log(AppLogLevel.error, 'rework', '$e');
+          }),
+        );
+        return {'ok': true, 'started': true};
+      case 'draft':
+        if (body['draft'] is! Map) throw const FormatException('草案格式无效');
+        if (!db.saveReworkDraft(
+          id,
+          revision,
+          body['draft'] as Map,
+          manual: true,
+        )) {
+          throw StateError('草案已经过期，请刷新');
+        }
+        return {'ok': true};
+      case 'apply':
+        if (_corpusBuildRunning ||
+            CorpusPackageManager.instance.importRunning ||
+            corpusDeletePending) {
+          throw StateError('请等待语料操作完成后再应用草案');
+        }
+        if (['rewrite', 'split'].contains(task['action']) &&
+            task['status'] != 'applied') {
+          final draft = task['draft'];
+          if (draft is! Map) throw StateError('尚无草案');
+          final ids = <String>{
+            for (final c in draft['cards'] as List)
+              for (final id in (c as Map)['evidenceChunkIds'] as List)
+                id.toString(),
+          }.toList();
+          final fresh = _taskEvidence(task['subjectId'] as String, ids);
+          final old = {
+            for (final e in task['evidence'] as List)
+              (e as Map)['chunkId']: e['hash'],
+          };
+          if (fresh.any((e) => old[e['chunkId']] != e['hash'])) {
+            throw StateError('引用原文已经变化，请重新取证生成，不能应用旧草案');
+          }
+        }
+        return Map<String, dynamic>.from(
+          db.applyReworkTask(
+            id,
+            revision,
+            resetMemory: body['resetMemory'] == true,
+            confirmedIssues: (body['confirmedIssues'] as List? ?? [])
+                .map((e) => e.toString())
+                .toList(),
+          ),
+        );
+      case 'cancel':
+        db.cancelReworkTask(id, revision);
+        return {'ok': true};
+      default:
+        throw StateError('未知回炉操作');
+    }
+  }
+
+  bool get corpusLibraryRunning =>
+      _libraryRequests > 0 ||
+      IsolateRunner.instance.isRunning(corpusLibraryJobId);
+  bool get corpusDeletePending =>
+      _dataDir != null &&
+      File('$_corpusDir/$corpusDeleteJournalName').existsSync();
+
+  /// 测试注入：保留主 isolate 安全检查/写锁，仅替换后台 IO。
+  Future<Map<String, dynamic>> Function(
+    String operation,
+    Map<String, Object?> args,
+  )?
+  corpusLibraryOverride;
+
+  Future<Map<String, dynamic>> _library(
+    String operation,
+    Map<String, Object?> args, {
+    bool write = false,
+  }) async {
+    _ensureDataAvailable();
+    if (CorpusPackageManager.instance.importRunning ||
+        (write &&
+            (corpusLibraryRunning ||
+                _corpusBuildRunning ||
+                PipelineRunner.instance.running))) {
+      throw ApiException(409, '资料读取、建库、拆卡或导入正在进行，请完成后再试');
+    }
+    final token = write ? DataMaintenance.acquire('整理语料库') : null;
+    final previous = _libraryTail;
+    final finished = Completer<void>();
+    _libraryTail = finished.future;
+    _libraryRequests++;
+    final directory = _corpusDir;
+    try {
+      // 清单刷新、详情分页等只读请求排队，不互相制造 409；写入仍立即互斥。
+      await previous;
+      if (!write) _ensureDataAvailable();
+      if (directory != _corpusDir) throw ApiException(409, '数据目录已变化，请重新打开资料');
+      final override = corpusLibraryOverride;
+      if (override != null) return await override(operation, args);
+      final job = await IsolateRunner.instance.start<Map<String, Object?>>(
+        jobId: corpusLibraryJobId,
+        workerEntry: corpusLibraryWorkerEntry,
+        args: {...args, 'operation': operation, 'directory': directory},
+      );
+      return Map<String, dynamic>.from(await job.done);
+    } on IsolateJobException catch (e) {
+      throw ApiException(409, '语料操作未完成：${e.message}');
+    } finally {
+      _libraryRequests--;
+      if (token != null) DataMaintenance.release(token);
+      finished.complete();
+    }
+  }
+
+  Future<void> recoverCorpusLibrary() async {
+    if (corpusDeletePending) await _library('recover', {}, write: true);
+  }
+
+  void _ensureCorpusClean() {
+    if (corpusDeletePending) {
+      throw ApiException(409, '上次删除尚未清理完成，请到语料库页面重试清理后再导入或建库');
+    }
+    if (corpusLibraryRunning) throw ApiException(409, '正在读取或整理语料，请稍后重试');
   }
 
   // ---------------- AI key 安全存储（安全修复 C：vault + 内存缓存） ----------------
@@ -270,7 +494,7 @@ class LocalBackend {
       };
     }
 
-// /settings/ai（掩码态；四套：llm / llm_backup / embedding / reranker）
+    // /settings/ai（掩码态；四套：llm / llm_backup / embedding / reranker）
     if (path == '/settings/ai') {
       return {
         'llm': _serviceView(db, 'llm'),
@@ -282,6 +506,35 @@ class LocalBackend {
 
     // /corpus/status（对照 routes/corpus.dart _status：corpus.db 只读 + 优雅降级；
     // ⑦ 附带 cards 表 rework 计数——hengya.db 同连接读取，与语料降级无关）
+    final libraryUri = Uri.parse(path);
+    if (libraryUri.path == '/corpus/library') return _library('inventory', {});
+    if (libraryUri.path == '/corpus/library/content') {
+      final q = libraryUri.queryParameters;
+      return _library('content', {
+        'id': q['id'] ?? '',
+        'offset': int.tryParse(q['offset'] ?? '0') ?? -1,
+        'limit': int.tryParse(q['limit'] ?? '40') ?? -1,
+        'query': q['query'] ?? '',
+      });
+    }
+    final workUri = Uri.parse(path);
+    if (workUri.path == '/rework/tasks') {
+      return Map<String, dynamic>.from(
+        db.listReworkTasks(
+          offset: int.tryParse(workUri.queryParameters['offset'] ?? '0') ?? 0,
+          limit: int.tryParse(workUri.queryParameters['limit'] ?? '40') ?? 40,
+          status: workUri.queryParameters['status'] ?? '',
+        ),
+      );
+    }
+    final workGet = RegExp(
+      r'^/rework/tasks/([0-9]+)$',
+    ).firstMatch(workUri.path);
+    if (workGet != null) {
+      final task = db.getReworkTask(int.parse(workGet.group(1)!));
+      if (task == null) throw ApiException(404, '回炉任务不存在');
+      return Map<String, dynamic>.from(task);
+    }
     if (path == '/corpus/status') {
       return _corpusStatus(db);
     }
@@ -449,6 +702,17 @@ class LocalBackend {
         : const <String, dynamic>{};
 
     // /cards/<id>/approve（守卫：仅 pending，对照 routes/cards.dart）
+    if (path == '/rework/tasks' || path.startsWith('/rework/tasks/')) {
+      try {
+        return await _handleReworkRequest(db, path, m);
+      } on StateError catch (e) {
+        throw ApiException(409, e.message.toString());
+      } on FormatException catch (e) {
+        throw ApiException(400, e.message);
+      } on ArgumentError catch (e) {
+        throw ApiException(400, e.message.toString());
+      }
+    }
     final approve = RegExp(r'^/cards/([^/]+)/approve$').firstMatch(path);
     if (approve != null) {
       final id = approve.group(1)!;
@@ -480,8 +744,11 @@ class LocalBackend {
       }
       db.bumpDataVersion();
       // #2 埋点：审核拒绝（回炉循环入口事件）
-      AppLog.instance.log(AppLogLevel.info, 'review',
-          '审核拒绝：${_head(card.front, 30)}；理由=$reason${note.isEmpty ? '' : '；留言=$note'}');
+      AppLog.instance.log(
+        AppLogLevel.info,
+        'review',
+        '审核拒绝：${_head(card.front, 30)}；理由=$reason${note.isEmpty ? '' : '；留言=$note'}',
+      );
       return {'ok': true, 'id': id, 'status': 'rejected'};
     }
 
@@ -537,7 +804,9 @@ class LocalBackend {
     // 文案同样去内部 id 化——用户侧只需知道「这张卡不能回炉」。
     if (path == '/cards/rework') {
       final cardId = m['cardId'] as String?;
-      if (cardId == null || cardId.isEmpty) throw ApiException(400, '缺少 cardId');
+      if (cardId == null || cardId.isEmpty) {
+        throw ApiException(400, '缺少 cardId');
+      }
       final card = db.cardById(cardId);
       if (card == null) throw ApiException(404, '卡片不存在或已被移除');
       if (card.status != CardStatus.active) {
@@ -553,8 +822,11 @@ class LocalBackend {
       );
       db.bumpDataVersion();
       // #2 埋点：回炉登记（题库/复习页入口）
-      AppLog.instance.log(AppLogLevel.info, 'rework',
-          '回炉登记：${_head(card.front, 30)}；理由=${(m['reason'] as String?) ?? ''}；留言=${(m['note'] as String?) ?? ''}');
+      AppLog.instance.log(
+        AppLogLevel.info,
+        'rework',
+        '回炉登记：${_head(card.front, 30)}；理由=${(m['reason'] as String?) ?? ''}；留言=${(m['note'] as String?) ?? ''}',
+      );
       return {'ok': true, 'cardId': cardId};
     }
 
@@ -565,17 +837,25 @@ class LocalBackend {
     // 幂等语义由 404 承载（客户端重复提交不会产生半删状态）。
     if (path == '/cards/delete') {
       final cardId = m['cardId'] as String?;
-      if (cardId == null || cardId.isEmpty) throw ApiException(400, '缺少 cardId');
+      if (cardId == null || cardId.isEmpty) {
+        throw ApiException(400, '缺少 cardId');
+      }
       final card = db.cardById(cardId);
       final err = db.deleteCard(cardId);
       if (err == 'not_found') throw ApiException(404, '卡片不存在或已被移除');
+      if (err == 'rework_active') {
+        throw ApiException(409, '该卡有未结束的回炉任务，请先在工作台撤销或恢复');
+      }
       db.bumpDataVersion();
       // #2 埋点：物理删除属不可逆操作，必须留痕（含状态与理由）
       final reason = ((m['reason'] as String?) ?? '').trim();
       final note = ((m['note'] as String?) ?? '').trim();
-      AppLog.instance.log(AppLogLevel.warn, 'review',
-          '删除整卡（物理删除，状态 ${card?.status.name ?? '?'}）：${_head(card?.front, 30)}'
-          '${reason.isEmpty ? '' : '；理由=$reason'}${note.isEmpty ? '' : '；留言=$note'}');
+      AppLog.instance.log(
+        AppLogLevel.warn,
+        'review',
+        '删除整卡（物理删除，状态 ${card?.status.name ?? '?'}）：${_head(card?.front, 30)}'
+            '${reason.isEmpty ? '' : '；理由=$reason'}${note.isEmpty ? '' : '；留言=$note'}',
+      );
       return {'ok': true, 'cardId': cardId};
     }
 
@@ -591,12 +871,18 @@ class LocalBackend {
       );
       if (err == 'not_found') throw ApiException(404, '回炉队列项 $queueId 不存在');
       if (err == 'stale') throw ApiException(400, '队列项 $queueId 已处理过');
+      if (err == 'workbench_required') {
+        throw ApiException(409, '请在回炉工作台确认草案，旧接口不再直接覆盖原卡');
+      }
       db.bumpDataVersion();
       final cardId = db.reworkQueueCardId(queueId);
       if (cardId != null) db.markAiNoteSeen(cardId);
       // #2 埋点：回炉完成 → 卡回待审核区
-      AppLog.instance.log(AppLogLevel.info, 'rework',
-          '回炉重造完成（队列 #$queueId${cardId == null ? '' : '，卡 $cardId'}）→ 卡回待审核区');
+      AppLog.instance.log(
+        AppLogLevel.info,
+        'rework',
+        '回炉重造完成（队列 #$queueId${cardId == null ? '' : '，卡 $cardId'}）→ 卡回待审核区',
+      );
       return {
         'ok': true,
         'queueId': queueId,
@@ -676,26 +962,36 @@ class LocalBackend {
         }
         final rawReviewedAt = item['reviewedAt'];
         final reviewedAt = rawReviewedAt is String
-            ? (DateTime.tryParse(rawReviewedAt) ?? DateTime.now())
-            : DateTime.now();
+            ? DateTime.tryParse(rawReviewedAt)
+            : null;
+        if (reviewedAt == null) {
+          // 不能用当前时间兜底：重放同一条坏数据会得到不同时间戳，
+          // 从而绕过 (card_id, reviewed_at) 幂等查重、重复调度记忆状态。
+          skipped++;
+          results.add({
+            'cardId': cardId,
+            'ok': false,
+            'error': '缺少或非法 reviewedAt',
+          });
+          continue;
+        }
         final rawLatency = item['latencyMs'];
         final int? latencyMs = rawLatency is num ? rawLatency.toInt() : null;
         final offlineQueued = item['offlineQueued'] == true;
 
-        final result = _scheduler.schedule(mem, rating, now: reviewedAt);
-        db.applySchedule(cardId, result);
-        db.insertReviewLog(
+        final result = db.applyReviewOnce(
           cardId: cardId,
-          subjectId: card.subjectId,
           rating: rating,
           reviewedAt: reviewedAt,
+          scheduler: _scheduler,
           latencyMs: latencyMs,
           offlineQueued: offlineQueued,
-          stateBefore: mem.state,
-          stateAfter: result.state,
-          stabilityAfter: result.stability,
-          intervalDays: result.intervalDays,
         );
+        if (result == null) {
+          skipped++;
+          results.add({'cardId': cardId, 'ok': true, 'duplicate': true});
+          continue;
+        }
         applied++;
         results.add({
           'cardId': cardId,
@@ -705,7 +1001,6 @@ class LocalBackend {
           'intervalDays': result.intervalDays,
         });
       }
-      if (applied > 0) db.bumpDataVersion();
       return {
         'ok': true,
         'applied': applied,
@@ -788,7 +1083,7 @@ class LocalBackend {
 
     // /settings/ai/<svc>/test（真外呼：llm GET /models；embedding POST
     // /embeddings；reranker POST <完整端点>，外呼可注入 mock）
-final aiTest = RegExp(
+    final aiTest = RegExp(
       r'^/settings/ai/(llm_backup|llm|embedding|reranker)/test$',
     ).firstMatch(path);
     if (aiTest != null) {
@@ -806,6 +1101,18 @@ final aiTest = RegExp(
     }
 
     // /corpus/build（App 内建库触发；单飞守卫返回进行中状态而非报错）
+    if (path == '/corpus/library/delete') {
+      final result = await _library('delete', {
+        'id': _str(m['id']),
+        'revision': _str(m['revision']),
+      }, write: true);
+      db.bumpDataVersion();
+      return result;
+    }
+    if (path == '/corpus/library/recover') {
+      await recoverCorpusLibrary();
+      return {'ok': true};
+    }
     if (path == '/corpus/build') {
       return _triggerCorpusBuild(db, m);
     }
@@ -838,7 +1145,7 @@ final aiTest = RegExp(
     // /settings/ai/<svc>（baseUrl 必须 https://、model 非空；apiKey 空=保持；
     // 键名 <svc>.baseUrl / <svc>.model（settings 表），<svc>.apiKey 只留空
     // 键位——key 本体存系统安全存储 AiKeyVault，svc ∈ llm|embedding|reranker）
-final aiPut = RegExp(
+    final aiPut = RegExp(
       r'^/settings/ai/(llm_backup|llm|embedding|reranker)$',
     ).firstMatch(path);
     if (aiPut != null) {
@@ -908,7 +1215,10 @@ final aiPut = RegExp(
       }
       final skipped = sk == null
           ? null
-          : [for (final v in sk) if (v is int && v > 0) v];
+          : [
+              for (final v in sk)
+                if (v is int && v > 0) v,
+            ];
       final progressPath = '$_corpusDir/progress.json';
       // 读-改-写整个 json（非字段级覆盖）：后写不静默丢流水线刚推进的
       // learned_through，亦不丢本端刚写的 skipped
@@ -929,8 +1239,11 @@ final aiPut = RegExp(
       if (r.mutated) {
         saveProgress(progressPath, data);
         // #2 埋点：章节进度变更（手动章节管理）
-        AppLog.instance.log(AppLogLevel.info, 'progress',
-            '章节管理变更：科目 $id learned_through=$lt skipped=${skipped?.length ?? 0}处（${r.note}）');
+        AppLog.instance.log(
+          AppLogLevel.info,
+          'progress',
+          '章节管理变更：科目 $id learned_through=$lt skipped=${skipped?.length ?? 0}处（${r.note}）',
+        );
       }
       return {..._subjectChaptersView(id), 'ok': true, 'note': r.note};
     }
@@ -955,6 +1268,7 @@ final aiPut = RegExp(
     path = _normalize(path);
 
     if (path.startsWith('/corpus/upload')) {
+      _ensureCorpusClean();
       final q = _parseQuery(path);
       final subject = q['subject'] ?? '';
       final filename = q['filename'] ?? '';
@@ -1165,6 +1479,7 @@ final aiPut = RegExp(
   /// POST /corpus/build：触发建库（body 可带 mode 显式指定，缺省自动选路）。
   /// 单飞守卫：运行中重复触发 → 返回进行中状态而非报错（job 照旧跑）。
   Map<String, dynamic> _triggerCorpusBuild(Db db, Map<String, dynamic> m) {
+    _ensureCorpusClean();
     if (_corpusBuildRunning) {
       return {
         'ok': true,
@@ -1174,7 +1489,7 @@ final aiPut = RegExp(
         ..._corpusBuildStateView(),
       };
     }
-final explicit = _str(m['mode']).trim().toLowerCase();
+    final explicit = _str(m['mode']).trim().toLowerCase();
     final resetVectors = m['resetVectors'] == true;
     final backfillVectors = m['backfillVectors'] == true;
     final (autoMode, autoKey, autoModel, autoBase) = _selectBuildMode(db);
@@ -1228,13 +1543,13 @@ final explicit = _str(m['mode']).trim().toLowerCase();
       'ok': true,
       'triggered': true,
       'mode': mode.name,
-'note': backfillVectors
+      'note': backfillVectors
           ? '已在后台开始补齐缺失向量（保留现有向量，只嵌缺失部分，消耗少量 API 额度）'
           : resetVectors
           ? '已在后台开始重建全部向量（清空后全量重嵌，消耗少量 API 额度）'
           : mode == CorpusEmbedMode.online
-              ? '已在后台开始建库（在线嵌入，消耗少量 API 额度）'
-              : '已在后台开始建库（后台运行，期间可正常使用 App）',
+          ? '已在后台开始建库（在线嵌入，消耗少量 API 额度）'
+          : '已在后台开始建库（后台运行，期间可正常使用 App）',
     };
   }
 
@@ -1260,7 +1575,7 @@ final explicit = _str(m['mode']).trim().toLowerCase();
         return;
       }
     }
-final sub = progress.listen((e) {
+    final sub = progress.listen((e) {
       _lastBuildEvent = e;
       _emitCorpusBuildState();
       // worker 日志事件（stage='log' 经 wire 回流）→ AppLog（worker 内
@@ -1283,16 +1598,21 @@ final sub = progress.listen((e) {
     } on IsolateCancelledException {
       _lastBuildCancelled = true;
       AppLog.instance.log(
-          AppLogLevel.warn, 'corpus-build', '建库已取消（收件箱保留）；上次结果键归零');
+        AppLogLevel.warn,
+        'corpus-build',
+        '建库已取消（收件箱保留）；上次结果键归零',
+      );
     } on IsolateJobException catch (e) {
       _lastBuildError = e.message; // 不含 key（上游协议守卫）；堆栈不进 UI 帧
       // 关键失败如实落 AppLog（嵌入 API 连续失败中止等 worker 错误文本）
       AppLog.instance.log(
-          AppLogLevel.error, 'corpus-build', '建库失败：${e.message}');
+        AppLogLevel.error,
+        'corpus-build',
+        '建库失败：${e.message}',
+      );
     } catch (e) {
       _lastBuildError = '$e';
-      AppLog.instance.log(
-          AppLogLevel.error, 'corpus-build', '建库失败：$e');
+      AppLog.instance.log(AppLogLevel.error, 'corpus-build', '建库失败：$e');
     } finally {
       unawaited(sub.cancel());
       _finishCorpusBuildJob();
@@ -1302,12 +1622,12 @@ final sub = progress.listen((e) {
   /// wire 级别字符串 → AppLog 级别（未知值回退 debug，防御性；与
   /// pipeline_runner 侧 _logLevelByName 同款映射，保持日志级口径一致）。
   static AppLogLevel? _buildLogLevel(String? level) => switch (level) {
-        'debug' => AppLogLevel.debug,
-        'info' => AppLogLevel.info,
-        'warn' => AppLogLevel.warn,
-        'error' => AppLogLevel.error,
-        _ => null,
-      };
+    'debug' => AppLogLevel.debug,
+    'info' => AppLogLevel.info,
+    'warn' => AppLogLevel.warn,
+    'error' => AppLogLevel.error,
+    _ => null,
+  };
 
   /// #2 埋点用：长文本截断（题干等防长文刷屏；换行归一）。
   static String _head(String? text, int n) {
@@ -1507,15 +1827,13 @@ final sub = progress.listen((e) {
     final model = _str(m['model']).trim();
     // 空 key = 用已存 key（系统安全存储 AiKeyVault 的内存缓存，与 PUT/
     // 流水线同源）；非空 = 表单新 key 直测
-    final apiKey = _str(m['apiKey']).isEmpty
-        ? aiKeyOf(svc)
-        : _str(m['apiKey']);
+    final apiKey = _str(m['apiKey']).isEmpty ? aiKeyOf(svc) : _str(m['apiKey']);
     if (!baseUrl.startsWith('https://')) {
       throw ApiException(400, 'baseUrl 必须以 https:// 开头');
     }
     final t0 = DateTime.now();
     try {
-// reranker：经 [rerankProbeOverride]（测试注入）或 [_rerankProbeReal]
+      // reranker：经 [rerankProbeOverride]（测试注入）或 [_rerankProbeReal]
       //（真 HttpClient）发最小探测——不与 llm/embedding 共享 client，便于 mock
       if (svc == 'reranker') {
         // 基址→完整端点补全（对齐 embedding 的 normalize 先例，2026-09-11）：
@@ -1555,7 +1873,7 @@ final sub = progress.listen((e) {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 10);
       try {
-if (svc == 'llm' || svc == 'llm_backup') {
+        if (svc == 'llm' || svc == 'llm_backup') {
           final rq = await client
               .getUrl(Uri.parse('$baseUrl/models'))
               .timeout(const Duration(seconds: 10));
@@ -1729,7 +2047,9 @@ if (svc == 'llm' || svc == 'llm_backup') {
         // ⑨ 章节管理：跳过章剔出有效总量/有效已学与「下一章」
         // （无 skipped 字段的旧数据：集合为空，值与原契约逐字段一致）
         final skipped = _validSkipped(
-            chapters, skippedChaptersOf(Map<String, Object?>.from(value)));
+          chapters,
+          skippedChaptersOf(Map<String, Object?>.from(value)),
+        );
         final next = _nextChapter(chapters, learnedThrough, skipped);
         final stamp = value['updated_at'];
         if (stamp is String &&
@@ -1746,8 +2066,11 @@ if (svc == 'llm' || svc == 'llm_backup') {
           'total': chapters.length - skipped.length,
           // #1（2026-09-13）：展示口径补充字段——有效已学=正文章计数（UI 消费；
           // 旧键语义不变，旧测试/旧客户端不受影响）
-          'effective_learned':
-              _effectiveLearned(chapters, learnedThrough, skipped),
+          'effective_learned': _effectiveLearned(
+            chapters,
+            learnedThrough,
+            skipped,
+          ),
           'effective_total': chapters.length - skipped.length,
           'next_chapter': next,
         });
@@ -1821,12 +2144,16 @@ if (svc == 'llm' || svc == 'llm_backup') {
     if (entry is! Map) {
       throw ApiException(404, '科目 $subjectId 不在进度库——章节管理仅面向已有科目');
     }
-    final learnedThrough =
-        entry['learned_through'] is int ? entry['learned_through'] as int : 0;
-    final chapters =
-        entry['chapters'] is List ? entry['chapters'] as List : const [];
+    final learnedThrough = entry['learned_through'] is int
+        ? entry['learned_through'] as int
+        : 0;
+    final chapters = entry['chapters'] is List
+        ? entry['chapters'] as List
+        : const [];
     final skipped = _validSkipped(
-        chapters, skippedChaptersOf(Map<String, Object?>.from(entry)));
+      chapters,
+      skippedChaptersOf(Map<String, Object?>.from(entry)),
+    );
     final rows = <Map<String, dynamic>>[
       for (final ch in chapters)
         if (ch is Map)
@@ -1835,7 +2162,9 @@ if (svc == 'llm' || svc == 'llm_backup') {
             'title': ch['title'],
             'page_start': ch['page_start'],
             'learned':
-                ch['no'] is int && ch['no'] as int > 0 && ch['no'] as int <= learnedThrough,
+                ch['no'] is int &&
+                ch['no'] as int > 0 &&
+                ch['no'] as int <= learnedThrough,
             'skipped': ch['no'] is int && skipped.contains(ch['no']),
           },
     ];
@@ -1950,13 +2279,14 @@ if (svc == 'llm' || svc == 'llm_backup') {
       out['hasCorpus'] = true;
       try {
         out['chunks'] =
-            (cdb.select('SELECT COUNT(*) AS n FROM chunks').first['n'] as int?) ??
-                0;
+            (cdb.select('SELECT COUNT(*) AS n FROM chunks').first['n']
+                as int?) ??
+            0;
       } catch (_) {}
       try {
-        out['vectors'] = (cdb
-                .select('SELECT COUNT(*) AS n FROM vectors')
-                .first['n'] as int?) ??
+        out['vectors'] =
+            (cdb.select('SELECT COUNT(*) AS n FROM vectors').first['n']
+                as int?) ??
             0;
       } catch (_) {}
       try {
@@ -2127,7 +2457,7 @@ if (svc == 'llm' || svc == 'llm_backup') {
     '.pdf': [0x25, 0x50, 0x44, 0x46], // %PDF
   };
 
-  static const _maxUploadBytes = 200 * 1024 * 1024;
+  static const _maxUploadBytes = ApiClient.maxCoursewareBytes;
 
   /// 文件名清洗：取末段（兼容 / 与 \ 分隔）、拒绝穿越残留/空名
   String? _sanitizeFilename(String name) {
@@ -2153,7 +2483,9 @@ if (svc == 'llm' || svc == 'llm_backup') {
   /// 的对齐实现）。
   static String _relPosixOf(String path, String rootPath) {
     var rp = rootPath;
-    if (rp.endsWith('/') || rp.endsWith('\\')) rp = rp.substring(0, rp.length - 1);
+    if (rp.endsWith('/') || rp.endsWith('\\')) {
+      rp = rp.substring(0, rp.length - 1);
+    }
     var p = path;
     if (p.length > rp.length + 1 &&
         (p.startsWith('$rp\\') || p.startsWith('$rp/'))) {

@@ -15,7 +15,7 @@
 //      （assets/prompts 拷贝与仓库源 byte-equal，skip-guard 同金样模式）。
 //   D. 编排组（fake RunSearch/LlmChat/CardPort，全离线零真实网络）：
 //      三级递进/通道 A 超额截断/占位兜底/LLM 失败不 consume/消费闸矩阵/
-//      rework 双通道（审核拒绝优先 + dry-run 草稿）/周扫（大纲剔除+科目
+//      rework 任务→证据→草案（无证据/无效输出停「需补充」，不自动回写原卡）/周扫（大纲剔除+科目
 //      合法性回退+配额）。
 //   E. 源分级兜底链组（批4 节点①）：ppt 主源命中不做教材兜底/ppt 三级空
 //      → 教材兜底命中（sourceTier=textbook 透传）/双源全空 → 占位卡
@@ -494,7 +494,7 @@ void main() {
       expect(prompts['split']!, contains('占位卡'));
       expect(prompts['split']!, contains('四联因素')); // 规则逐字保留抽查
       expect(prompts['weekly']!, contains('通道 B'));
-      expect(prompts['rework']!, contains('审核拒绝'));
+      expect(prompts['rework']!, contains('issueResults'));
       expect(prompts['synonym']!, contains('queries'));
       expect(prompts['studylog']!, contains('第X章'));
       expect(notes, isEmpty);
@@ -1098,80 +1098,62 @@ void main() {
     expect(port5.log.single, 'import:2');
   });
 
-  test('processRework：双通道闭环（审核拒绝优先 + dry-run 草稿 + done 顺序）', () async {
+  test('processRework：无证据时停止，旧接口不得回写原卡', () async {
+    var llmCalls = 0;
     final doneCalls = <String>[];
-    Future<Map<String, Object?>> fakeSearch(
-      String query, {
-      String? subject,
-      String? sourceType,
-      int? k,
-    }) async {
-      return {'results': <Map<String, Object?>>[]};
-    }
-
-    Future<String> fakeLlm(
-      String system,
-      String user, {
-      String tag = '',
-    }) async {
-      return '{"front": "新题干", "back": "新答案", "evidenceChunkId": ""}';
-    }
-
-    final queue = [
+    final queue = <Map<String, Object?>>[
       {
         'id': 5,
         'cardId': 'c5',
         'subjectId': 'endo',
         'front': '旧题干',
         'back': '旧答案',
-        'anchor': 'p.1',
+        'anchor': 'p1',
         'reason': '表述绕',
       },
       {
         'id': 2,
         'cardId': 'c2',
         'subjectId': 'endo',
-        'front': 'x',
-        'back': 'y',
-        'anchor': '',
+        'front': '旧题干',
+        'back': '旧答案',
+        'anchor': 'p1',
         'reason': '审核拒绝：答案有误',
       },
     ];
-    final notes = [
-      {'cardId': 'c2', 'aiNote': '希望更短'},
-    ];
-    // dry-run：只出草稿不 done
-    final dry = await processRework(
-      runSearch: fakeSearch,
-      llmChat: fakeLlm,
-      prompts: const {},
-      queue: queue,
-      aiNotes: notes,
-      subjectNames: {'endo': '世界通史'},
-      opts: const RunOptions(dryRun: true),
-    );
-    expect(dry.length, 2);
-    expect(dry.every((r) => r['draft'] == true), isTrue);
+    Future<Map<String, Object?>> search(
+      String q, {
+      String? subject,
+      String? sourceType,
+      int? k,
+    }) async => {'results': <Object>[]};
+    Future<String> llm(String system, String user, {String tag = ''}) async {
+      llmCalls++;
+      return '{}';
+    }
+
+    for (final dry in [true, false]) {
+      final port = _RecorderPort()..onDone = doneCalls.add;
+      final results = await processRework(
+        runSearch: search,
+        llmChat: llm,
+        prompts: {},
+        queue: queue,
+        aiNotes: [],
+        subjectNames: {},
+        opts: RunOptions(dryRun: dry),
+        port: port,
+      );
+      expect(results, hasLength(2));
+      expect(results.first['queueId'], 2);
+      expect(
+        results.every((r) => r['needsInput'] == true && r['done'] == false),
+        true,
+      );
+      expect(results.every((r) => r['error'] != null), true);
+    }
+    expect(llmCalls, 0);
     expect(doneCalls, isEmpty);
-    expect(dry.first['queueId'], 2); // 审核拒绝排前
-    expect(dry.first['aiNotesRead'], 1); // aiNotes 注入重写参考
-    // 非 dry-run：逐条 done，顺序 [2, 5]
-    final port = _RecorderPort()..onDone = doneCalls.add;
-    final live = await processRework(
-      runSearch: fakeSearch,
-      llmChat: fakeLlm,
-      prompts: const {},
-      queue: queue,
-      aiNotes: notes,
-      subjectNames: {'endo': '世界通史'},
-      opts: const RunOptions(),
-      port: port,
-    );
-    expect(doneCalls, ['done:2:新题干', 'done:5:新题干']);
-    expect(live.every((r) => r['done'] == true), isTrue);
-    expect(live.first['back'], '新答案');
-    expect(live.first['anchor'], ''); // queueId 2（审核拒绝优先）原锚为空
-    expect(live.last['anchor'], 'p.1'); // queueId 5 证据缺失 → 保留原锚
   });
 
   test('runWeekly：大纲剔除 + 去重 + 均衡 + 科目合法性回退 + 配额（通道 B）', () async {
@@ -1291,7 +1273,9 @@ void main() {
 
   /// G 组共用：单行检索结果包装。
   Future<Map<String, Object?>> searchOf(Map<String, Object?> row) =>
-      Future.value({'results': [row]});
+      Future.value({
+        'results': [row],
+      });
 
   test('⑤ runWeekly：技能五站豁免已学门控 + 每类 ≤kWeeklySkillCapPerTopic 封顶', () async {
     Future<Map<String, Object?>> fakeSearch(
@@ -1336,7 +1320,11 @@ void main() {
     }
 
     var llmCalls = 0;
-    Future<String> fakeLlm(String system, String user, {String tag = ''}) async {
+    Future<String> fakeLlm(
+      String system,
+      String user, {
+      String tag = '',
+    }) async {
       llmCalls += 1;
       return jsonEncode({
         'cards': [
@@ -1381,26 +1369,19 @@ void main() {
     expect(llmCalls, 1);
     expect(cards.length, 5, reason: 'bingshi 封顶 3 + caozuo 2');
     expect(
-      cards
-          .where((c) => c['front'].toString().startsWith('病史采集卡'))
-          .length,
+      cards.where((c) => c['front'].toString().startsWith('病史采集卡')).length,
       3,
       reason: '技能每类 ≤kWeeklySkillCapPerTopic=3',
     );
     expect(
-      cards
-          .where((c) => c['front'].toString().startsWith('操作技能卡'))
-          .length,
+      cards.where((c) => c['front'].toString().startsWith('操作技能卡')).length,
       2,
     );
     final counts = res['counts'] as Map<String, Object?>;
     expect(counts['skillCandidates'], 6);
     expect((counts['skillByTopic'] as Map)['bingshi'], 3);
     expect((counts['skillByTopic'] as Map)['caozuo'], 2);
-    expect(
-      (res['notes'] as List).join('\n'),
-      contains('技能专题出卡超额截断（病史采集类 ≤3）'),
-    );
+    expect((res['notes'] as List).join('\n'), contains('技能专题出卡超额截断（病史采集类 ≤3）'));
     expect(counts['cards'], 5, reason: '技能卡计入总量（≤kWeeklyExamCap=30）');
   });
 
@@ -1496,10 +1477,7 @@ void main() {
       ],
     );
     expect((res3['cards'] as List), isEmpty, reason: '科目非法 → 跳过不出卡');
-    expect(
-      (res3['notes'] as List).join('\n'),
-      contains('技能真题卡科目非法（bingshi）'),
-    );
+    expect((res3['notes'] as List).join('\n'), contains('技能真题卡科目非法（bingshi）'));
   });
 
   test('⑤ runWeekly：examMeta 兜底（deck 名年份 + deck 内页序；严禁臆造）', () async {
@@ -1548,10 +1526,7 @@ void main() {
     );
     final counts = res['counts'] as Map<String, Object?>;
     expect(counts['examMetaFallback'], 1);
-    expect(
-      (res['notes'] as List).join('\n'),
-      contains('examMeta 兜底：1 张'),
-    );
+    expect((res['notes'] as List).join('\n'), contains('examMeta 兜底：1 张'));
 
     // ② 反例：deck 名无年份 → 解析不出绝不臆造，跳卡（宁漏不错）
     final res2 = await runWeekly(
@@ -1592,8 +1567,9 @@ void main() {
     // ① chapters=[] 且无技能专题 → LLM 不调用、零候选零卡零导入
     var llmCalls = 0;
     final res1 = await runWeekly(
-      runSearch: (query, {subject, sourceType, k}) async =>
-          {'results': <Object?>[]},
+      runSearch: (query, {subject, sourceType, k}) async => {
+        'results': <Object?>[],
+      },
       llmChat: (system, user, {tag = ''}) async {
         llmCalls += 1;
         return '{"cards": []}';
@@ -1665,10 +1641,9 @@ void main() {
       isEmpty,
     );
     // 既有规则与新增可叠加
-    final both = cardViolations(
-      {'back': '①a\n②b\n③c\n④d\n⑤e\n⑥f'},
-      subtopicTotal: 7,
-    );
+    final both = cardViolations({
+      'back': '①a\n②b\n③c\n④d\n⑤e\n⑥f',
+    }, subtopicTotal: 7);
     expect(both.where((v) => v.contains('要点 6 > 4')), isNotEmpty);
     expect(both.where((v) => v.contains('子考点数 7 > 6')), isNotEmpty);
   });
@@ -1716,22 +1691,29 @@ void main() {
     expect(extractSplitPlan('plan:{"subtopics":123}\n{}').$1, isNull);
     expect(extractSplitPlan('plan:{"subtopics":"病因"}\n{}').$1, ['病因']);
     // 行首空白 / plan: 后空格 / CRLF 行尾也认
-    expect(
-      extractSplitPlan('  plan: {"subtopics":["x"]}\n{"cards":[]}').$1,
-      ['x'],
-    );
-    expect(
-      extractSplitPlan('plan:{"subtopics":["x"]}\r\n{"cards":[]}').$1,
-      ['x'],
-    );
+    expect(extractSplitPlan('  plan: {"subtopics":["x"]}\n{"cards":[]}').$1, [
+      'x',
+    ]);
+    expect(extractSplitPlan('plan:{"subtopics":["x"]}\r\n{"cards":[]}').$1, [
+      'x',
+    ]);
   });
 
   test('批4② subtopicsFromCardsObj：计划放进 cards JSON 顶层的容错', () {
-    expect(subtopicsFromCardsObj({'plan': {'subtopics': ['a', 'b']}}), [
-      'a',
-      'b',
-    ]);
-    expect(subtopicsFromCardsObj({'subtopics': ['a']}), ['a']);
+    expect(
+      subtopicsFromCardsObj({
+        'plan': {
+          'subtopics': ['a', 'b'],
+        },
+      }),
+      ['a', 'b'],
+    );
+    expect(
+      subtopicsFromCardsObj({
+        'subtopics': ['a'],
+      }),
+      ['a'],
+    );
     expect(subtopicsFromCardsObj({'cards': []}), isNull);
     expect(subtopicsFromCardsObj(<String, Object?>{}), isNull);
     expect(subtopicsFromCardsObj(null), isNull);
@@ -1811,64 +1793,67 @@ void main() {
     expect(payload['maxSubtopics'], kMaxSubtopicsPerKeyword);
   });
 
-  test('批4② kMaxSubtopicsPerKeyword/kMaxCardsPerSubtopic 边界：6×≤2 不违规', () async {
-    Future<Map<String, Object?>> fakeSearch(
-      String query, {
-      String? subject,
-      String? sourceType,
-      int? k,
-    }) async {
-      if (sourceType == 'exam') {
-        return {'results': <Map<String, Object?>>[]};
+  test(
+    '批4② kMaxSubtopicsPerKeyword/kMaxCardsPerSubtopic 边界：6×≤2 不违规',
+    () async {
+      Future<Map<String, Object?>> fakeSearch(
+        String query, {
+        String? subject,
+        String? sourceType,
+        int? k,
+      }) async {
+        if (sourceType == 'exam') {
+          return {'results': <Map<String, Object?>>[]};
+        }
+        return {
+          'results': [Map<String, Object?>.from(pptHitRow)],
+        };
       }
-      return {
-        'results': [Map<String, Object?>.from(pptHitRow)],
-      };
-    }
 
-    final subs = ['一', '二', '三', '四', '五', '六'];
-    Future<String> fakeLlm(
-      String system,
-      String user, {
-      String tag = '',
-    }) async {
-      if (tag == 'split') {
-        final cardsJson = jsonEncode({
-          'cards': [
-            for (var i = 0; i < subs.length; i++)
-              for (var j = 0; j < (i == 0 ? 2 : 1); j++)
-                {
-                  'kind': 'ppt',
-                  'topic': 't$i$j',
-                  'subtopic': subs[i],
-                  'front': 'F$i$j',
-                  'back': 'B$i$j',
-                  'evidenceChunkId': 'endo:drill-ppt:p1',
-                },
-          ],
-        });
-        return 'plan:${jsonEncode({'subtopics': subs})}\n$cardsJson';
+      final subs = ['一', '二', '三', '四', '五', '六'];
+      Future<String> fakeLlm(
+        String system,
+        String user, {
+        String tag = '',
+      }) async {
+        if (tag == 'split') {
+          final cardsJson = jsonEncode({
+            'cards': [
+              for (var i = 0; i < subs.length; i++)
+                for (var j = 0; j < (i == 0 ? 2 : 1); j++)
+                  {
+                    'kind': 'ppt',
+                    'topic': 't$i$j',
+                    'subtopic': subs[i],
+                    'front': 'F$i$j',
+                    'back': 'B$i$j',
+                    'evidenceChunkId': 'endo:drill-ppt:p1',
+                  },
+            ],
+          });
+          return 'plan:${jsonEncode({'subtopics': subs})}\n$cardsJson';
+        }
+        return '{"queries": []}';
       }
-      return '{"queries": []}';
-    }
 
-    final res = await splitKeyword(
-      runSearch: fakeSearch,
-      llmChat: fakeLlm,
-      prompts: const {},
-      kw: {'id': 22, 'subjectId': 'endo', 'keyword': '龋病', 'note': ''},
-      subjectName: '牙体牙髓病学',
-      legalSubjects: const [],
-      opts: const RunOptions(),
-    );
-    final cards = (res['cards'] as List).cast<Map<String, Object?>>();
-    expect(res['subtopics'], subs);
-    expect(cards, hasLength(7)); // 2+1+1+1+1+1
-    for (final c in cards) {
-      expect(c['violations'], isEmpty, reason: '边界内不加子考点类违规');
-      expect(c['subtopic'], isNotNull);
-    }
-  });
+      final res = await splitKeyword(
+        runSearch: fakeSearch,
+        llmChat: fakeLlm,
+        prompts: const {},
+        kw: {'id': 22, 'subjectId': 'endo', 'keyword': '龋病', 'note': ''},
+        subjectName: '牙体牙髓病学',
+        legalSubjects: const [],
+        opts: const RunOptions(),
+      );
+      final cards = (res['cards'] as List).cast<Map<String, Object?>>();
+      expect(res['subtopics'], subs);
+      expect(cards, hasLength(7)); // 2+1+1+1+1+1
+      for (final c in cards) {
+        expect(c['violations'], isEmpty, reason: '边界内不加子考点类违规');
+        expect(c['subtopic'], isNotNull);
+      }
+    },
+  );
 
   test('批4② splitKeyword：plan 行缺失/损坏 → 回退单卡路径（不 fail 不中断）', () async {
     Future<Map<String, Object?>> fakeSearch(
@@ -1905,8 +1890,9 @@ void main() {
       return '{"queries": []}';
     }
 
-    Future<Map<String, Object?>> run(Future<String> Function(String, String,
-        {String tag}) llm) async {
+    Future<Map<String, Object?>> run(
+      Future<String> Function(String, String, {String tag}) llm,
+    ) async {
       return splitKeyword(
         runSearch: fakeSearch,
         llmChat: llm,
@@ -1962,7 +1948,9 @@ void main() {
     }) async {
       if (tag == 'split') {
         return jsonEncode({
-          'plan': {'subtopics': ['病因']},
+          'plan': {
+            'subtopics': ['病因'],
+          },
           'cards': [
             {
               'kind': 'ppt',
@@ -1994,7 +1982,9 @@ void main() {
       chapters: const [
         {'subject': 'endo', 'subjectName': '牙体牙鼓病学', 'chapter': '麧病'},
       ],
-      legalSubjects: const [{'id': 'endo', 'name': '牙体牙鼓病学'}],
+      legalSubjects: const [
+        {'id': 'endo', 'name': '牙体牙鼓病学'},
+      ],
       opts: const RunOptions(),
       onLog: (level, tag, message) => logs1.add('$level/$tag/$message'),
     );
@@ -2003,8 +1993,11 @@ void main() {
       contains('周扫检索降级（麧病）：'),
       reason: '检索降级必须经 onLog 如实上报',
     );
-    expect(logs1.first, startsWith('warn/weekly/'),
-        reason: '检索降级 = warn级、weekly tag');
+    expect(
+      logs1.first,
+      startsWith('warn/weekly/'),
+      reason: '检索降级 = warn级、weekly tag',
+    );
 
     // ② LLM 失败：检索有候选，llmChat 抛 LlmException → onLog error（llm tag）
     final logs2 = <String>[];
@@ -2025,16 +2018,19 @@ void main() {
       chapters: const [
         {'subject': 'endo', 'subjectName': '牙体牙鼓病学', 'chapter': '麧病'},
       ],
-      legalSubjects: const [{'id': 'endo', 'name': '牙体牙鼓病学'}],
+      legalSubjects: const [
+        {'id': 'endo', 'name': '牙体牙鼓病学'},
+      ],
       opts: const RunOptions(dryRun: true),
       onLog: (level, tag, message) => logs2.add('$level/$tag/$message'),
     );
-    expect(logs2.any((e) => e.startsWith('error/llm/')), isTrue,
-        reason: 'LLM 失败必须经 onLog 以 error级、llm tag 上报');
-    expect(logs2.join('\n'), contains('周扫 LLM 失败'),
-        reason: '消息带上下文（不含 key）');
+    expect(
+      logs2.any((e) => e.startsWith('error/llm/')),
+      isTrue,
+      reason: 'LLM 失败必须经 onLog 以 error级、llm tag 上报',
+    );
+    expect(logs2.join('\n'), contains('周扫 LLM 失败'), reason: '消息带上下文（不含 key）');
   });
-
 }
 
 /// 记录仪 Port：全部调用入 log，行为可配置（测试消费闸矩阵）。

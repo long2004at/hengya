@@ -22,7 +22,7 @@ import 'dart:convert' as convert;
 import 'dart:ffi' as ffi;
 import 'dart:io';
 
-import 'package:hengya/pages/settings_page.dart';
+import 'package:hengya/pages/corpus_tools_panel.dart';
 import 'package:hengya/services/api/api_client.dart';
 import 'package:hengya/services/local/corpus_build_job.dart'
     show CorpusBuildResult;
@@ -38,7 +38,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows) {
     sqlite_open.open.overrideForAll(
-        () => ffi.DynamicLibrary.open(File('test/sqlite3.dll').absolute.path));
+      () => ffi.DynamicLibrary.open(File('test/sqlite3.dll').absolute.path),
+    );
   }
 
   late Directory tmp;
@@ -71,10 +72,12 @@ void main() {
   /// 只看目录与 manifest，不验魔数；真实验证链归 route 测试）
   void seedPending() {
     Directory('${tmp.path}/corpus/incoming/oms').createSync(recursive: true);
-    File('${tmp.path}/corpus/incoming/oms/外科基本操作.pptx')
-        .writeAsBytesSync(List.filled(64, 0x50));
-    File('${tmp.path}/corpus/incoming/oms/讲义补篇.pdf')
-        .writeAsBytesSync(List.filled(48, 0x25));
+    File(
+      '${tmp.path}/corpus/incoming/oms/外科基本操作.pptx',
+    ).writeAsBytesSync(List.filled(64, 0x50));
+    File(
+      '${tmp.path}/corpus/incoming/oms/讲义补篇.pdf',
+    ).writeAsBytesSync(List.filled(48, 0x25));
   }
 
   /// 写建库 manifest（假 job 的等价副作用——「待处理清零」的真实机制：
@@ -92,9 +95,9 @@ void main() {
         'chunk_ids': <String>['oms:fake-deck:p1'],
       };
     }
-    File('${tmp.path}/corpus/extract_manifest.json').writeAsStringSync(
-      convert.jsonEncode({'version': 1, 'files': files}),
-    );
+    File(
+      '${tmp.path}/corpus/extract_manifest.json',
+    ).writeAsStringSync(convert.jsonEncode({'version': 1, 'files': files}));
   }
 
   /// 打开设置页并等首屏异步加载落地（同 ui_button_sweep 的 settle 姿势）。
@@ -105,7 +108,11 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: SingleChildScrollView(child: CorpusToolsPanel())),
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
@@ -146,21 +153,24 @@ void main() {
     expect(started, 0); // 未触发任何 job
   });
 
-  testWidgets(
-      '教材树待处理：「·教材」角标清单 + 确认框「课件/教材」措辞（两树并存）',
-      (tester) async {
+  testWidgets('教材树待处理：「·教材」角标清单 + 确认框「课件/教材」措辞（两树并存）', (tester) async {
     await boot();
     // 真科目：清单课程名链（local = db subjects 表经 /subjects 目录缓存）
-    await LocalBackend.instance
-        .post('/subjects', {'name': '口腔颌面外科学', 'id': 'oms'});
+    await LocalBackend.instance.post('/subjects', {
+      'name': '口腔颌面外科学',
+      'id': 'oms',
+    });
     // 两棵树并存（上传「类型：教材」落盘的等价形态）：课件树 + 教材树
     Directory('${tmp.path}/corpus/incoming/oms').createSync(recursive: true);
-    File('${tmp.path}/corpus/incoming/oms/外科基本操作.pptx')
-        .writeAsBytesSync(List.filled(64, 0x50));
-    Directory('${tmp.path}/corpus/incoming/oms-textbook')
-        .createSync(recursive: true);
-    File('${tmp.path}/corpus/incoming/oms-textbook/皮肤性病学.pdf')
-        .writeAsBytesSync(List.filled(48, 0x25));
+    File(
+      '${tmp.path}/corpus/incoming/oms/外科基本操作.pptx',
+    ).writeAsBytesSync(List.filled(64, 0x50));
+    Directory(
+      '${tmp.path}/corpus/incoming/oms-textbook',
+    ).createSync(recursive: true);
+    File(
+      '${tmp.path}/corpus/incoming/oms-textbook/皮肤性病学.pdf',
+    ).writeAsBytesSync(List.filled(48, 0x25));
     var started = 0;
     LocalBackend.corpusBuildJobOverride = (req) {
       started++;
@@ -175,12 +185,16 @@ void main() {
 
     // 两树并入同一待处理清单：课件行 + 教材行（subject = 首层目录名）
     expect(find.text('待处理 2 个文件'), findsOneWidget);
-    expect(find.textContaining('口腔颌面外科学（oms） / 外科基本操作.pptx'),
-        findsOneWidget,
-        reason: '课件树行：课程名（短码）原样');
-    expect(find.textContaining('口腔颌面外科学（oms·教材） / 皮肤性病学.pdf'),
-        findsOneWidget,
-        reason: '教材树行：剥 -textbook 尾缀查课程名 +「·教材」角标');
+    expect(
+      find.textContaining('口腔颌面外科学（oms） / 外科基本操作.pptx'),
+      findsOneWidget,
+      reason: '课件树行：课程名（短码）原样',
+    );
+    expect(
+      find.textContaining('口腔颌面外科学（oms·教材） / 皮肤性病学.pdf'),
+      findsOneWidget,
+      reason: '教材树行：剥 -textbook 尾缀查课程名 +「·教材」角标',
+    );
 
     // 确认框：教材在场 → 「课件/教材」措辞（纯课件树维持原文案，
     // 由既有用例「将把 2 个待处理课件抽取入库」锚定不回归）
@@ -195,8 +209,7 @@ void main() {
     expect(started, 0);
   });
 
-  testWidgets('mock 进度流：运行视图 → 完成摘要 → 待处理清零 + 父级语料行刷新',
-      (tester) async {
+  testWidgets('mock 进度流：运行视图 → 完成摘要 → 待处理清零 + 父级语料行刷新', (tester) async {
     await boot();
     seedPending();
     final events = StreamController<IsolateProgressEvent>.broadcast();
@@ -225,52 +238,62 @@ void main() {
     expect(find.text('开始建库'), findsNothing); // 运行中无可点的开始入口
 
     // 进度帧驱动（唯一路径 = 状态流；GET 不会给出这个消息文本）
-    events.add(const IsolateProgressEvent(
-        stage: 'extract', message: '已抽取：oms / 外科基本操作.pptx（12 chunks）'));
+    events.add(
+      const IsolateProgressEvent(
+        stage: 'extract',
+        message: '已抽取：oms / 外科基本操作.pptx（12 chunks）',
+      ),
+    );
     await tester.pump();
     expect(
-        find.textContaining('抽取课件 · 已抽取：oms / 外科基本操作.pptx（12 chunks）'),
-        findsOneWidget);
+      find.textContaining('抽取课件 · 已抽取：oms / 外科基本操作.pptx（12 chunks）'),
+      findsOneWidget,
+    );
 
     // counts 帧（ExtractAllStats toJson 契约键 → 友好计数行）
-    events.add(const IsolateProgressEvent(
+    events.add(
+      const IsolateProgressEvent(
         stage: 'extract',
         message: '抽取完成：12 chunks（changed=1 unchanged=0 removed=0）',
-        counts: {'chunks': 12, 'changed': 1, 'unchanged': 0, 'removed': 0}));
+        counts: {'chunks': 12, 'changed': 1, 'unchanged': 0, 'removed': 0},
+      ),
+    );
     await tester.pump();
     expect(find.textContaining('chunks 12 · 新抽 1'), findsOneWidget);
 
     // 收尾：写 manifest（待处理清零的真实机制）→ done 完成 → 完成摘要
     writeManifest();
-    done.complete(CorpusBuildResult(
-      extract: const {
-        'decks_total': 1,
-        'changed': 1,
-        'unchanged': 0,
-        'removed': 0,
-        'chunks': 12,
-        'skipped_big': <String>[],
-        'errors': <String>[],
-        'by_subject': <String, Object?>{'oms': 1},
-      },
-      ingest: const {
-        'rows': 12,
-        'bad_lines': 0,
-        'mode': 'drill',
-        'model': 'local-charhash-1024-v1',
-        'dim': 1024,
-        'embedded': 12,
-        'resumed': 0,
-        'pending': 0,
-        'batches': 1,
-        'pruned_stale': 0,
-        'pruned_absent': 0,
-      },
-      notes: const [],
-      elapsedS: 1.5,
-      inputPath: 'x',
-      corpusDbPath: 'y',
-    ));
+    done.complete(
+      CorpusBuildResult(
+        extract: const {
+          'decks_total': 1,
+          'changed': 1,
+          'unchanged': 0,
+          'removed': 0,
+          'chunks': 12,
+          'skipped_big': <String>[],
+          'errors': <String>[],
+          'by_subject': <String, Object?>{'oms': 1},
+        },
+        ingest: const {
+          'rows': 12,
+          'bad_lines': 0,
+          'mode': 'drill',
+          'model': 'local-charhash-1024-v1',
+          'dim': 1024,
+          'embedded': 12,
+          'resumed': 0,
+          'pending': 0,
+          'batches': 1,
+          'pruned_stale': 0,
+          'pruned_absent': 0,
+        },
+        notes: const [],
+        elapsedS: 1.5,
+        inputPath: 'x',
+        corpusDbPath: 'y',
+      ),
+    );
     await tester.pump();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
@@ -324,20 +347,21 @@ void main() {
 
     // 收尾（避免跨用例残留挂起 Future）
     events.add(const IsolateProgressEvent(stage: 'done', message: '建库完成'));
-    done.complete(const CorpusBuildResult(
-      extract: null,
-      ingest: null,
-      notes: [],
-      elapsedS: 0,
-      inputPath: 'x',
-      corpusDbPath: 'y',
-    ));
+    done.complete(
+      const CorpusBuildResult(
+        extract: null,
+        ingest: null,
+        notes: [],
+        elapsedS: 0,
+        inputPath: 'x',
+        corpusDbPath: 'y',
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
   });
 
-  testWidgets('失败可重试：done 抛 IsolateJobException → 错误视图 + 重试走通',
-      (tester) async {
+  testWidgets('失败可重试：done 抛 IsolateJobException → 错误视图 + 重试走通', (tester) async {
     await boot();
     seedPending();
     final events = StreamController<IsolateProgressEvent>.broadcast();
@@ -361,11 +385,12 @@ void main() {
 
     // 失败收尾（IsolateJobException → message 进错误视图；堆栈不进 UI）
     completers.first.completeError(
-        IsolateJobException('corpus-build', '抽取失败：演示错误'));
+      IsolateJobException('corpus-build', '抽取失败：演示错误'),
+    );
     await tester.pump();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-expect(find.textContaining('上次建库失败：抽取失败：演示错误'), findsOneWidget);
+    expect(find.textContaining('上次建库失败：抽取失败：演示错误'), findsOneWidget);
     expect(find.textContaining('失败可重试'), findsOneWidget);
     // 待处理未清（无 manifest）→ 续跑按钮仍可用（失败态 label = 继续建库）
     expect(find.text('待处理 2 个文件'), findsOneWidget);
@@ -389,29 +414,32 @@ expect(find.textContaining('上次建库失败：抽取失败：演示错误'), 
 
   // ---------------- #3（2026-09-07）：语料变更信号 → 面板不退出重进即变蓝 ----------------
 
-  testWidgets('#3 语料变更信号：incoming 落盘 → 刷新语料状态 → 面板变蓝（不退出重进）',
-      (tester) async {
+  testWidgets('#3 语料变更信号：incoming 落盘 → 刷新语料状态 → 面板变蓝（不退出重进）', (tester) async {
     await boot();
     await openSettings(tester);
 
     // 初始态：无待处理 → 清单空态 + 按钮灰
     expect(find.text('暂无待处理文件——上传课件后即可在本机构建语料'), findsOneWidget);
     expect(
-        (find
-                .ancestor(
+      (find
+                  .ancestor(
                     of: find.text('开始建库'),
-                    matching: find.byType(FilledButton))
-                .evaluate()
-                .single
-                .widget as FilledButton)
-            .onPressed,
-        isNull,
-        reason: '待处理为空 → 开始建库置灰（用户观察到的灰态）');
+                    matching: find.byType(FilledButton),
+                  )
+                  .evaluate()
+                  .single
+                  .widget
+              as FilledButton)
+          .onPressed,
+      isNull,
+      reason: '待处理为空 → 开始建库置灰（用户观察到的灰态）',
+    );
 
     // 上传等价落盘：incoming 直写一个课件（与 App 上传同终态——目录 + 文件）
     Directory('${tmp.path}/corpus/incoming/oms').createSync(recursive: true);
-    File('${tmp.path}/corpus/incoming/oms/新课件.pptx')
-        .writeAsBytesSync(List.filled(64, 0x50));
+    File(
+      '${tmp.path}/corpus/incoming/oms/新课件.pptx',
+    ).writeAsBytesSync(List.filled(64, 0x50));
 
     // 「刷新语料状态」→ _refreshCorpus → _corpusRev 信号 +1 → 面板 _onRevChanged
     // 重拉（与生产上传成功回调 _pickAndUpload 走同一信号通路——文件选择器是
@@ -422,19 +450,25 @@ expect(find.textContaining('上次建库失败：抽取失败：演示错误'), 
     for (var i = 0; i < 14 && !tester.any(find.text('待处理 1 个文件')); i++) {
       await tester.pump(const Duration(milliseconds: 200));
     }
-    expect(find.text('待处理 1 个文件'), findsOneWidget,
-        reason: '#3：语料信号触发面板重拉——无需退出重进即见新清单');
     expect(
-        (find
-                .ancestor(
+      find.text('待处理 1 个文件'),
+      findsOneWidget,
+      reason: '#3：语料信号触发面板重拉——无需退出重进即见新清单',
+    );
+    expect(
+      (find
+                  .ancestor(
                     of: find.text('开始建库'),
-                    matching: find.byType(FilledButton))
-                .evaluate()
-                .single
-                .widget as FilledButton)
-            .onPressed,
-        isNotNull,
-        reason: '#3：面板刷新后「开始建库」立即变蓝（不退出重进）');
+                    matching: find.byType(FilledButton),
+                  )
+                  .evaluate()
+                  .single
+                  .widget
+              as FilledButton)
+          .onPressed,
+      isNotNull,
+      reason: '#3：面板刷新后「开始建库」立即变蓝（不退出重进）',
+    );
     expect(tester.takeException(), isNull);
   });
 }

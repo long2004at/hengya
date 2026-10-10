@@ -15,6 +15,8 @@ import '../services/api/local_cache.dart';
 import '../theme.dart';
 import '../widgets/offline_data_bar.dart';
 import '../widgets/reason_action_dialog.dart';
+import 'rework_request_sheet.dart';
+import 'rework_workbench_page.dart';
 import '../widgets/top_toast.dart';
 
 class BankPage extends StatefulWidget {
@@ -545,7 +547,7 @@ class _BankCardTile extends StatelessWidget {
     // #10①：回炉入队后卡片必须有可见的「重造中」状态（旧版与普通卡
     // 一样落到调度徽标「未开始」，用户无从知道已在重造）
     if (item.card.status == CardStatus.rework) {
-      return ('重造中', const Color(0xFFE37318));
+      return ('回炉任务', const Color(0xFFE37318));
     }
     // #15（2026-09-13）：rejected 卡此前与普通卡一样落到「未开始」调度徽标，
     // 用户无从辨认（「回炉后找不到卡」的观感帮凶之一）——给专属灰红徽标
@@ -613,6 +615,7 @@ class BankDetailPage extends StatefulWidget {
 }
 
 class _BankDetailPageState extends State<BankDetailPage> {
+  bool _creatingRework = false;
   BankCard? _item;
   CardNotes? _notes;
   bool _loading = true;
@@ -664,6 +667,19 @@ class _BankDetailPageState extends State<BankDetailPage> {
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
         ),
         actions: [
+          if (currentBackendMode == BackendMode.local)
+            IconButton(
+              tooltip: '回炉工作台',
+              icon: const Icon(Icons.build_circle_outlined),
+              onPressed: () async {
+                await Navigator.of(context, rootNavigator: true).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const ReworkWorkbenchPage(),
+                  ),
+                );
+                if (mounted) _load();
+              },
+            ),
           Padding(
             padding: const EdgeInsets.only(right: 16),
             child: Center(
@@ -740,7 +756,7 @@ class _BankDetailPageState extends State<BankDetailPage> {
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: const Text(
-                        '重造中',
+                        '回炉任务',
                         style: TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.w600,
@@ -845,9 +861,16 @@ class _BankDetailPageState extends State<BankDetailPage> {
             if (c.status == CardStatus.rework)
               _ActionButton(
                 icon: Icons.autorenew_rounded,
-                label: '重造中',
+                label: '查看回炉',
                 color: const Color(0xFFE37318),
-                onTap: () => _toast('已在回炉队列，无需重复提交'),
+                onTap: () async {
+                  await Navigator.of(context, rootNavigator: true).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const ReworkWorkbenchPage(),
+                    ),
+                  );
+                  if (mounted) await _load();
+                },
               )
             else if (c.status == CardStatus.rejected)
               _ActionButton(
@@ -1015,7 +1038,25 @@ class _BankDetailPageState extends State<BankDetailPage> {
 
   // ---- 回炉（与待审核池拒绝弹窗共用 ReasonActionDialog：六原因 + 自由输入 + 确认）----
   // #9：底部面板承载（isScrollControlled + viewInsets 键盘安全，见组件头注释）
-  void _openRework() {
+  Future<void> _openRework() async {
+    if (currentBackendMode == BackendMode.local) {
+      if (_creatingRework || _item == null) return;
+      _creatingRework = true;
+      try {
+        final task = await requestReworkTask(context, _item!.card);
+        if (task != null && mounted) {
+          await Navigator.of(context, rootNavigator: true).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ReworkWorkbenchPage(taskId: task),
+            ),
+          );
+          if (mounted) await _load();
+        }
+      } finally {
+        _creatingRework = false;
+      }
+      return;
+    }
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -1139,13 +1180,19 @@ class _BankDetailPageState extends State<BankDetailPage> {
                         if (!mounted) return;
                         // 先 toast 后 pop：TopToast 挂 rootOverlay，
                         // 详情页出栈后气泡仍完整展示
-                        TopToast.show(context, '已移除',
-                            type: TopToastType.success);
+                        TopToast.show(
+                          context,
+                          '已移除',
+                          type: TopToastType.success,
+                        );
                         Navigator.pop(context); // 回列表（版本已变 → 自动重查）
                       } on ApiException catch (e) {
                         if (mounted) {
-                          TopToast.show(context, '移除失败：${e.message}',
-                              type: TopToastType.error);
+                          TopToast.show(
+                            context,
+                            '移除失败：${e.message}',
+                            type: TopToastType.error,
+                          );
                         }
                       }
                     },

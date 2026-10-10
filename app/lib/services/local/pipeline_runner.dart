@@ -82,8 +82,7 @@ import 'package:shared/hengya_shared.dart';
 import 'package:sqlite3/sqlite3.dart'
     show Database, OpenMode, SqliteException, sqlite3;
 
-import 'card_dedup.dart'
-    show dupThresholdOf, runCardDupPass;
+import 'card_dedup.dart' show dupThresholdOf, runCardDupPass;
 import 'corpus/extract_all.dart'
     show apiEmbedBatch, atomicWriteText, mrlTruncateRenorm, nowIso;
 import 'corpus/exam_topics.dart' show kExamTopics;
@@ -105,6 +104,7 @@ import 'corpus/progress_db.dart'
 import 'corpus/run_engine.dart'
     show
         CardPort,
+        ReworkDraftPort,
         PromptFile,
         RunOptions,
         RunSearchFn,
@@ -119,6 +119,7 @@ import 'corpus/run_engine.dart'
         runWeekly,
         splitKeyword,
         splitPendingBySource;
+import 'corpus/rework_evidence.dart';
 import 'corpus/run_llm.dart'
     show
         LlmAccount,
@@ -251,10 +252,7 @@ class PipelineDeps {
 }
 
 /// #2 埋点：章节进度落盘摘要（info 级；各科目 learned_through 一行带出）。
-void _logProgressAdvance(
-  PipelineDeps deps,
-  Map<String, Object?> progressData,
-) {
+void _logProgressAdvance(PipelineDeps deps, Map<String, Object?> progressData) {
   final log = deps.onLog;
   if (log == null) return;
   final subs = progressData['subjects'];
@@ -277,8 +275,9 @@ void _logProgressAdvance(
 
 /// CardPort 的 db 直连实装（tool/run_probe.dart _DbPort 模式 + 与
 /// LocalBackend 路由同语义的 data_version/已读标记副作用）。
-class LocalDbPort implements CardPort {
-  LocalDbPort(this.db, {this.onLog});
+class LocalDbPort implements CardPort, ReworkDraftPort {
+  LocalDbPort(this.db, {this.onLog, this.corpusDb});
+  final Database? corpusDb;
 
   final Db db;
 
@@ -352,11 +351,14 @@ class LocalDbPort implements CardPort {
       await _busyRetry(() => db.bumpDataVersion());
     }
     if (inserted > 0 || skipped > 0) {
-      _log('info', 'pipeline',
-          '生卡入库：新增 $inserted 张，跳过 $skipped 张（id 幂等）');
+      _log('info', 'pipeline', '生卡入库：新增 $inserted 张，跳过 $skipped 张（id 幂等）');
     }
     if (errors.isNotEmpty) {
-      _log('error', 'pipeline', '生卡入库失败 ${errors.length} 张：${errors.take(3).join('；')}');
+      _log(
+        'error',
+        'pipeline',
+        '生卡入库失败 ${errors.length} 张：${errors.take(3).join('；')}',
+      );
     }
     return (
       ok: errors.isEmpty,
@@ -386,6 +388,28 @@ class LocalDbPort implements CardPort {
   }
 
   @override
+  Future<Map<String, Object?>?> claimRework(int id, int revision) =>
+      _busyRetry(() => db.claimReworkTask(id, revision));
+  @override
+  Future<List<Map<String, Object?>>> readEvidence(
+    String subject,
+    List<String> ids,
+  ) async => readReworkEvidence(corpusDb, subject, ids);
+  @override
+  Future<bool> storeEvidence(
+    int id,
+    int revision,
+    List<Map<String, Object?>> evidence,
+  ) => _busyRetry(() => db.saveReworkEvidence(id, revision, evidence));
+  @override
+  Future<bool> storeDraft(int id, int revision, Map<String, Object?> draft) =>
+      _busyRetry(() => db.saveReworkDraft(id, revision, draft));
+  @override
+  Future<void> failRework(int id, int revision, String error) async {
+    await _busyRetry(() => db.failReworkTask(id, revision, error));
+  }
+
+  @override
   Future<({bool ok, String? error})> reworkDone(
     int queueId, {
     required String front,
@@ -406,8 +430,11 @@ class LocalDbPort implements CardPort {
         await _busyRetry(() => db.markAiNoteSeen(cardId));
       }
       await _busyRetry(() => db.bumpDataVersion());
-      _log('info', 'rework',
-          '回炉重造完成（队列 #$queueId${cardId == null ? '' : '，卡 $cardId'}）→ 卡回待审核区');
+      _log(
+        'info',
+        'rework',
+        '回炉重造完成（队列 #$queueId${cardId == null ? '' : '，卡 $cardId'}）→ 卡回待审核区',
+      );
       return (ok: true, error: null);
     } catch (e) {
       _log('error', 'rework', '回炉完成落库失败（队列 #$queueId）：$e');
@@ -1181,7 +1208,14 @@ Future<Map<String, Object?>> runCatchup({
       },
       'compassAdvances': compassAdvances,
       'reworkDone': reworkResults.where((r) => r['done'] == true).length,
-      'reworkDraft': reworkResults.where((r) => r['draft'] == true).length,
+      'reworkDraft': reworkResults
+          .where(
+            (r) =>
+                r['draft'] == true &&
+                r['needsInput'] != true &&
+                r['stale'] != true,
+          )
+          .length,
       'leech': leechCount,
       'pendingPool': pendingPool,
     },
@@ -1253,7 +1287,10 @@ Future<Map<String, Object?>> runWeeklyScan({
     port: deps.port,
     notes: notes,
     onLog: onLog,
-    skillTopics: [for (final t in kExamTopics) if (t.isSkill) t],
+    skillTopics: [
+      for (final t in kExamTopics)
+        if (t.isSkill) t,
+    ],
   );
 }
 
@@ -1356,7 +1393,7 @@ Future<Map<String, Object?>> runWeeklyAfterCatchup({
       'info',
       'weekly',
       '真题周扫完成：候选 ${counts['afterBalance']}、出卡 ${counts['cards']}、'
-      '导入 ${counts['imported']}',
+          '导入 ${counts['imported']}',
     );
   }
   final out = <String, Object?>{
@@ -1408,7 +1445,7 @@ SiliconFlowConfig? assembleEmbedConfig(Db db, {String? apiKey}) {
   if (key.isEmpty || model.isEmpty) {
     return null;
   }
-final baseUrl = db.settingGet('embedding.baseUrl') ?? '';
+  final baseUrl = db.settingGet('embedding.baseUrl') ?? '';
   final instructOff = (db.settingGet('embedding.instructQuery') ?? '') == '0';
   final rerankBase = db.settingGet('reranker.baseUrl') ?? '';
   final rerankModel = db.settingGet('reranker.model') ?? '';
@@ -1553,6 +1590,8 @@ class PipelineCatchupRequest {
     required this.promptNotes,
     this.trigger = kPipelineTriggerManual,
     this.weeklyOnly = false,
+    this.reworkTaskId,
+    this.reworkRevision,
   });
 
   /// 数据根目录（hengya.db 与 corpus/ 挂其下——与 LocalBackend.init 同源）。
@@ -1579,6 +1618,8 @@ class PipelineCatchupRequest {
   /// [runCatchup]，装配同一套 deps 后直接跑 [runWeeklyAfterCatchup]
   /// （force=true：绕节流、不写时间戳）。结果仍落在顶层 'weekly' 键。
   final bool weeklyOnly;
+  final int? reworkTaskId;
+  final int? reworkRevision;
 }
 
 /// 拆卡流水线 worker 入口（Isolate.spawn 顶层函数；[PipelineRunner._runOnce]
@@ -1592,7 +1633,7 @@ class PipelineCatchupRequest {
 void pipelineCatchupWorkerEntry(IsolateWorkerBoot boot) {
   isolateWorkerRun(boot, (ctx) async {
     final req = boot.args! as PipelineCatchupRequest;
-    if (req.weeklyOnly) {
+    if (req.weeklyOnly || req.reworkTaskId != null) {
       // 手动周扫（weekly-only）：进度全程由 runWeeklyAfterCatchup 的
       // onWeeklyProgress 以 stage='weekly' 上报（start/done），无需
       // catchup 帧包装；结果（顶层 'weekly' 键）原样回传主 isolate 存档。
@@ -1658,7 +1699,7 @@ Future<Map<String, Object?>> _runCatchupInWorker(
         embed: embed,
         embedModel: embedModel,
       );
-final llmCfg = LlmConfig(
+      final llmCfg = LlmConfig(
         baseUrl: db.settingGet('llm.baseUrl') ?? '',
         apiKey: req.aiKeys['llm'] ?? '',
         model: db.settingGet('llm.model') ?? '',
@@ -1678,7 +1719,7 @@ final llmCfg = LlmConfig(
         );
       }
       account.notes.addAll(req.promptNotes);
-// failover 装配：备用已配置 → 主备自动切换；否则纯主通道（行为零变化）。
+      // failover 装配：备用已配置 → 主备自动切换；否则纯主通道（行为零变化）。
       // failover 事件记入 account.notes（流水线结果/设置页可见，Q4-A），
       // 同时经 ctx.log 回流主 isolate 写 AppLog（含服务名、不含 key）。
       final failoverEvents = <String>[];
@@ -1730,9 +1771,9 @@ final llmCfg = LlmConfig(
       final catchupDeps = PipelineDeps(
         db: db,
         runSearch: runSearch,
-llmChat: llmChat,
+        llmChat: llmChat,
         // #2 埋点：入库/回炉完成的日志回调 → ctx.log 回流主 isolate 落盘
-        port: LocalDbPort(db, onLog: ctx.log),
+        port: LocalDbPort(db, onLog: ctx.log, corpusDb: cdb),
         onLog: ctx.log,
         prompts: req.prompts,
         progressData: loadProgress(progressPath),
@@ -1754,6 +1795,23 @@ llmChat: llmChat,
           ),
         ),
       );
+      if (req.reworkTaskId != null) {
+        final queue = db
+            .queuedReworkTasks(onlyId: req.reworkTaskId)
+            .where((t) => t['taskRevision'] == req.reworkRevision)
+            .toList();
+        final results = await processRework(
+          runSearch: runSearch,
+          llmChat: llmChat,
+          prompts: req.prompts,
+          queue: [for (final q in queue) Map<String, Object?>.from(q)],
+          aiNotes: [],
+          subjectNames: {for (final s in db.subjects()) s.id: s.name},
+          opts: const RunOptions(),
+          port: catchupDeps.port,
+        );
+        return {'rework': results};
+      }
       // weekly-only（手动周扫）：跳过六步总编排，只跑周扫——deps 装配链
       // 与 catchup 完全同源；force=true 绕节流、不写时间戳（两路独立）。
       // 自动路径：catchup 成功收尾后 ≥7 天自动真题周扫（节点⑤ B1 拍板），
@@ -1804,10 +1862,9 @@ llmChat: llmChat,
               model: dupCfg.embedModel,
               url: dupCfg.embedBaseUrl,
             );
-            return [
-              for (final v in raw) mrlTruncateRenorm(v, kEmbedDim),
-            ];
+            return [for (final v in raw) mrlTruncateRenorm(v, kEmbedDim)];
           }
+
           final dupRes = await runCardDupPass(
             db: db,
             model: dupCfg.embedModel,
@@ -1960,13 +2017,44 @@ class PipelineRunner {
         _running = false;
       }
       if (!ok) {
-        AppLog.instance.log(
-          AppLogLevel.error,
-          'weekly',
-          '手动真题周扫失败：$runErr',
-        );
+        AppLog.instance.log(AppLogLevel.error, 'weekly', '手动真题周扫失败：$runErr');
       }
     } finally {
+      _spinning = false;
+    }
+  }
+
+  /// 单任务复用现有后台连接、LLM 主备、提示词和并发保护，不触发关键词出卡或周扫。
+  Future<void> generateRework(int taskId, int revision) async {
+    if (_spinning || DataMaintenance.busy) throw StateError('已有后台任务或数据维护正在进行');
+    final dir = LocalBackend.instance.dataDir;
+    if (dir == null) throw StateError('数据目录未初始化');
+    _spinning = true;
+    _running = true;
+    try {
+      await _spawnWorker(
+        dir,
+        weeklyOnly: false,
+        trigger: 'rework-manual',
+        reworkTaskId: taskId,
+        reworkRevision: revision,
+      );
+    } catch (e) {
+      AppLog.instance.log(AppLogLevel.error, 'rework', '单任务回炉失败：$e');
+      try {
+        final db = await LocalBackend.instance.sharedDb;
+        final task = db.getReworkTask(taskId);
+        if (task != null) {
+          db.failReworkTask(
+            taskId,
+            revision,
+            '后台生成未完成，请检查后重试',
+            includeQueued: true,
+          );
+        }
+      } catch (_) {}
+    } finally {
+      _running = false;
       _spinning = false;
     }
   }
@@ -2021,9 +2109,9 @@ class PipelineRunner {
       AppLogLevel.info,
       'pipeline',
       '拆卡流水线完成（trigger=$trigger）：收件箱 ${counts?['inbox'] ?? 0}、'
-      '关键词 ${counts?['keywordsProcessed'] ?? 0}、'
-      '出卡 ${cardsMap?['total'] ?? 0}、'
-      '导入 ${importMap?['inserted'] ?? 0}',
+          '关键词 ${counts?['keywordsProcessed'] ?? 0}、'
+          '出卡 ${cardsMap?['total'] ?? 0}、'
+          '导入 ${importMap?['inserted'] ?? 0}',
     );
   }
 
@@ -2061,6 +2149,8 @@ class PipelineRunner {
     String dataDir, {
     required bool weeklyOnly,
     required String trigger,
+    int? reworkTaskId,
+    int? reworkRevision,
   }) async {
     try {
       await LocalBackend.instance.initAiKeys();
@@ -2080,6 +2170,8 @@ class PipelineRunner {
         promptNotes: promptNotes,
         trigger: trigger,
         weeklyOnly: weeklyOnly,
+        reworkTaskId: reworkTaskId,
+        reworkRevision: reworkRevision,
       ),
     );
     final sub = handle.progress.listen((e) {
@@ -2139,10 +2231,7 @@ class PipelineRunner {
       if (prevFile.existsSync()) {
         final prev = jsonDecode(prevFile.readAsStringSync());
         if (prev is Map) {
-          merged = {
-            ...Map<String, Object?>.from(prev),
-            'weekly': weekly,
-          };
+          merged = {...Map<String, Object?>.from(prev), 'weekly': weekly};
         }
       }
     } catch (_) {

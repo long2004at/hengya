@@ -31,7 +31,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows) {
     sqlite_open.open.overrideForAll(
-        () => ffi.DynamicLibrary.open(File('test/sqlite3.dll').absolute.path));
+      () => ffi.DynamicLibrary.open(File('test/sqlite3.dll').absolute.path),
+    );
   }
 
   late Directory tmp;
@@ -81,13 +82,15 @@ void main() {
     return tester.widget<SwitchListTile>(tile.first);
   }
 
-  testWidgets('数据管理区「导入语料包」入口渲染 + 点击不炸（通道真机验证项）',
-      (tester) async {
+  testWidgets('数据管理区「导入语料包」入口渲染 + 点击不炸（通道真机验证项）', (tester) async {
     await boot();
     await openAbout(tester);
 
-    expect(find.text('导入语料包（成品语料库）'), findsOneWidget);
     expect(find.text('导入数据库（迁移）'), findsOneWidget); // 既有入口不挤掉
+    await tester.ensureVisible(find.text('语料库与资料导入'));
+    await tester.tap(find.text('语料库与资料导入'));
+    await tester.pumpAndSettle();
+    expect(find.text('导入语料包（成品语料库）'), findsOneWidget);
 
     // 点击：file_selector 通道在测试宿主不可用 → 取消/失败路径不炸
     //（通道行为是返回 null（静默取消）或抛 MissingPluginException（失败
@@ -99,8 +102,7 @@ void main() {
     expect(find.text('导入语料包（成品语料库）'), findsOneWidget); // 页面健在
   });
 
-  testWidgets('instruct 开关：默认开=保持旧行为；点按落库回读 + 装配接线',
-      (tester) async {
+  testWidgets('instruct 开关：默认开=保持旧行为；点按落库回读 + 装配接线', (tester) async {
     await boot();
     await openAbout(tester);
 
@@ -128,9 +130,6 @@ void main() {
     //（安全修复 C：key 不再读 settings 表——显式传 apiKey 模拟 vault 缓存）
     db.settingSet('embedding.model', 'M');
     db.settingSet('embedding.instructQuery', '0');
-    expect(
-      assembleEmbedConfig(db, apiKey: 'sk-ui-test')!.queryInstruct,
-      '',
-    );
+    expect(assembleEmbedConfig(db, apiKey: 'sk-ui-test')!.queryInstruct, '');
   });
 }

@@ -1,3 +1,4 @@
+import 'helpers/rework_fixture.dart';
 // local 模式用户旅程 E2E（2026-09-06）：一镜到底走完产品主流程——
 // 冷启动自检 → 导入生产快照（迁移主通道）→ 复习会话评分（FSRS 推进/日志/版本 bump）
 // → 新建课程 → 拆卡审批全生命周期（批准→评分→拒绝→回炉→重造→再批→again 循环）
@@ -32,7 +33,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows) {
     sqlite_open.open.overrideForAll(
-        () => DynamicLibrary.open(File('test/sqlite3.dll').absolute.path));
+      () => DynamicLibrary.open(File('test/sqlite3.dll').absolute.path),
+    );
   }
 
   late Directory tmp;
@@ -58,8 +60,7 @@ void main() {
     } catch (_) {}
   });
 
-  test('用户旅程全流程：迁移→复习→审批生命周期→收件箱→题库→统计→导出往返→备份',
-      () async {
+  test('用户旅程全流程：迁移→复习→审批生命周期→收件箱→题库→统计→导出往返→备份', () async {
     // ── ① 冷启动自检：新库零科目（0.3.1 开源去内置），data_version 初始 '0' ──
     final health = await be.get('/health');
     expect((health as Map)['status'], 'ok');
@@ -84,9 +85,9 @@ void main() {
     );
     expect((imported as Map)['cards'], 21);
     final subs1 = await be.get('/subjects');
-    final ids1 = (subs1['subjects'] as List)
-        .cast<Map<String, dynamic>>()
-        .map((s) => s['id']);
+    final ids1 = (subs1['subjects'] as List).cast<Map<String, dynamic>>().map(
+      (s) => s['id'],
+    );
     expect(ids1.length, 8);
     expect(ids1, contains('demo1234')); // 用户自建风格科目随迁（合成）
     final bank0 = await be.get('/cards/search?limit=200');
@@ -111,14 +112,17 @@ void main() {
     expect(r0['ok'], true);
     expect((r0['intervalDays'] as num), greaterThan(0));
     final q1 = await be.get('/cards/queue?subject=oms');
-    final idsQ1 =
-        (q1['cards'] as List).cast<Map<String, dynamic>>().map((c) => c['id']);
+    final idsQ1 = (q1['cards'] as List).cast<Map<String, dynamic>>().map(
+      (c) => c['id'],
+    );
     expect(idsQ1, isNot(contains(rated))); // 评分后 due 推远，队列让位
     final summary0 = await be.get('/stats/summary');
     expect((summary0 as Map)['totalReviews'], 13); // 12 历史日志 + 本次
     final meta2 = await be.get('/meta/version');
-    expect(int.parse((meta2 as Map)['data_version'] as String),
-        greaterThan(78)); // 写操作 bump
+    expect(
+      int.parse((meta2 as Map)['data_version'] as String),
+      greaterThan(78),
+    ); // 写操作 bump
 
     // ── ④ 新建课程（用户旅程：自建科目）──
     final created = await be.post('/subjects', {'name': '全流程测试课'});
@@ -128,14 +132,24 @@ void main() {
     // ── ⑤ 拆卡审批全生命周期 ──
     final seeded = await be.importCards([
       {
-        'id': 'journey-new-001', 'subjectId': 'oms', 'type': 'basic',
-        'front': '旅程新卡题干', 'back': '旅程新卡答案',
-        'anchor': 'e2e', 'source': '旅程测试', 'status': 'pending',
+        'id': 'journey-new-001',
+        'subjectId': 'oms',
+        'type': 'basic',
+        'front': '旅程新卡题干',
+        'back': '旅程新卡答案',
+        'anchor': 'e2e',
+        'source': '旅程测试',
+        'status': 'pending',
       },
       {
-        'id': 'journey-rework-001', 'subjectId': 'oms', 'type': 'basic',
-        'front': '将被拒绝的原题干', 'back': '原答案',
-        'anchor': 'e2e', 'source': '旅程测试', 'status': 'pending',
+        'id': 'journey-rework-001',
+        'subjectId': 'oms',
+        'type': 'basic',
+        'front': '将被拒绝的原题干',
+        'back': '原答案',
+        'anchor': 'e2e',
+        'source': '旅程测试',
+        'status': 'pending',
       },
     ]);
     expect((seeded as Map)['inserted'], 2);
@@ -145,8 +159,7 @@ void main() {
     await be.post('/cards/journey-new-001/approve', null);
     await expectLater(
       be.post('/cards/journey-new-001/approve', null),
-      throwsA(isA<ApiException>()
-          .having((e) => e.statusCode, 'status', 400)),
+      throwsA(isA<ApiException>().having((e) => e.statusCode, 'status', 400)),
     );
     final ans1 = await be.post('/review/answer', {
       'cardId': 'journey-new-001',
@@ -155,8 +168,10 @@ void main() {
     });
     expect((ans1 as Map)['applied'], 1);
     // 拒绝 rework-001 带理由 → 回炉队列（拒绝只移除该卡）
-    await be.post('/cards/journey-rework-001/reject',
-        {'reason': '答案不完整', 'note': '旅程批注'});
+    await be.post('/cards/journey-rework-001/reject', {
+      'reason': '答案不完整',
+      'note': '旅程批注',
+    });
     final pend2 = await be.get('/cards/pending');
     expect((pend2['list'] as List), isEmpty);
     final rq1 = await be.get('/cards/rework/pending');
@@ -164,19 +179,13 @@ void main() {
         .cast<Map<String, dynamic>>()
         .firstWhere((i) => i['cardId'] == 'journey-rework-001');
     expect(rqItem['reason'], contains('答案不完整'));
-    // 重造完成 → 回待审池（新内容生效）
-    final done = await be.post('/cards/rework/${rqItem['id']}/done',
-        {'front': '重写后的题干', 'back': '重写后的答案'});
-    expect((done as Map)['ok'], true);
-    final pend3 = await be.get('/cards/pending');
-    final backCard = (pend3['list'] as List).cast<Map<String, dynamic>>().single;
+    // 草案通过人工确认后生效，已经完成审核，无须再次 approve。
+    final applied = await applyTestRewrite(be, rqItem['id'] as int);
+    expect(applied['ok'], true);
+    final backCard = applied['card'] as Map;
     expect(backCard['id'], 'journey-rework-001');
     expect(backCard['front'], '重写后的题干');
-    // 再批 → 评分 again → 重学步：due 推到 ~10 分钟后的近未来（今日内重见）。
-    // 注意：again 后 due 在未来而非当下——queue（due<=now）不含它，
-    // 卡详情 dueAt 与今日 forecast 才是正确观察点（对照 FSRS 学习步语义；
-    // 2026-09-06 实测：queue 此刻只含未评分的其他生产到期卡）。
-    await be.post('/cards/journey-rework-001/approve', null);
+    expect(backCard['status'], 'active');
     final ans2 = await be.post('/review/answer', {
       'cardId': 'journey-rework-001',
       'rating': 'again',
@@ -197,7 +206,9 @@ void main() {
     final ip = await be.get('/inbox/pending');
     final kw = (ip['list'] as List).cast<Map<String, dynamic>>().single;
     expect(kw['keyword'], '旅程关键词');
-    final consumed = await be.post('/inbox/consume', {'ids': [kw['id']]});
+    final consumed = await be.post('/inbox/consume', {
+      'ids': [kw['id']],
+    });
     expect((consumed as Map)['consumed'], 1);
 
     // ── ⑦ 题库搜索 + 单卡详情 + 备注 ──
@@ -225,6 +236,10 @@ void main() {
     expect(((retention as Map)['windows'] as List), isNotEmpty);
 
     // ── ⑨ 罗盘与语料边界：corpus 未导入 → 优雅空态不炸（Phase 3/4 前的预期态）──
+    // 上文的回炉取证（applyTestRewrite）会创建 corpus/corpus.db；本段验证
+    // 「无语料」空态，故先清掉该 fixture 语料（模拟用户从未建库）。
+    final fixtureCorpus = File('${tmp.path}/corpus/corpus.db');
+    if (fixtureCorpus.existsSync()) fixtureCorpus.deleteSync();
     final progress = await be.get('/progress');
     expect((progress as Map)['subjects'], isEmpty);
     expect(progress['updated_at'], isNull);
@@ -233,13 +248,13 @@ void main() {
     expect(cs0['pendingFiles'], 0);
     // 课件上传 → incoming 落盘 + pending 计数（PK 魔数校验通过）
     final up = await be.upload(
-        '/corpus/upload?subject=oms&filename=%E6%97%85%E7%A8%8B.pptx',
-        [0x50, 0x4B, 0x03, 0x04]);
+      '/corpus/upload?subject=oms&filename=%E6%97%85%E7%A8%8B.pptx',
+      [0x50, 0x4B, 0x03, 0x04],
+    );
     expect((up as Map)['received'], 4);
     final cs1 = await be.get('/corpus/status');
     expect((cs1 as Map)['pendingFiles'], 1);
-    expect(File('${tmp.path}/corpus/incoming/oms/旅程.pptx').existsSync(),
-        true);
+    expect(File('${tmp.path}/corpus/incoming/oms/旅程.pptx').existsSync(), true);
     // 流水线标志（Phase 4 消费）：首次 true，重复幂等 false
     final trig = await be.post('/pipeline/trigger', null);
     expect((trig as Map)['triggered'], true);
@@ -282,9 +297,9 @@ void main() {
     await be.resetForTest();
     be.init(tmp2.path);
     final subs2 = await be.get('/subjects');
-    final ids2 = (subs2['subjects'] as List)
-        .cast<Map<String, dynamic>>()
-        .map((s) => s['id']);
+    final ids2 = (subs2['subjects'] as List).cast<Map<String, dynamic>>().map(
+      (s) => s['id'],
+    );
     expect(ids2.length, 9);
     expect(ids2, contains('demo1234'));
     final bank2 = await be.get('/cards/search?limit=200');

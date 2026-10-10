@@ -26,6 +26,7 @@ import 'services/local/app_log.dart';
 import 'services/local/data_manager.dart';
 import 'services/local/full_backup.dart';
 import 'services/local/local_backend.dart';
+import 'services/local/db.dart';
 import 'services/local/pipeline_runner.dart';
 import 'services/notification/daily_reminder.dart';
 
@@ -72,12 +73,19 @@ Future<void> _mainImpl() async {
     // 上次恢复若被系统中断，必须在任何数据库连接打开前先恢复一致状态。
     FullBackupManager.instance.recoverInterruptedRestore(support.path);
     LocalBackend.instance.init(support.path);
+    // 上次已确认的语料删除：先幂等收尾，再允许建库；失败不影响已有卡片复习。
+    try {
+      await LocalBackend.instance.recoverCorpusLibrary();
+    } catch (e) {
+      AppLog.instance.log(AppLogLevel.warn, 'corpus-library', '语料清理待重试：$e');
+    }
     // 安全修复 C：AI 服务 key 从 settings 表明文迁入系统安全存储
     //（AiKeyVault，Android Keystore 加密）。启动即执行一次性迁移（幂等，
     // 防旧库升级后 key 丢失）并预热内存缓存——vault 读写是异步平台通道，
     // 路由/流水线运行期经 LocalBackend.aiKeyOf 同步取用；先于流水线接线
     //（worker 依赖缓存预热后随请求下发 key）。
     await LocalBackend.instance.initAiKeys();
+    (await LocalBackend.instance.sharedDb).recoverInterruptedReworks();
     // Phase 2：48h 冷启动自动备份（滚动 7 份；同步毫秒级，不阻塞启动）
     DataManager.instance.autoBackupIfNeeded(support.path);
     // Phase 4：流水线后台执行接线（路由 kick + 启动消费遗留 .force_run）

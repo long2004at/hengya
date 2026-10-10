@@ -181,8 +181,7 @@ void main() {
   test('设置开关：shared_preferences 读写（键 hengya.review.fog，默认关）', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getBool('hengya.review.fog') ?? false, false,
-        reason: '默认关');
+    expect(prefs.getBool('hengya.review.fog') ?? false, false, reason: '默认关');
     await prefs.setBool('hengya.review.fog', true);
     final prefs2 = await SharedPreferences.getInstance();
     expect(prefs2.getBool('hengya.review.fog'), true);
@@ -191,8 +190,7 @@ void main() {
   testWidgets('v3 性能策略：静态态保留 BackdropFilter 真模糊，翻页动画态移除', (tester) async {
     final c = await pumpFog(tester);
     // 静态（idle/erasing）：BackdropFilter 在位（真模糊遮盖）
-    expect(find.byType(BackdropFilter), findsOneWidget,
-        reason: '静态态必须保留真模糊层');
+    expect(find.byType(BackdropFilter), findsOneWidget, reason: '静态态必须保留真模糊层');
 
     // 拖纸角进入 peeling → 切换为不透明渐变遮罩，BackdropFilter 移除
     final corner = tester.getBottomRight(find.byType(FogPeel));
@@ -201,14 +199,110 @@ void main() {
     await gesture.moveBy(const Offset(-60, -60));
     await tester.pump();
     expect(c.isPeeling, true);
-    expect(find.byType(BackdropFilter), findsNothing,
-        reason: '翻页动画态不应有 BackdropFilter（每帧重算开销）');
+    expect(
+      find.byType(BackdropFilter),
+      findsNothing,
+      reason: '翻页动画态不应有 BackdropFilter（每帧重算开销）',
+    );
 
     // 弹回结束回到静态 → BackdropFilter 恢复
     await gesture.up();
     await tester.pumpAndSettle();
     expect(c.phase, FogPhase.idle);
     expect(find.byType(BackdropFilter), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  testWidgets('擦除同时裁掉模糊层，重叠笔画不会重新盖住答案', (tester) async {
+    final c = await pumpFog(tester);
+    c.beginErase(const Offset(50, 50));
+    c.erase(const Offset(150, 50));
+    c.endErase();
+    c.beginErase(const Offset(150, 50));
+    c.erase(const Offset(50, 50));
+    c.endErase();
+    await tester.pump();
+    expect(c.isErased(const Offset(100, 50)), true);
+    final clips = tester.widgetList<ClipPath>(find.byType(ClipPath));
+    final mask = clips.first.clipper!.getClip(const Size(400, 600));
+    expect(mask.contains(const Offset(100, 50)), false, reason: '笔画中心不应再有模糊层');
+    expect(mask.contains(const Offset(100, 180)), true);
+  });
+  testWidgets('动画中 reset 后旧回调不能揭开下一张', (tester) async {
+    final c = await pumpFog(tester);
+    await tester.tapAt(
+      tester.getBottomRight(find.byType(FogPeel)) - const Offset(25, 25),
+    );
+    await tester.pump(const Duration(milliseconds: 80));
+    c.reset();
+    await tester.pumpAndSettle();
+    expect(c.phase, FogPhase.idle);
+    expect(c.strokes, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets('取消掀角弹回 idle，连续点按无重复动画监听', (tester) async {
+    final c = await pumpFog(tester);
+    final corner =
+        tester.getBottomRight(find.byType(FogPeel)) - const Offset(25, 25);
+    final g = await tester.startGesture(corner);
+    await g.moveBy(const Offset(-60, -60));
+    await tester.pump();
+    await g.cancel();
+    await tester.pumpAndSettle();
+    expect(c.phase, FogPhase.idle);
+    await tester.tapAt(corner);
+    await tester.tapAt(corner);
+    await tester.pumpAndSettle();
+    expect(c.isCleared, true);
+    c.reset();
+    await tester.pumpAndSettle();
+    expect(c.phase, FogPhase.idle);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets('hugText 可用高度小于120仍合法', (tester) async {
+    final c = await pumpFog(
+      tester,
+      size: const Size(300, 80),
+      sheetMode: FogSheetMode.hugText,
+    );
+    expect(c.sheetHeight, 80);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets('系统减少动效时立即揭开', (tester) async {
+    final c = FogRevealController();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MediaQuery(
+          data: const MediaQueryData(disableAnimations: true),
+          child: Scaffold(
+            body: SizedBox(
+              width: 300,
+              height: 400,
+              child: FogPeel(controller: c, child: const Text('ANSWER')),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byType(FogPeel));
+    await tester.pump();
+    expect(c.isCleared, true);
+    expect(tester.binding.transientCallbackCount, 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+    c.dispose();
+  });
+  testWidgets('贴文字模式按实际纸片位置识别纸角，而不是外层满高区域', (tester) async {
+    final c = await pumpFog(tester, sheetMode: FogSheetMode.hugText);
+    final sheet = find.byKey(const ValueKey('fog-sheet'));
+    expect(tester.getSize(sheet).height, 120);
+    final start = tester.getBottomRight(sheet) - const Offset(20, 20);
+    final g = await tester.startGesture(start);
+    await g.moveBy(const Offset(-80, -40));
+    await tester.pump();
+    expect(c.phase, FogPhase.peeling);
+    await g.moveBy(const Offset(-100, -50));
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(c.isCleared, true);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

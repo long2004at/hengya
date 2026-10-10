@@ -44,9 +44,7 @@ Future<SubjectInfo?> showCreateSubjectDialog(BuildContext context) {
               // 4xx 的 message 均为可直接展示的裸中文（API 错误契约）：
               // 409 重名/短码重复、400 短码非法/系统保留（#7，2026-09-13 起
               // 本地后端会拒绝保留短码）——一律透传，不再吞成「创建失败（400）」
-              error = e.statusCode == 0
-                  ? '连不上服务器，请检查网络'
-                  : e.message;
+              error = e.statusCode == 0 ? '连不上服务器，请检查网络' : e.message;
             });
           }
         }
@@ -155,12 +153,16 @@ Future<UploadTarget?> showUploadTargetPickerSheet(
   BuildContext context, {
   String? title,
   bool pickUploadType = false,
+  String? initialSubjectId,
 }) {
   return showModalBottomSheet<UploadTarget>(
     context: context,
     isScrollControlled: true,
-    builder: (_) =>
-        _SubjectPickerSheet(title: title, pickUploadType: pickUploadType),
+    builder: (_) => _SubjectPickerSheet(
+      title: title,
+      pickUploadType: pickUploadType,
+      initialSubjectId: initialSubjectId,
+    ),
   );
 }
 
@@ -168,7 +170,13 @@ Future<UploadTarget?> showUploadTargetPickerSheet(
 const String kUploadTypeHint = '教材：学习罗盘章节目录；课件：拆卡检索；真题：真题池；大纲：考试大纲入库打标';
 
 class _SubjectPickerSheet extends StatefulWidget {
-  const _SubjectPickerSheet({this.title, this.pickUploadType = false});
+  const _SubjectPickerSheet({
+    this.title,
+    this.pickUploadType = false,
+    this.initialSubjectId,
+  });
+
+  final String? initialSubjectId;
 
   final String? title;
 
@@ -216,6 +224,14 @@ class _SubjectPickerSheetState extends State<_SubjectPickerSheet> {
   @override
   void initState() {
     super.initState();
+    if (widget.pickUploadType) {
+      if (widget.initialSubjectId == '@outline') {
+        _sourceType = 'outline';
+      } else if (widget.initialSubjectId != null &&
+          examTopicByCode(widget.initialSubjectId!) != null) {
+        _sourceType = 'exam';
+      }
+    }
     _load();
   }
 
@@ -230,7 +246,12 @@ class _SubjectPickerSheetState extends State<_SubjectPickerSheet> {
       );
       if (!mounted) return;
       setState(() {
-        _subjects = subs;
+        _subjects = [
+          for (final s in subs)
+            if (s.id == widget.initialSubjectId) s,
+          for (final s in subs)
+            if (s.id != widget.initialSubjectId) s,
+        ];
         _loading = false;
         _refreshing = false;
         _failed = false;
@@ -435,6 +456,10 @@ class _SubjectPickerSheetState extends State<_SubjectPickerSheet> {
                       children: [
                         for (final s in _subjects)
                           ListTile(
+                            selected: s.id == widget.initialSubjectId,
+                            subtitle: s.id == widget.initialSubjectId
+                                ? const Text('当前科目')
+                                : null,
                             dense: true,
                             contentPadding: EdgeInsets.zero,
                             title: Text(

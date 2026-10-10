@@ -10,6 +10,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:shared/hengya_shared.dart';
@@ -22,6 +23,8 @@ import '../services/api/local_cache.dart';
 import '../services/review/session_store.dart';
 import '../widgets/offline_data_bar.dart';
 import '../widgets/reason_action_dialog.dart';
+import 'rework_request_sheet.dart';
+import 'rework_workbench_page.dart';
 import '../widgets/top_toast.dart';
 
 // ─── 纸质美学色板 ───
@@ -43,10 +46,7 @@ class ReviewPage extends StatelessWidget {
     return Scaffold(
       backgroundColor: _kPageBg,
       appBar: AppBar(
-        title: const Text(
-          '复习',
-          style: TextStyle(fontWeight: FontWeight.w600),
-        ),
+        title: const Text('复习', style: TextStyle(fontWeight: FontWeight.w600)),
         backgroundColor: _kPageBg,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
@@ -214,9 +214,7 @@ class _OfflineHint extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              currentBackendMode == BackendMode.local
-                  ? '本地数据加载失败'
-                  : '连不上服务器',
+              currentBackendMode == BackendMode.local ? '本地数据加载失败' : '连不上服务器',
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 4),
@@ -250,6 +248,17 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
     with SingleTickerProviderStateMixin {
   List<FlashCard> _cards = [];
   int _index = 0;
+  final List<FlashCard> _deferred = [];
+  int _reviewedCount = 0;
+  int _removedCount = 0;
+  int _round = 0;
+  double _skipDrag = 0;
+  double _skipStart = 0;
+  bool _skipTransition = false;
+  bool _draggingCard = false;
+  double _exitStart = 0;
+  double _exitSign = 1;
+  bool _lastFogClear = false;
   bool _loading = true;
   String? _error;
   DateTime? _cacheAt;
@@ -293,7 +302,11 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
   }
 
   void _onFogChanged() {
-    if (mounted) setState(() {});
+    // 笔画每帧只重绘 FogPeel；整页仅在揭开状态切换时更新按钮。
+    if (mounted && _lastFogClear != _fog.isCleared) {
+      _lastFogClear = _fog.isCleared;
+      setState(() {});
+    }
   }
 
   @override
@@ -314,6 +327,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
         widget.subjectId,
         limit: 50,
       );
+      if (!mounted) return;
       setState(() {
         _cards = cards;
         _cacheAt = ApiClient.instance.cacheServedAt(
@@ -323,6 +337,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
         _loading = false;
       });
     } on ApiException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.message;
         _loading = false;
@@ -333,125 +348,225 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
   // ─── 评分映射 ───
   ReviewRating _levelToRating(int level) => ReviewRating.values[level];
 
+  /// 三种动作互斥：评分才写 ReviewLog；跳过只调整当前会话；回炉走独立路由。
+  Future<bool> _animateNext({bool skip = false}) async {
+    if (!mounted) return false;
+    setState(() {
+      _animatingOut = true;
+      _skipTransition = skip;
+      _exitStart = _skipDrag * .5;
+      _exitSign = _skipDrag < 0 ? -1 : 1;
+      _draggingCard = false;
+      _skipDrag = 0;
+    });
+    _cardAnim.duration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 240);
+    try {
+      await _cardAnim.forward(from: 0).orCancel;
+    } on TickerCanceled {
+      // 动画被取消（换卡/卸载）也要复位互斥标志，避免所有入口永久失效。
+      if (mounted) setState(() => _rating = false);
+      return false;
+    }
+    if (!mounted) return false;
+    return true;
+  }
+
+  void _nextCard() {
+    _index++;
+    _fog.reset();
+    _revealedAt = DateTime.now();
+    _animatingOut = false;
+    _draggingCard = false;
+    _exitStart = 0;
+    _skipDrag = 0;
+    _rating = false;
+  }
+
   Future<void> _rate(ReviewRating rating) async {
     if (_rating || _index >= _cards.length) return;
-    _rating = true;
-    _fog.markCleared(); // #12：评分=清雾+评分一步完成
-
-    // 换卡飞出动画
-    setState(() => _animatingOut = true);
-    await _cardAnim.forward(from: 0);
-    if (!mounted) return;
-
     final card = _cards[_index];
-    final latency = DateTime.now().difference(_revealedAt).inMilliseconds;
+    final now = DateTime.now();
+    setState(() => _rating = true);
+    _fog.markCleared();
     final log = ReviewLog(
       cardId: card.id,
       subjectId: card.subjectId,
       rating: rating,
-      reviewedAt: DateTime.now(),
-      latencyMs: latency,
+      reviewedAt: now,
+      latencyMs: now.difference(_revealedAt).inMilliseconds,
     );
     try {
-      await ApiClient.instance.submitAnswer(log);
-    } on ApiException {
+      final accepted = await ApiClient.instance.submitAnswer(log);
+      if (!accepted) throw StateError('评分未受理');
+    } catch (e) {
       if (mounted) {
+        setState(() => _rating = false);
+        final reason = e is StateError ? '（${e.message}）' : '';
         TopToast.show(
           context,
-          '评分未受理（${card.front.characters.take(12)}…）',
+          '评分未受理，已保留当前卡片$reason',
           type: TopToastType.error,
         );
       }
+      return;
     }
-    if (mounted) {
-      setState(() {
-        _index++;
-        _fog.reset();
-        _revealedAt = DateTime.now();
-        _animatingOut = false;
-      });
-    }
-    _rating = false;
+    if (!await _animateNext()) return;
+    setState(() {
+      _reviewedCount++;
+      _nextCard();
+    });
     unawaited(ApiClient.instance.flushPendingAnswers());
   }
 
-  // 回炉（与待审核池拒绝/题库详情回炉共用 ReasonActionDialog）
-  void _rework() {
+  Future<void> _skip() async {
+    if (_rating || _index >= _cards.length) return;
     final card = _cards[_index];
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withValues(alpha: 0.45),
-      builder: (dlgCtx) => ReasonActionDialog(
-        title: '回炉重造',
-        subtitle: '「${card.front}」将退出复习队列，重造后回待审核池',
-        reasons: kReworkReasons,
-        noteHint: '补充说明（可选）：想怎么改这张卡？',
-        buttonLabel: '送进回炉队列',
-        buttonIcon: Icons.restart_alt_outlined,
-        emptyReasonToast: '先选至少一个回炉原因',
-        onConfirm: (reason, note) async {
-          try {
-            final res = await ApiClient.instance.reworkCard(
-              card.id,
-              reason: reason,
-              note: note,
-            );
-            if (mounted) {
-              setState(() {
-                _index++;
-                _fog.reset();
-                _revealedAt = DateTime.now();
-              });
-              if (res['duplicate'] == true) {
+    setState(() => _rating = true);
+    if (!await _animateNext(skip: true)) return;
+    // 不调用任何评分/调度/补传接口，也不改 FlashCard 的记忆状态。
+    setState(() {
+      _deferred.add(card);
+      _nextCard();
+    });
+  }
+
+  void _retryDeferred() {
+    if (_rating || _deferred.isEmpty) return;
+    setState(() {
+      _cards = List<FlashCard>.of(_deferred);
+      _deferred.clear();
+      _index = 0;
+      _round++;
+      _skipDrag = 0;
+      _animatingOut = false;
+      _fog.reset();
+      _revealedAt = DateTime.now();
+    });
+  }
+
+  void _endSkipDrag(DragEndDetails details) {
+    if (_rating) return;
+    final shouldSkip =
+        _skipDrag.abs() >= 80 ||
+        (_skipDrag.abs() >= 24 &&
+            details.velocity.pixelsPerSecond.dx.abs() >= 900);
+    if (shouldSkip) {
+      _skip();
+    } else {
+      setState(() {
+        _draggingCard = false;
+        _skipDrag = 0;
+      });
+    }
+  }
+
+  // 回炉（与待审核池拒绝/题库详情回炉共用 ReasonActionDialog）
+  Future<void> _rework() async {
+    if (currentBackendMode == BackendMode.local) {
+      if (_rating || _index >= _cards.length) return;
+      setState(() => _rating = true);
+      try {
+        final task = await requestReworkTask(context, _cards[_index]);
+        if (task != null && mounted) {
+          setState(() {
+            _removedCount++;
+            _nextCard();
+            _rating = true;
+          });
+          await Navigator.of(context, rootNavigator: true).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ReworkWorkbenchPage(taskId: task),
+            ),
+          );
+        }
+      } finally {
+        if (mounted) setState(() => _rating = false);
+      }
+      return;
+    }
+    if (_rating || _index >= _cards.length) return;
+    final card = _cards[_index];
+    setState(() => _rating = true);
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        barrierColor: Colors.black.withValues(alpha: 0.45),
+        builder: (dlgCtx) => ReasonActionDialog(
+          title: '回炉重造',
+          subtitle: '「${card.front}」将退出复习队列，重造后回待审核池',
+          reasons: kReworkReasons,
+          noteHint: '补充说明（可选）：想怎么改这张卡？',
+          buttonLabel: '送进回炉队列',
+          buttonIcon: Icons.restart_alt_outlined,
+          emptyReasonToast: '先选至少一个回炉原因',
+          onConfirm: (reason, note) async {
+            try {
+              final res = await ApiClient.instance.reworkCard(
+                card.id,
+                reason: reason,
+                note: note,
+              );
+              if (mounted) {
+                setState(() {
+                  _removedCount++;
+                  _nextCard();
+                  _rating = true; // 弹层关闭前保持动作互斥
+                });
+                if (res['duplicate'] == true) {
+                  TopToast.show(
+                    context,
+                    '已在回炉队列，无需重复提交',
+                    type: TopToastType.info,
+                  );
+                }
+              }
+            } on ApiException catch (e) {
+              if (mounted) {
                 TopToast.show(
                   context,
-                  '已在回炉队列，无需重复提交',
-                  type: TopToastType.info,
+                  '提交失败：${e.message}',
+                  type: TopToastType.error,
+                  stayDuration: const Duration(milliseconds: 1800),
                 );
               }
             }
-          } on ApiException catch (e) {
-            if (mounted) {
-              TopToast.show(
-                context,
-                '提交失败：${e.message}',
-                type: TopToastType.error,
-                stayDuration: const Duration(milliseconds: 1800),
+          },
+          deleteLabel: '删除整卡（含学习记录，不可恢复）',
+          onDelete: (reason, note) async {
+            try {
+              await ApiClient.instance.removeCard(
+                card.id,
+                reason: reason,
+                note: note,
               );
+              if (mounted) {
+                setState(() {
+                  _removedCount++;
+                  _nextCard();
+                  _rating = true; // 弹层关闭前保持动作互斥
+                });
+                TopToast.show(context, '已删除整卡', type: TopToastType.success);
+              }
+            } on ApiException catch (e) {
+              if (mounted) {
+                TopToast.show(
+                  context,
+                  '删除失败：${e.message}',
+                  type: TopToastType.error,
+                  stayDuration: const Duration(milliseconds: 1800),
+                );
+              }
             }
-          }
-        },
-        deleteLabel: '删除整卡（含学习记录，不可恢复）',
-        onDelete: (reason, note) async {
-          try {
-            await ApiClient.instance.removeCard(
-              card.id,
-              reason: reason,
-              note: note,
-            );
-            if (mounted) {
-              setState(() {
-                _index++;
-                _fog.reset();
-                _revealedAt = DateTime.now();
-              });
-              TopToast.show(context, '已删除整卡', type: TopToastType.success);
-            }
-          } on ApiException catch (e) {
-            if (mounted) {
-              TopToast.show(
-                context,
-                '删除失败：${e.message}',
-                type: TopToastType.error,
-                stayDuration: const Duration(milliseconds: 1800),
-              );
-            }
-          }
-        },
-      ),
-    );
+          },
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _rating = false);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -465,10 +580,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
     return Scaffold(
       backgroundColor: _kPageBg,
       appBar: AppBar(
-        title: const Text(
-          '复习',
-          style: TextStyle(fontWeight: FontWeight.w600),
-        ),
+        title: const Text('复习', style: TextStyle(fontWeight: FontWeight.w600)),
         backgroundColor: _kPageBg,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
@@ -487,33 +599,50 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
           IconButton(
             tooltip: '回炉重造',
             icon: const Icon(Icons.restart_alt_outlined),
-            onPressed: _index < _cards.length ? _rework : null,
+            onPressed: !_rating && _index < _cards.length ? _rework : null,
           ),
         ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? RefreshIndicator(
-                  onRefresh: _load,
-                  child: ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    children: [
-                      const SizedBox(height: 160),
-                      _OfflineHint(error: _error!),
-                    ],
-                  ),
-                )
-              : _cards.isEmpty
-                  ? const _EmptyState()
-                  : _index >= _cards.length
-                      ? const _DoneState()
-                      : _buildSession(),
+          ? RefreshIndicator(
+              onRefresh: _load,
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                children: [
+                  const SizedBox(height: 160),
+                  _OfflineHint(error: _error!),
+                ],
+              ),
+            )
+          : _cards.isEmpty
+          ? const _EmptyState()
+          : _index >= _cards.length
+          ? _buildSessionEnd()
+          : _buildSession(),
     );
   }
 
   /// 完整会话布局：进度条 + 卡片堆叠 + 评分滑轨
-  Widget _buildSession() {
+  Widget _buildSession() => LayoutBuilder(
+    builder: (context, constraints) {
+      final minHeight =
+          520.0 +
+          (MediaQuery.textScalerOf(context).scale(14) - 14)
+                  .clamp(0.0, 100.0)
+                  .toDouble() *
+              4;
+      if (constraints.maxHeight < minHeight) {
+        return SingleChildScrollView(
+          child: SizedBox(height: minHeight, child: _buildSessionLayout()),
+        );
+      }
+      return _buildSessionLayout();
+    },
+  );
+
+  Widget _buildSessionLayout() {
     return Column(
       children: [
         // ── 圆角渐变进度条 ──
@@ -535,9 +664,40 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
-            child: RatingSlider(
-              onRated: (level) => _rate(_levelToRating(level)),
-              enabled: !_rating && _index < _cards.length,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  child: Wrap(
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      if (_fogEnabled)
+                        TextButton.icon(
+                          key: const ValueKey('review-reveal'),
+                          onPressed: _rating || _fog.isCleared
+                              ? null
+                              : _fog.markCleared,
+                          icon: const Icon(Icons.visibility_outlined, size: 18),
+                          label: Text(_fog.isCleared ? '答案已揭开' : '揭开答案'),
+                        ),
+                      TextButton.icon(
+                        key: const ValueKey('review-skip'),
+                        onPressed: _rating ? null : _skip,
+                        icon: const Icon(Icons.skip_next_rounded, size: 20),
+                        label: const Text('跳过 · 不评分'),
+                      ),
+                    ],
+                  ),
+                ),
+                RatingSlider(
+                  key: ValueKey('rating-$_round-${_cards[_index].id}'),
+                  itemKey: _cards[_index].id,
+                  onRated: (level) => _rate(_levelToRating(level)),
+                  enabled: !_rating && _index < _cards.length,
+                ),
+              ],
             ),
           ),
         ),
@@ -547,7 +707,8 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
 
   /// 渐变圆角进度条（红 → 绿）
   Widget _buildProgressBar() {
-    final progress = _cards.isEmpty ? 0.0 : (_index + 1) / _cards.length;
+    // 会话位置，不代表已评分数量；结束页分别列明评分与跳过。
+    final progress = _cards.isEmpty ? 0.0 : _index / _cards.length;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Container(
@@ -594,20 +755,39 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
               ),
             )
           else
-            // 顶层：交互卡片（带飞出动画）
-            AnimatedBuilder(
-              animation: _cardAnim,
-              builder: (context, child) {
-                final t = _animatingOut ? _cardAnim.value : 0.0;
-                return Transform.translate(
-                  offset: Offset(-t * 300, -t * 40),
-                  child: Opacity(
-                    opacity: (1.0 - t).clamp(0.0, 1.0),
-                    child: child,
-                  ),
-                );
-              },
-              child: _buildTopCard(),
+            // 手指移动零延迟；未到阈值时回到原位，提交时沿手势方向出场。
+            AnimatedSlide(
+              offset: Offset(
+                _skipDrag * .5 / MediaQuery.sizeOf(context).width,
+                0,
+              ),
+              duration:
+                  _draggingCard ||
+                      _rating ||
+                      MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              child: AnimatedBuilder(
+                animation: _cardAnim,
+                builder: (context, child) {
+                  final t = _animatingOut ? _cardAnim.value : 0.0;
+                  return Transform.translate(
+                    offset: Offset(
+                      _animatingOut
+                          ? _exitStart * (1 - t) +
+                                t * (_skipTransition ? 300 * _exitSign : -300)
+                          : 0,
+                      -t * 20,
+                    ),
+                    child: Opacity(
+                      opacity: (1.0 - t).clamp(0.0, 1.0),
+                      child: child,
+                    ),
+                  );
+                },
+                child: IgnorePointer(ignoring: _rating, child: _buildTopCard()),
+              ),
             ),
       ],
     );
@@ -629,10 +809,7 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
             offset: const Offset(0, 4),
           ),
         ],
-        border: Border.all(
-          color: const Color(0x12000000),
-          width: 0.5,
-        ),
+        border: Border.all(color: const Color(0x12000000), width: 0.5),
       ),
     );
   }
@@ -657,100 +834,158 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
             offset: const Offset(0, 2),
           ),
         ],
-        border: Border.all(
-          color: const Color(0x12000000),
-          width: 0.5,
-        ),
+        border: Border.all(color: const Color(0x12000000), width: 0.5),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
         child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: _fogEnabled
-              ? _buildCardFogged(card)
-              : _buildCardNormal(card),
+          padding: const EdgeInsets.all(20),
+          child: LayoutBuilder(
+            builder: (context, constraints) =>
+                _buildCardContent(card, constraints.maxHeight),
+          ),
         ),
       ),
     );
   }
 
-  /// 雾激活时的卡面布局
-  Widget _buildCardFogged(FlashCard card) {
+  /// 题干区接管横向翻卡；答案区留给擦雾和纵向阅读，互不抢手势。
+  Widget _buildCardContent(FlashCard card, double availableHeight) {
+    final answer = Text(
+      card.back,
+      style: const TextStyle(fontSize: 18, height: 1.6, color: _kTextSecondary),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildCardHeader(card),
-        const SizedBox(height: 16),
-        Text(
-          card.front,
-          style: const TextStyle(
-            fontSize: 20,
-            height: 1.5,
-            fontWeight: FontWeight.w500,
-            color: _kTextPrimary,
-          ),
-        ),
-        const SizedBox(height: 24),
-        // 极细渐变分隔线（从中心向两端淡出）
-        _buildSoftDivider(),
-        const SizedBox(height: 16),
-        Expanded(
-          child: FogPeel(
-            controller: _fog,
-            sheetMode:
-                _fogHug ? FogSheetMode.hugText : FogSheetMode.fill,
-            child: Text(
-              card.back,
-              style: const TextStyle(
-                fontSize: 18,
-                height: 1.6,
-                color: _kTextSecondary,
+        GestureDetector(
+          key: const ValueKey('review-skip-zone'),
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragDown: (d) => _skipStart = d.globalPosition.dx,
+          onHorizontalDragStart: _rating
+              ? null
+              : (d) => setState(() {
+                  _draggingCard = true;
+                  _skipDrag = (d.globalPosition.dx - _skipStart).clamp(
+                    -180.0,
+                    180.0,
+                  );
+                }),
+          onHorizontalDragUpdate: _rating
+              ? null
+              : (d) => setState(() {
+                  final wasReady = _skipDrag.abs() >= 80;
+                  _skipDrag = (_skipDrag + d.delta.dx).clamp(-180.0, 180.0);
+                  if (!wasReady && _skipDrag.abs() >= 80) {
+                    HapticFeedback.selectionClick();
+                  }
+                }),
+          onHorizontalDragEnd: _rating ? null : _endSkipDrag,
+          onHorizontalDragCancel: () {
+            if (mounted) {
+              setState(() {
+                _draggingCard = false;
+                _skipDrag = 0;
+              });
+            }
+          },
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: availableHeight * .42),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildCardHeader(card),
+                  const SizedBox(height: 12),
+                  Text(
+                    card.front,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      height: 1.5,
+                      fontWeight: FontWeight.w500,
+                      color: _kTextPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _skipDrag.abs() >= 80 ? '松手跳过 · 不计评分' : '左右划动题干可跳过',
+                    style: const TextStyle(fontSize: 11, color: _kTextMuted),
+                  ),
+                ],
               ),
             ),
           ),
         ),
         const SizedBox(height: 12),
-        _buildMetaRow(card),
+        _buildSoftDivider(),
+        const SizedBox(height: 12),
+        Expanded(
+          child: _fogEnabled
+              ? FogPeel(
+                  key: ValueKey('fog-$_round-${card.id}'),
+                  controller: _fog,
+                  sheetMode: _fogHug ? FogSheetMode.hugText : FogSheetMode.fill,
+                  child: answer,
+                )
+              : SingleChildScrollView(
+                  key: ValueKey('answer-${card.id}'),
+                  child: answer,
+                ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 28,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: _buildMetaRow(card),
+          ),
+        ),
       ],
     );
   }
 
-  /// 无雾卡面布局
-  Widget _buildCardNormal(FlashCard card) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _buildCardHeader(card),
-        const SizedBox(height: 16),
-        Text(
-          card.front,
-          style: const TextStyle(
-            fontSize: 20,
-            height: 1.5,
-            fontWeight: FontWeight.w500,
-            color: _kTextPrimary,
+  Widget _buildSessionEnd() => Center(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _deferred.isEmpty
+                ? Icons.task_alt_rounded
+                : Icons.pause_circle_outline,
+            size: 48,
+            color: const Color(0xFF508575),
           ),
-        ),
-        const SizedBox(height: 24),
-        _buildSoftDivider(),
-        const SizedBox(height: 16),
-        Expanded(
-          child: SingleChildScrollView(
-            child: Text(
-              card.back,
-              style: const TextStyle(
-                fontSize: 18,
-                height: 1.6,
-                color: _kTextSecondary,
-              ),
+          const SizedBox(height: 16),
+          const Text(
+            '本轮已结束',
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            '已评分 $_reviewedCount 张 · 跳过 ${_deferred.length} 张',
+            key: const ValueKey('review-summary'),
+            textAlign: TextAlign.center,
+          ),
+          if (_removedCount > 0) Text('另有 $_removedCount 张已回炉或移除'),
+          if (_deferred.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            const Text('跳过的卡片没有评分，原复习计划保持不变。', textAlign: TextAlign.center),
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              key: const ValueKey('review-retry-skipped'),
+              onPressed: _retryDeferred,
+              icon: const Icon(Icons.replay_rounded),
+              label: Text('再看这 ${_deferred.length} 张跳过的卡'),
             ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _buildMetaRow(card),
-      ],
-    );
-  }
+          ],
+          const SizedBox(height: 12),
+          TextButton(onPressed: () => context.pop(), child: const Text('返回科目')),
+        ],
+      ),
+    ),
+  );
 
   /// 卡片头部：题型标签 + 进度
   Widget _buildCardHeader(FlashCard card) {
@@ -841,10 +1076,7 @@ class _MetaChip extends StatelessWidget {
       children: [
         Icon(icon, size: 13, color: _kTextMuted),
         const SizedBox(width: 4),
-        Text(
-          label,
-          style: const TextStyle(fontSize: 11, color: _kTextMuted),
-        ),
+        Text(label, style: const TextStyle(fontSize: 11, color: _kTextMuted)),
       ],
     );
   }
@@ -867,64 +1099,12 @@ class _EmptyState extends StatelessWidget {
           const SizedBox(height: 12),
           const Text(
             '该科目暂无到期卡',
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: _kTextPrimary,
-            ),
+            style: TextStyle(fontWeight: FontWeight.w600, color: _kTextPrimary),
           ),
           const SizedBox(height: 4),
           const Text(
             '审核池通过的新卡才会出现',
             style: TextStyle(fontSize: 12, color: _kTextMuted),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DoneState extends StatelessWidget {
-  const _DoneState();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.task_alt,
-            size: 56,
-            color: const Color(0xFF66BB6A).withValues(alpha: 0.85),
-          ),
-          const SizedBox(height: 12),
-          const Text(
-            '本批复习完成！',
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: _kTextPrimary,
-            ),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            '剩下的卡在未来的记忆曲线里等你',
-            style: TextStyle(fontSize: 12, color: _kTextMuted),
-          ),
-          const SizedBox(height: 20),
-          FilledButton(
-            onPressed: () => context.pop(),
-            style: FilledButton.styleFrom(
-              backgroundColor: _kCardColorL2,
-              foregroundColor: _kTextPrimary,
-              padding: const EdgeInsets.symmetric(
-                horizontal: 32,
-                vertical: 14,
-              ),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            child: const Text('返回'),
           ),
         ],
       ),

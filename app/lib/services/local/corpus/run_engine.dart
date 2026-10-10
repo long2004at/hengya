@@ -29,6 +29,7 @@
 // 依赖注入纪律（对拍 Python self_test 的 monkeypatch seam）：检索（RunSearchFn）、
 // LLM（LlmChatFn）、入库（CardPort）全部入参注入——引擎零全局状态、
 // 纯 Dart 可离线测试；App/探针/测试各装配各的实现。
+import '../../review/rework_models.dart';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart' as crypto;
@@ -579,10 +580,14 @@ final Map<String, String> kFallbackPrompts = {
       '一张占位卡（back=【语料未覆盖】请结合课堂笔记/教材补全原文后审核）。'
       'exam 卡每关键词 ≤2 张，需 examMeta{year,no}。',
   'rework':
-      '你是恒牙复习系统的回炉重写助手。输入为 JSON（回炉项+理由+留言+证据），'
-      '只输出 {"front","back","evidenceChunkId"}；「审核拒绝：」理由必须修正，'
-      '重写不得凭空改写；evidence 为 PPT+教材双源（见 evidence.sourceType），'
-      '内容冲突时以教材为准，理由/留言指明依据来源（如「按教材」）时必须遵从。',
+      '''你是恒牙的卡片修复方案助手。输入包含 action、targetCount、original、issues、instructions、evidence。只输出 JSON，不直接修改正式卡片。
+只处理 rewrite 或 split；不得把暂缓、排除或超出课程范围的问题强行改写成原卡。
+rewrite 必须输出一张确有改进的卡；split 必须输出 targetCount 张各考一个独立知识点的卡，不能把原卡重复复制。
+所有事实必须有输入 evidence 支撑。课件和教材冲突时明确指出冲突，不能编造；用户明确指定的依据优先用于修复。不得输出任何不在证据池里的引用编号。
+输出结构：{"action":"rewrite或split","cards":[{"front":"题干","back":"答案","evidenceChunkIds":["证据chunkId"]}],"issueResults":[{"id":"输入的理由id","resolved":true,"explanation":"可核验的修改说明"}],"summary":"修复摘要"}。
+必须逐项返回所有 issues 的处理结果；没有解决的理由 resolved=false，并说明还缺什么。不能仅凭换词或更换锚点宣称答案错误已修复。
+每张卡必须非空、题干自包含、引用真实原文，题干最多2000字、答案最多12000字。不要输出卡片ID、记忆参数或自行决定生效。
+如果证据不足或要求不可实现，输出 {"action":"needs_input","message":"具体缺少什么或需要用户决定什么"}，不能回退到原卡或编造替代答案。''',
   'synonym':
       '为课堂关键词生成最多 $kMaxSynonymQueries 条同义表述检索式'
       '（强相关、宁缺毋滥、不准硬凑数——上限不是配额，质量优先），只输出 '
@@ -660,6 +665,22 @@ abstract class CardPort {
     required String back,
     required String anchor,
   });
+}
+
+/// 支持可审计草案的后端能力；不把旧单卡 done 接口当成应用授权。
+abstract class ReworkDraftPort {
+  Future<Map<String, Object?>?> claimRework(int id, int revision);
+  Future<List<Map<String, Object?>>> readEvidence(
+    String subject,
+    List<String> ids,
+  );
+  Future<bool> storeEvidence(
+    int id,
+    int revision,
+    List<Map<String, Object?>> evidence,
+  );
+  Future<bool> storeDraft(int id, int revision, Map<String, Object?> draft);
+  Future<void> failRework(int id, int revision, String error);
 }
 
 /// 引擎运行选项（dry-run：只出卡不 import/consume/done）。
@@ -1355,181 +1376,209 @@ Future<List<Map<String, Object?>>> processRework({
   required RunOptions opts,
   CardPort? port,
 }) async {
-  final notesByCard = <String, List<String>>{};
-  for (final n0 in aiNotes) {
-    final cid = (n0['cardId']?.toString() ?? '');
-    if (cid.isNotEmpty) {
-      notesByCard
-          .putIfAbsent(cid, () => <String>[])
-          .add((n0['aiNote']?.toString() ?? ''));
-    }
-  }
-  int prio(Map<String, Object?> it) =>
-      ((it['reason']?.toString() ?? '').startsWith('审核拒绝：') ? 0 : 1);
-  final sorted = List<Map<String, Object?>>.of(queue)
+  final ReworkDraftPort? sink = port is ReworkDraftPort
+      ? port as ReworkDraftPort
+      : null;
+  int priority(Map item) =>
+      (item['original'] is Map &&
+              (item['original'] as Map)['status'] == 'pending') ||
+          (item['reason']?.toString() ?? '').startsWith('审核拒绝：')
+      ? 0
+      : 1;
+  final ordered = List<Map<String, Object?>>.of(queue)
     ..sort((a, b) {
-      final d = prio(a).compareTo(prio(b));
-      if (d != 0) {
-        return d > 0 ? 1 : -1;
-      }
-      final ia = (a['id'] as num?)?.toInt() ?? 0;
-      final ib = (b['id'] as num?)?.toInt() ?? 0;
-      return ia.compareTo(ib);
+      final p = priority(a).compareTo(priority(b));
+      return p != 0
+          ? p
+          : ((a['id'] as num?)?.toInt() ?? 0).compareTo(
+              (b['id'] as num?)?.toInt() ?? 0,
+            );
     });
   final results = <Map<String, Object?>>[];
-  for (final it in sorted) {
-    final rid = it['id'];
-    final frontNow = (it['front'] as String?) ?? '';
-    final subjectId = (it['subjectId'] as String?) ?? '';
-    final cardIdStr = it['cardId']?.toString() ?? '';
-    final item = {
-      'queueId': rid,
-      'cardId': it['cardId'],
-      'subjectId': subjectId,
-      'subjectName': subjectNames[subjectId] ?? subjectId,
-      'reason': it['reason'],
-      'note': it['note'],
-      'aiNotes': notesByCard[cardIdStr] ?? <String>[],
-      'current': {
-        'front': frontNow,
-        'back': it['back'],
-        'anchor': it['anchor'],
-      },
-    };
-    // ── 方案 A（#10/#17，2026-09-13 拍板）：双源证据池 + 理由入检索 ──
-    // 原实现钉死 sourceType='ppt' 且 query 只取题干前 60 字（理由完全不参
-    // 与检索）——「按教材改」的理由传到了 prompt，检索层却无教材证据可喂，
-    // LLM 只能沿 PPT 旧证据重写（用户七轮回炉同错即此死循环）。现改：
-    // ppt + textbook 双路检索合并去重同喂；理由/留言非空时以「题干+理由」
-    // 对教材路增补一次检索（理由常指明方向，如「依照书本教材为准」）。
-    final reasonText = [
-      (it['reason']?.toString() ?? '')
-          .replaceFirst('审核拒绝：', '')
-          .replaceAll(RegExp(r'[、,，;；]+'), ' ')
-          .trim(),
-      (it['note']?.toString() ?? '').trim(),
-    ].where((s) => s.isNotEmpty).join(' ');
-    var q = frontNow.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
-    if (q.length > 60) {
-      q = q.substring(0, 60);
-    }
-    final baseQuery = q.isNotEmpty ? q : frontNow;
-    final merged = <Map<String, Object?>>[];
-    final seenIds = <String>{};
-    void addHits(List<Map<String, Object?>> hs) {
-      for (final h in hs) {
-        final cid = h['chunk_id']?.toString() ?? '';
-        if (cid.isEmpty || seenIds.add(cid)) {
-          merged.add(h);
-        }
-      }
-    }
-
-    Future<List<Map<String, Object?>>> trySearch(
-      String query,
-      String sourceType,
-    ) async {
-      try {
-        final res = await runSearch(
-          query,
-          subject: subjectId.isEmpty ? null : subjectId,
-          sourceType: sourceType,
-          k: kSearchK,
-        );
-        return searchHits(res, opts.floor);
-      } on SearchException {
-        return <Map<String, Object?>>[];
-      }
-    }
-
-    addHits(await trySearch(baseQuery, 'ppt'));
-    addHits(await trySearch(baseQuery, 'textbook'));
-    if (reasonText.isNotEmpty) {
-      final qr = '$baseQuery $reasonText'.trim();
-      addHits(await trySearch(qr, 'textbook'));
-    }
-    final evidence = merged
-        .take(kSearchK * 2) // 双源槽位：≤12 条（ppt 在前、教材在后、理由增补再次）
-        .map(chunkToEvidence)
-        .toList();
-    final evById = <String, Map<String, Object?>>{};
-    for (final e in evidence) {
-      final cid = e['chunkId'];
-      if (cid != null) {
-        evById[cid.toString()] = e;
-      }
-    }
-    final payload = {
-      'task': 'rework',
-      'item': item,
-      'pptHit': evidence.isNotEmpty,
-      'evidence': evidence,
-    };
+  for (final incoming in ordered) {
+    final id = (incoming['id'] as num?)?.toInt() ?? 0;
+    final revision = (incoming['taskRevision'] as num?)?.toInt() ?? 1;
     final rec = <String, Object?>{
-      'queueId': rid,
-      'cardId': it['cardId'],
-      'priorityRejected': (it['reason']?.toString() ?? '').startsWith('审核拒绝：'),
-      'aiNotesRead': (item['aiNotes'] as List).length,
+      'queueId': id,
+      'cardId': incoming['cardId'],
       'done': false,
     };
+    var claimed = false;
     try {
+      Map<String, Object?> task = Map.of(incoming);
+      if (!opts.dryRun && sink != null) {
+        final actual = await sink.claimRework(id, revision);
+        if (actual == null) {
+          rec['stale'] = true;
+          results.add(rec);
+          continue;
+        }
+        task = actual;
+        claimed = true;
+      }
+      final reason =
+          task['reason']?.toString() ?? incoming['reason']?.toString() ?? '';
+      final action = task['action']?.toString() ?? suggestReworkAction(reason);
+      if (action == 'defer' || action == 'exclude') {
+        rec['needsInput'] = true;
+        rec['note'] = '暂缓 / 排除需要用户确认，不调用模型重写';
+        results.add(rec);
+        continue;
+      }
+      final original = task['original'] is Map
+          ? Map<String, Object?>.from(task['original'] as Map)
+          : <String, Object?>{
+              'front': incoming['front'],
+              'back': incoming['back'],
+              'anchor': incoming['anchor'],
+            };
+      final subject = task['subjectId']?.toString() ?? '';
+      final issues = task['issues'] is List
+          ? [
+              for (final e in task['issues'] as List)
+                Map<String, Object?>.from(e as Map),
+            ]
+          : reworkIssues(reason);
+      final instructions = [
+        task['instructions'] ?? incoming['note'] ?? '',
+        for (final n in aiNotes)
+          if (n['cardId'] == incoming['cardId']) n['aiNote'] ?? '',
+      ].join('\n').trim();
+      final count = action == 'split'
+          ? (task['targetCount'] as num?)?.toInt() ?? 2
+          : 1;
+      final selected = (task['selectedIds'] as List? ?? [])
+          .map((e) => e.toString())
+          .toList();
+      if (selected.length > 12) throw const FormatException('最多固定 12 条证据');
+      final evidenceIds = <String>[...selected];
+      final seen = selected.toSet();
+      final rawHits = <String, Map<String, Object?>>{};
+      Future<List<Map<String, Object?>>> search(
+        String query,
+        String type,
+      ) async {
+        try {
+          return searchHits(
+            await runSearch(
+              query,
+              subject: subject,
+              sourceType: type,
+              k: kSearchK,
+            ),
+            opts.floor,
+          );
+        } on SearchException {
+          return [];
+        }
+      }
+
+      final front = original['front']?.toString() ?? '';
+      final q = front.length > 240 ? front.substring(0, 240) : front;
+      // 固定证据优先；纠错方向的检索在普通题干检索前，教材/课件交替取证。
+      final directed = [
+        q,
+        issues.map((i) => i['label']).join(' '),
+        instructions,
+      ].where((s) => s.isNotEmpty).join(' ');
+      final buckets = <List<Map<String, Object?>>>[];
+      if (evidenceIds.length < 12) {
+        buckets.addAll(
+          await Future.wait([
+            search(directed, 'textbook'),
+            search(directed, 'ppt'),
+          ]),
+        );
+        buckets.addAll(
+          await Future.wait([search(q, 'textbook'), search(q, 'ppt')]),
+        );
+      }
+      for (var pair = 0; pair < buckets.length; pair += 2) {
+        for (var i = 0; i < kSearchK; i++) {
+          for (var j = pair; j < pair + 2 && j < buckets.length; j++) {
+            if (i >= buckets[j].length) continue;
+            final hit = buckets[j][i];
+            final cid = hit['chunk_id']?.toString() ?? '';
+            if (cid.isNotEmpty && evidenceIds.length < 12 && seen.add(cid)) {
+              evidenceIds.add(cid);
+              rawHits[cid] = hit;
+            }
+          }
+        }
+      }
+      if (evidenceIds.isEmpty) {
+        throw const FormatException('没有可用原文，请在证据页选择该科课件或教材后再生成');
+      }
+      final evidence = sink != null
+          ? await sink.readEvidence(subject, evidenceIds)
+          : [
+              for (final cid in evidenceIds)
+                if (rawHits.containsKey(cid)) chunkToEvidence(rawHits[cid]!),
+            ];
+      if (evidence.isEmpty) throw const FormatException('证据不可用，需要用户补充');
+      if (claimed && !await sink!.storeEvidence(id, revision, evidence)) {
+        rec['stale'] = true;
+        results.add(rec);
+        continue;
+      }
+      final payload = {
+        'task': 'rework',
+        'action': action,
+        'targetCount': count,
+        'original': original,
+        'issues': issues,
+        'instructions': instructions,
+        'subjectId': subject,
+        'subjectName': subjectNames[subject] ?? subject,
+        'evidence': evidence,
+      };
       final content = await llmChat(
         prompts['rework'] ?? kFallbackPrompts['rework']!,
         jsonEncode(payload),
         tag: 'rework',
       );
-      final obj = extractJsonObj(content) ?? const <String, Object?>{};
-      final objM = obj is Map ? obj : const <String, Object?>{};
-      final newFront = ((objM['front'] as String?) ?? '').trim().isNotEmpty
-          ? (objM['front'] as String).trim()
-          : frontNow;
-      final newBack = ((objM['back'] as String?) ?? '').trim().isNotEmpty
-          ? (objM['back'] as String).trim()
-          : (it['back'] as String? ?? '');
-      final ev = evById[((objM['evidenceChunkId'] as String?) ?? '')];
-      final anchor = ev != null
-          ? composeAnchor(ev)
-          : ((it['anchor'] as String?) ?? '');
-      rec['front'] = newFront;
-      rec['back'] = newBack;
-      rec['anchor'] = anchor;
-      if (opts.dryRun || port == null) {
-        rec['draft'] = true; // dry-run：只落草稿不 done（不写服务器）
-      } else {
-        final rid0 = rid;
-        final ridInt = rid0 is num
-            ? rid0.toInt()
-            : (int.tryParse(rid0?.toString() ?? '') ?? 0);
-        final r = await port.reworkDone(
-          ridInt,
-          front: newFront,
-          back: newBack,
-          anchor: anchor,
-        );
-        rec['done'] = r.ok;
-        if (!r.ok) {
-          final err = (r.error ?? '').length > 160
-              ? r.error!.substring(0, 160)
-              : (r.error ?? '');
-          rec['error'] = 'done 失败（留队列下次处理）：$err';
+      final raw = extractJsonObj(content);
+      if (raw is! Map) throw const FormatException('模型没有返回有效的修复方案 JSON');
+      if (raw['action'] == 'needs_input') {
+        throw FormatException(raw['message']?.toString() ?? '需要补充资料');
+      }
+      final draft = validateReworkDraft(
+        raw: raw,
+        action: action,
+        targetCount: count,
+        original: original,
+        evidence: evidence,
+        issues: issues,
+      );
+      rec['cards'] = draft['cards'];
+      rec['draft'] = true;
+      rec['needsInput'] = !(draft['issueResults'] as List).every(
+        (e) => (e as Map)['resolved'] == true,
+      );
+      if (claimed) {
+        final saved = await sink!.storeDraft(id, revision, draft);
+        rec['saved'] = saved;
+        if (!saved) {
+          rec['stale'] = true;
+          rec['draft'] = false;
         }
       }
-    } on LlmException catch (e) {
-      rec['error'] = 'LLM 失败（留队列下次处理）：$e';
+    } catch (e) {
+      final message = e.toString();
+      rec['error'] = message;
+      rec['needsInput'] = true;
+      if (claimed) {
+        try {
+          await sink!.failRework(id, revision, message);
+        } catch (_) {}
+      }
     }
     results.add(rec);
   }
   return results;
 }
 
-/// 节点⑤（B3 拍板）：周扫 examMeta 本地兜底——LLM 未给年份/题号时，
-/// 年份取候选 deck 名（=真题文件名）中的 4 位年份数字；题号取 deck 内页序
-/// （网友回忆版无题号时「用其在 deck 内的序号」的模板规则，本地以候选
-/// 页位/页码为确定序号）。**解析不出的字段绝不臆造**（保持缺失 →
-/// [normalizeCard] 按 CardException 跳过该卡，宁漏不错）。
-///
-/// 就地补写 [raw] 的 examMeta（保留 LLM 已给出的字段），返回兜底说明列表
-/// （空表 = 未做任何兜底；调用方据此在卡 source 注明兜底来源）。
+// 保留原有真题元数据补齐与周扫实现。
 List<String> examMetaFallback(
   Map<String, Object?> raw,
   Map<String, Object?>? ev,
@@ -1544,11 +1593,7 @@ List<String> examMetaFallback(
   final reasons = <String>[];
   if (year.isEmpty && ev != null) {
     // deck 名（真题文件名）优先，title/chunkId 兜底——只认 19xx/20xx 四位年份
-    for (final src0 in [
-      ev['deck'],
-      ev['title'],
-      ev['chunkId'],
-    ]) {
+    for (final src0 in [ev['deck'], ev['title'], ev['chunkId']]) {
       final src = src0?.toString() ?? '';
       final mm = RegExp(r'(19|20)\d{2}').firstMatch(src);
       if (mm != null) {
@@ -1689,7 +1734,9 @@ Future<Map<String, Object?>> runWeekly({
         cand['subjectName'] = topic.name;
         cand['chapter'] = topic.name;
         cand['skill'] = true;
-        bySubject.putIfAbsent(topic.code, () => <Map<String, Object?>>[]).add(cand);
+        bySubject
+            .putIfAbsent(topic.code, () => <Map<String, Object?>>[])
+            .add(cand);
       }
     } on SearchException catch (e) {
       notes_.add('技能专题检索降级（${topic.name}）：$e');
@@ -1768,15 +1815,11 @@ Future<Map<String, Object?>> runWeekly({
           if (skillCode != null) {
             // 节点⑤：技能候选无法回退科目（专题短码不在 subjects 表）→
             // 宁漏不错跳过，绝不落 'unknown' 废卡。
-            notes_.add(
-              '技能真题卡科目非法（$sid），跳过——宁漏不错',
-            );
+            notes_.add('技能真题卡科目非法（$sid），跳过——宁漏不错');
             continue;
           }
           // 科目非法 → 回退该候选所属章的科目
-          sid =
-              candSubj[chunkId] ??
-              'unknown';
+          sid = candSubj[chunkId] ?? 'unknown';
           raw['subjectId'] = sid;
         }
         // 节点⑤（B3 拍板）：examMeta 兜底——年份取 deck 名（文件名）、题号
@@ -1786,8 +1829,7 @@ Future<Map<String, Object?>> runWeekly({
           final card = normalizeCard(raw, sid, '', const {});
           if (fb.isNotEmpty) {
             // 兜底来源在卡 source 注明（B3 拍板；importPayload 只透传既有字段）
-            card['source'] =
-                '${card['source']}（examMeta 兜底：${fb.join('、')}）';
+            card['source'] = '${card['source']}（examMeta 兜底：${fb.join('、')}）';
             examMetaFallbacks += 1;
           }
           if (skillCode != null) {
@@ -1803,7 +1845,7 @@ Future<Map<String, Object?>> runWeekly({
             skillCardCount[skillCode] = n;
           }
           cards.add(card);
-    } on CardException catch (e) {
+        } on CardException catch (e) {
           notes_.add('周扫单卡归一化跳过：$e');
           onLog?.call('warn', 'weekly', '周扫单卡归一化跳过：$e');
         }

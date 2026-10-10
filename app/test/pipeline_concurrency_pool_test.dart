@@ -1,3 +1,5 @@
+import 'package:sqlite3/sqlite3.dart';
+import 'helpers/rework_fixture.dart';
 // 恒牙（hengya）· #12 拆卡并发池 + #13 进度事件（关键词粒度）单元测试
 // ============================================================================
 //
@@ -133,11 +135,7 @@ void main() {
               probe.leave();
             }
           case 'rework':
-            return jsonEncode(<String, Object?>{
-              'front': '重写后的回炉题干',
-              'back': '重写后的三点答案',
-              'evidenceChunkId': 'r1',
-            });
+            return validReworkLlm(user);
           default:
             return '{"queries": []}'; // synonym / studylog 兜底
         }
@@ -198,9 +196,13 @@ void main() {
     db.reworkCard('endo-orig-001', '答案太啰嗦', '请精简为三点');
 
     final (llm, probe) = fakeLlm();
+    final corpus = sqlite3.openInMemory();
+    seedReworkEvidence(corpus, id: 'c1');
+    addTearDown(corpus.dispose);
     final result = await runCatchup(
       deps: PipelineDeps(
         db: db,
+        port: LocalDbPort(db, corpusDb: corpus),
         runSearch: allHitSearch,
         llmChat: llm,
         prompts: const {},
@@ -220,15 +222,20 @@ void main() {
     final imp = counts['import'] as Map<String, Object?>;
     expect(imp['inserted'], 7);
     expect(imp['consumed'], 7);
-    expect(counts['reworkDone'], 1, reason: '⑦ 回炉真实重写完成');
+    expect(counts['reworkDone'], 0);
+    expect(counts['reworkDraft'], 1, reason: '只生成草案，不自动应用');
     expect(db.inboxPending(), isEmpty, reason: '7 条全部消费');
     final fronts = db.pendingCards(limit: 20).map((c) => c.front).toSet();
     for (final t in kws) {
       expect(fronts, contains('题-$t'), reason: '「$t」的卡真实入库');
     }
     final reworked = db.cardById('endo-orig-001')!;
-    expect(reworked.status, CardStatus.pending, reason: '回炉完成回待审核池');
-    expect(reworked.front, '重写后的回炉题干');
+    expect(reworked.status, CardStatus.rework);
+    expect(reworked.front, '原始回炉题干');
+    expect(
+      db.getReworkTask(db.activeReworkTask(reworked.id)!)!['status'],
+      'draft',
+    );
 
     // ── 保序：steps.keywords 与 kwPending 快照同序（占位回填不乱序） ──
     final resultKws = ((result['steps'] as Map)['keywords'] as List)

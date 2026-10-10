@@ -14,10 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hengya/widgets/rating_slider.dart';
 
 /// 泵入一个 400dp 宽的 RatingSlider，返回回调记录列表。
-Future<List<int>> pumpSlider(
-  WidgetTester tester, {
-  bool enabled = true,
-}) async {
+Future<List<int>> pumpSlider(WidgetTester tester, {bool enabled = true}) async {
   final calls = <int>[];
   await tester.pumpWidget(
     MaterialApp(
@@ -25,10 +22,7 @@ Future<List<int>> pumpSlider(
         body: Center(
           child: SizedBox(
             width: 400,
-            child: RatingSlider(
-              onRated: calls.add,
-              enabled: enabled,
-            ),
+            child: RatingSlider(onRated: calls.add, enabled: enabled),
           ),
         ),
       ),
@@ -76,8 +70,7 @@ void main() {
     final calls = await pumpSlider(tester);
     final topLeft = tester.getTopLeft(find.byType(RatingSlider));
     // 从左端起手（等级 0）水平拖到 dx=164（= 20 + 360×2/5，第 2 档刻度点）
-    final gesture =
-        await tester.startGesture(topLeft + const Offset(30, 36));
+    final gesture = await tester.startGesture(topLeft + const Offset(30, 36));
     await tester.pump();
     await gesture.moveBy(const Offset(134, 0));
     await tester.pump();
@@ -92,8 +85,7 @@ void main() {
     await tester.tapAt(tester.getCenter(find.byType(RatingSlider)));
     // 拖拽
     final topLeft = tester.getTopLeft(find.byType(RatingSlider));
-    final gesture =
-        await tester.startGesture(topLeft + const Offset(30, 36));
+    final gesture = await tester.startGesture(topLeft + const Offset(30, 36));
     await tester.pump();
     await gesture.moveBy(const Offset(200, 0));
     await tester.pump();
@@ -106,14 +98,86 @@ void main() {
     final calls = await pumpSlider(tester);
     final topLeft = tester.getTopLeft(find.byType(RatingSlider));
     // 起手后在滑轨内，随后纯垂直大幅滑出 Y 范围（远超 72dp 高度）
-    final gesture =
-        await tester.startGesture(topLeft + const Offset(200, 36));
+    final gesture = await tester.startGesture(topLeft + const Offset(200, 36));
     await tester.pump();
     await gesture.moveBy(const Offset(0, 300));
     await tester.pump();
     await gesture.up();
     await flushTimers(tester);
-    expect(calls, isEmpty,
-        reason: '纯垂直滑出 Y 范围 = 非水平滑轨手势，不得触发评分回调');
+    expect(calls, isEmpty, reason: '纯垂直滑出 Y 范围 = 非水平滑轨手势，不得触发评分回调');
+  });
+  testWidgets('评分即时且连续点按只提交一次，无延迟补发', (tester) async {
+    final calls = await pumpSlider(tester);
+    final target = find.byType(RatingSlider);
+    await tester.tap(target);
+    await tester.tap(target);
+    expect(calls, hasLength(1));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, hasLength(1));
+  });
+  testWidgets('水平拖动后移出轨道再移回仍取消', (tester) async {
+    final calls = await pumpSlider(tester);
+    final start =
+        tester.getTopLeft(find.byType(RatingSlider)) + const Offset(30, 36);
+    final g = await tester.startGesture(start);
+    await g.moveBy(const Offset(140, 0));
+    await tester.pump();
+    await g.moveBy(const Offset(0, 200));
+    await tester.pump();
+    await g.moveBy(const Offset(0, -200));
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(calls, isEmpty);
+  });
+  testWidgets('取消和多指触摸不得提交评分', (tester) async {
+    final calls = await pumpSlider(tester);
+    final point = tester.getCenter(find.byType(RatingSlider));
+    final a = await tester.startGesture(point, pointer: 1);
+    final b = await tester.startGesture(
+      point + const Offset(30, 0),
+      pointer: 2,
+    );
+    await b.up();
+    await a.up();
+    await tester.pumpAndSettle();
+    expect(calls, isEmpty);
+    final c = await tester.startGesture(point);
+    await c.moveBy(const Offset(50, 0));
+    await c.cancel();
+    await tester.pumpAndSettle();
+    expect(calls, isEmpty);
+  });
+  testWidgets('Tap 取消清除预览，但不得抹掉已经开始的横向拖动选档', (tester) async {
+    final calls = await pumpSlider(tester);
+    var gesture = tester.widget<GestureDetector>(
+      find
+          .descendant(
+            of: find.byType(RatingSlider),
+            matching: find.byType(GestureDetector),
+          )
+          .first,
+    );
+    gesture.onTapDown!(TapDownDetails(localPosition: Offset(100, 36)));
+    await tester.pump();
+    gesture.onTapCancel!();
+    await tester.pump();
+    expect(find.text('轻点评分 · 滑动选档，松手确认'), findsOneWidget);
+    expect(calls, isEmpty);
+    gesture = tester.widget<GestureDetector>(
+      find
+          .descendant(
+            of: find.byType(RatingSlider),
+            matching: find.byType(GestureDetector),
+          )
+          .first,
+    );
+    gesture.onHorizontalDragStart!(
+      DragStartDetails(localPosition: const Offset(100, 36)),
+    );
+    gesture.onTapCancel!();
+    gesture.onHorizontalDragEnd!(DragEndDetails());
+    expect(calls, [1]);
+    await tester.pumpAndSettle(const Duration(milliseconds: 500));
   });
 }

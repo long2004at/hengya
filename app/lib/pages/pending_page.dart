@@ -6,6 +6,8 @@ import 'package:shared/hengya_shared.dart';
 
 import '../services/api/api_client.dart';
 import '../widgets/reason_action_dialog.dart';
+import 'rework_request_sheet.dart';
+import 'rework_workbench_page.dart';
 import '../widgets/top_toast.dart';
 
 class PendingPage extends StatefulWidget {
@@ -16,6 +18,7 @@ class PendingPage extends StatefulWidget {
 }
 
 class _PendingPageState extends State<PendingPage> {
+  bool _creatingRework = false;
   static const int _pageSize = 100;
 
   List<FlashCard> _cards = [];
@@ -88,7 +91,10 @@ class _PendingPageState extends State<PendingPage> {
       if (!mounted) return;
       setState(() {
         final known = _cards.map((c) => c.id).toSet();
-        _cards.addAll([for (final c in cards) if (!known.contains(c.id)) c]);
+        _cards.addAll([
+          for (final c in cards)
+            if (!known.contains(c.id)) c,
+        ]);
         _total = total;
         _loadingMore = false;
       });
@@ -131,6 +137,19 @@ class _PendingPageState extends State<PendingPage> {
       appBar: AppBar(
         title: const Text('待审核池'),
         actions: [
+          if (currentBackendMode == BackendMode.local)
+            IconButton(
+              tooltip: '回炉草案与任务',
+              icon: const Icon(Icons.build_circle_outlined),
+              onPressed: () async {
+                await Navigator.of(context, rootNavigator: true).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const ReworkWorkbenchPage(),
+                  ),
+                );
+                if (mounted) _load();
+              },
+            ),
           if (_cards.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(right: 16),
@@ -202,7 +221,28 @@ class _PendingPageState extends State<PendingPage> {
   // 拒绝弹窗（设计稿 03b：六理由 + 自由输入 + 确认拒绝；
   // 理由会登记进回炉队列，次日拆卡 AI 会读到——与回炉弹窗共用同一公共组件）
   // #9：底部面板承载（isScrollControlled + viewInsets 键盘安全，见组件头注释）
-  void _openReject(FlashCard card) {
+  Future<void> _openReject(FlashCard card) async {
+    if (currentBackendMode == BackendMode.local) {
+      if (_creatingRework) return;
+      _creatingRework = true;
+      try {
+        final task = await requestReworkTask(context, card);
+        if (task != null && mounted) {
+          await _load();
+          if (mounted) {
+            await Navigator.of(context, rootNavigator: true).push(
+              MaterialPageRoute<void>(
+                builder: (_) => ReworkWorkbenchPage(taskId: task),
+              ),
+            );
+          }
+          if (mounted) await _load();
+        }
+      } finally {
+        _creatingRework = false;
+      }
+      return;
+    }
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -743,8 +783,7 @@ class _DupCompare extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _pane(context, '这张（新卡）', newCard.front, newCard.back,
-            highlight: true),
+        _pane(context, '这张（新卡）', newCard.front, newCard.back, highlight: true),
         const SizedBox(width: 8),
         oldCard != null
             ? _pane(context, '已有卡', oldCard!.front, oldCard!.back)

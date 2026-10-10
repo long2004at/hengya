@@ -17,7 +17,7 @@ import 'dart:io';
 
 import 'package:hengya/pages/about_page.dart';
 import 'package:hengya/pages/inbox_sheet.dart';
-import 'package:hengya/pages/settings_page.dart';
+import 'package:hengya/pages/corpus_tools_panel.dart';
 import 'package:hengya/pages/subject_picker.dart';
 import 'package:hengya/services/api/api_client.dart';
 import 'package:hengya/services/local/corpus/run_llm.dart'
@@ -33,7 +33,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// TextField），全树 find.byType(TextField) 不再恰好等于编辑层三字段——
 /// 收窄到 BottomSheet 子树，保持本套件既有意图（编辑层三字段驱动）不变。
 Finder aiSheetFields() => find.descendant(
-    of: find.byType(BottomSheet), matching: find.byType(TextField));
+  of: find.byType(BottomSheet),
+  matching: find.byType(TextField),
+);
 
 // ---------------- 假 HttpClient 栈（最小实现 + noSuchMethod 兜底） ----------------
 
@@ -94,9 +96,12 @@ class _FakeHttpClientResponse extends Stream<List<int>>
     Function? onError,
     void Function()? onDone,
     bool? cancelOnError,
-  }) =>
-      Stream.fromIterable([utf8.encode(bodyText)]).listen(onData,
-          onError: onError, onDone: onDone, cancelOnError: cancelOnError);
+  }) => Stream.fromIterable([utf8.encode(bodyText)]).listen(
+    onData,
+    onError: onError,
+    onDone: onDone,
+    cancelOnError: cancelOnError,
+  );
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -185,8 +190,12 @@ class _FakeRouter {
     return _FakeHttpClientRequest(method, url, this);
   }
 
-  HttpClientResponse respond(String method, Uri url,
-      _FakeHttpHeaders headers, List<int> bytes) {
+  HttpClientResponse respond(
+    String method,
+    Uri url,
+    _FakeHttpHeaders headers,
+    List<int> bytes,
+  ) {
     requests.add({
       'method': method,
       'path': url.path,
@@ -262,7 +271,11 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: SingleChildScrollView(child: CorpusToolsPanel())),
+      ),
+    );
     await tester.pumpAndSettle(); // 假路由即答（微任务）→ settle 即得最终 UI
   }
 
@@ -278,8 +291,9 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('404 降级：恒牙聚合页 AI 区块 + 设置页知识库各显示「需服务器 0.3.0+」，不崩溃',
-      (tester) async {
+  testWidgets('404 降级：恒牙聚合页 AI 区块 + 设置页知识库各显示「需服务器 0.3.0+」，不崩溃', (
+    tester,
+  ) async {
     router.all404 = true; // 旧服务器（0.2.0）：新增端点全部 404
     // AI 服务配置已迁入「恒牙」聚合页（AboutPage）
     await pumpAbout(tester);
@@ -290,8 +304,7 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await pumpSettings(tester);
     expect(find.textContaining('需服务器 0.3.0+，暂未部署'), findsOneWidget);
-    expect(find.text('设置'), findsOneWidget);
-    expect(find.text('关于'), findsOneWidget);
+    expect(find.text('导入与建库'), findsOneWidget);
   });
 
   testWidgets('正常态：恒牙聚合页两套 AI 卡片 + 掩码；设置页知识库状态可见', (tester) async {
@@ -318,8 +331,7 @@ void main() {
     expect(find.textContaining('当前 2 个'), findsOneWidget);
   });
 
-  testWidgets('AI 编辑层：apiKey 送进 PUT 请求体 → 保存成功弹提示并关闭',
-      (tester) async {
+  testWidgets('AI 编辑层：apiKey 送进 PUT 请求体 → 保存成功弹提示并关闭', (tester) async {
     await pumpAbout(tester);
     // 打开生卡 LLM 编辑层
     await tester.tap(find.text('生卡 LLM'));
@@ -334,11 +346,14 @@ void main() {
 
     await tester.tap(find.text('保存'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500)); // TopToast 停留(满透明)窗内断言
+    await tester.pump(
+      const Duration(milliseconds: 500),
+    ); // TopToast 停留(满透明)窗内断言
 
     // PUT 请求体三字段：baseUrl/model 预填值 + 明文 key（只进请求体，不落本地）
     final put = router.requests.lastWhere(
-        (r) => r['method'] == 'PUT' && r['path'] == '/api/v1/settings/ai/llm');
+      (r) => r['method'] == 'PUT' && r['path'] == '/api/v1/settings/ai/llm',
+    );
     expect(jsonDecode(put['body'] as String), {
       'baseUrl': 'https://a.cn/v1',
       'model': 'm1',
@@ -375,15 +390,26 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('测试连接'));
     await tester.pumpAndSettle();
-    expect(find.text('连接正常 · 77 ms'), findsOneWidget,
-        reason: '#2：model 在列表 → 维持正常成功提示');
-    expect(find.textContaining('不在服务方模型列表'), findsNothing,
-        reason: '在列表时不得出现警示文案');
-    expect(find.byIcon(Icons.warning_amber_rounded), findsNothing,
-        reason: '在列表时不得出现警示图标');
+    expect(
+      find.text('连接正常 · 77 ms'),
+      findsOneWidget,
+      reason: '#2：model 在列表 → 维持正常成功提示',
+    );
+    expect(
+      find.textContaining('不在服务方模型列表'),
+      findsNothing,
+      reason: '在列表时不得出现警示文案',
+    );
+    expect(
+      find.byIcon(Icons.warning_amber_rounded),
+      findsNothing,
+      reason: '在列表时不得出现警示图标',
+    );
     // 核对请求经注入 seam：入参 = 表单 baseUrl / key（无网络）
-    final post = router.requests.lastWhere((r) =>
-        r['method'] == 'POST' && r['path'] == '/api/v1/settings/ai/llm/test');
+    final post = router.requests.lastWhere(
+      (r) =>
+          r['method'] == 'POST' && r['path'] == '/api/v1/settings/ai/llm/test',
+    );
     expect(jsonDecode(post['body'] as String), {
       'baseUrl': 'https://a.cn/v1',
       'model': 'm1',
@@ -401,16 +427,22 @@ void main() {
     await tester.tap(find.text('测试连接'));
     await tester.pumpAndSettle();
     expect(
-        find.text('连接成功，但 model m1 不在服务方模型列表'), findsOneWidget,
-        reason: '#2：连接成功但 model 不在列表 → 逐字警示文案');
-    expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget,
-        reason: '警示行用橙色警示图标（区别于成功对勾/失败红）');
+      find.text('连接成功，但 model m1 不在服务方模型列表'),
+      findsOneWidget,
+      reason: '#2：连接成功但 model 不在列表 → 逐字警示文案',
+    );
+    expect(
+      find.byIcon(Icons.warning_amber_rounded),
+      findsOneWidget,
+      reason: '警示行用橙色警示图标（区别于成功对勾/失败红）',
+    );
     // 不阻断保存：点保存 → PUT 正常发出 → 成功气泡 + 弹层关闭
     await tester.tap(find.text('保存'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500)); // TopToast 停留窗内
     final put = router.requests.lastWhere(
-        (r) => r['method'] == 'PUT' && r['path'] == '/api/v1/settings/ai/llm');
+      (r) => r['method'] == 'PUT' && r['path'] == '/api/v1/settings/ai/llm',
+    );
     expect(jsonDecode(put['body'] as String), {
       'baseUrl': 'https://a.cn/v1',
       'model': 'm1',
@@ -421,8 +453,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1000)); // 走完气泡生命周期
   });
 
-  testWidgets('重排序编辑层（未配置态）：预填 SiliconFlow 默认端点+模型，保存三字段入 PUT',
-      (tester) async {
+  testWidgets('重排序编辑层（未配置态）：预填 SiliconFlow 默认端点+模型，保存三字段入 PUT', (tester) async {
     router.rerankerCfg = null; // 旧服务器响应缺 reranker 节点 → 未配置态
     await pumpAbout(tester);
     // 卡片空态占位（收窄到重排序卡内部——备用生卡 LLM 未配置时也有「地址：—」）
@@ -457,7 +488,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500)); // TopToast 停留窗内
 
     final put = router.requests.lastWhere(
-        (r) => r['method'] == 'PUT' && r['path'] == '/api/v1/settings/ai/reranker');
+      (r) =>
+          r['method'] == 'PUT' && r['path'] == '/api/v1/settings/ai/reranker',
+    );
     expect(jsonDecode(put['body'] as String), {
       'baseUrl': ApiClient.kRerankerDefaultUrl,
       'model': ApiClient.kRerankerDefaultModel,
@@ -480,8 +513,11 @@ void main() {
     // 同文案出现两处：编辑层内联结果行 + 顶部气泡（reranker 专属 TopToast 反馈）
     expect(find.text('连接正常 · 77 ms'), findsNWidgets(2));
     // POST 请求体：已配置值 + 空 key（空 = 用已存 key）
-    final post = router.requests.lastWhere((r) =>
-        r['method'] == 'POST' && r['path'] == '/api/v1/settings/ai/reranker/test');
+    final post = router.requests.lastWhere(
+      (r) =>
+          r['method'] == 'POST' &&
+          r['path'] == '/api/v1/settings/ai/reranker/test',
+    );
     expect(jsonDecode(post['body'] as String), {
       'baseUrl': 'https://r.cn/v1/rerank',
       'model': 'Qwen/Qwen3-Reranker-8B',
@@ -511,22 +547,23 @@ void main() {
     await tester.pump(const Duration(milliseconds: 2500)); // 走完气泡生命周期
   });
 
-  testWidgets('关键词录入栏：科目拉取失败 → 空态 + 重试提示 + 内联「新建课程」入口',
-      (tester) async {
+  testWidgets('关键词录入栏：科目拉取失败 → 空态 + 重试提示 + 内联「新建课程」入口', (tester) async {
     router.refused = true; // 模拟断网：拉取失败 → 不再回退硬编码清单
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: ElevatedButton(
-              onPressed: () => showInboxSheet(ctx),
-              child: const Text('打开录入栏'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: ElevatedButton(
+                onPressed: () => showInboxSheet(ctx),
+                child: const Text('打开录入栏'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('打开录入栏'));
     await tester.pumpAndSettle();
 
@@ -538,18 +575,20 @@ void main() {
   });
 
   testWidgets('新建课程对话框：名称必填（空名称拦截，不发请求）', (tester) async {
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: ElevatedButton(
-              onPressed: () => showCreateSubjectDialog(ctx),
-              child: const Text('打开新建'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: ElevatedButton(
+                onPressed: () => showCreateSubjectDialog(ctx),
+                child: const Text('打开新建'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('打开新建'));
     await tester.pumpAndSettle();
     expect(find.text('新建课程'), findsOneWidget);
@@ -563,20 +602,22 @@ void main() {
 
   testWidgets('科目选择弹层（课件上传用）：动态列表 + 选中返回', (tester) async {
     SubjectInfo? picked;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: ElevatedButton(
-              onPressed: () async {
-                picked = await showSubjectPickerSheet(ctx, title: '课件归属科目');
-              },
-              child: const Text('选择科目'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: ElevatedButton(
+                onPressed: () async {
+                  picked = await showSubjectPickerSheet(ctx, title: '课件归属科目');
+                },
+                child: const Text('选择科目'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('选择科目'));
     await tester.pumpAndSettle();
 

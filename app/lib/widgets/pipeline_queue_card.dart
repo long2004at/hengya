@@ -259,9 +259,7 @@ class _PipelineQueueCardState extends State<PipelineQueueCard> {
     if (w['ran'] != true) return null;
     final cards = _asInt(w['cards']);
     final imported = _asInt(w['imported']);
-    return cards > 0
-        ? '真题周扫：出卡 $cards 张 · 入库 $imported 张'
-        : '真题周扫：本周无新增真题卡';
+    return cards > 0 ? '真题周扫：出卡 $cards 张 · 入库 $imported 张' : '真题周扫：本周无新增真题卡';
   }
 
   /// ⑦ 重读回炉待重造计数（拉取失败 / null → 保持原值或行不渲染）。
@@ -405,7 +403,8 @@ class _PipelineQueueCardState extends State<PipelineQueueCard> {
     final reworkLabel = f.live
         ? '回炉 ${f.reworkTotal}'
         : '回炉 ${f.reworkTotal}'
-              '${f.reworkDone == null ? '' : ' · 重造完成 ${f.reworkDone}'}';
+              '${(f.reworkDraft ?? 0) > 0 ? ' · 草案待确认 ${f.reworkDraft}' : ''}'
+              '${f.reworkDone == null || ((f.reworkDraft ?? 0) > 0 && f.reworkDone == 0) ? '' : ' · 重造完成 ${f.reworkDone}'}';
     final reworkItems = [
       for (final r in f.rework)
         '· ${r['front'] ?? ''}'
@@ -531,6 +530,7 @@ class _QueueFrame {
     required this.reworkTotal,
     required this.rework,
     this.reworkDone,
+    this.reworkDraft,
     this.elapsedSec = 0,
     this.message = '',
     this.studyLogLine = '',
@@ -597,6 +597,9 @@ class _QueueFrame {
       failed: _bucket(q, 'failed'),
       reworkTotal: _asInt(rework['total']),
       rework: _bucket(rework, 'items'),
+      reworkDraft: counts['reworkDraft'] == null
+          ? null
+          : _asInt(counts['reworkDraft']),
       reworkDone: counts['reworkDone'] == null
           ? null
           : _asInt(counts['reworkDone']),
@@ -624,6 +627,7 @@ class _QueueFrame {
 
   /// 仅终态快照：⑦ 回炉完成条数（counts.reworkDone；live 帧无此值）。
   final int? reworkDone;
+  final int? reworkDraft;
 
   /// 仅终态快照：整轮耗时秒（meta.elapsedSec）。
   final double elapsedSec;

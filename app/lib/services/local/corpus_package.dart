@@ -58,6 +58,7 @@ import 'corpus/progress_db.dart'
 import 'corpus/toc_chapters.dart';
 import 'corpus_build_job.dart' show corpusBuildJobId;
 import 'data_maintenance.dart';
+import 'local_backend.dart';
 import 'db.dart';
 import 'isolate_runner.dart';
 import 'pipeline_runner.dart' show PipelineRunner;
@@ -168,19 +169,19 @@ class CorpusPackageSummary {
   final Map<String, Object?> stats;
 
   Map<String, Object?> toMap() => {
-        'subjects': subjects.length,
-        'chunks': chunks,
-        'outlineEntries': outlineEntries,
-        'tocFiles': tocFiles,
-        'modelName': modelName,
-        'dbModelName': dbModelName,
-        'dim': dim,
-        'schemaVersion': schemaVersion,
-        'appMinVersion': appMinVersion,
-        'builtAt': builtAt,
-        'packageBytes': packageBytes,
-        'stats': stats,
-      };
+    'subjects': subjects.length,
+    'chunks': chunks,
+    'outlineEntries': outlineEntries,
+    'tocFiles': tocFiles,
+    'modelName': modelName,
+    'dbModelName': dbModelName,
+    'dim': dim,
+    'schemaVersion': schemaVersion,
+    'appMinVersion': appMinVersion,
+    'builtAt': builtAt,
+    'packageBytes': packageBytes,
+    'stats': stats,
+  };
 }
 
 /// importPackage 结果摘要。
@@ -216,14 +217,14 @@ class CorpusImportResult {
   final String? modelWarning;
 
   Map<String, Object?> toMap() => {
-        ...summary.toMap(),
-        'backupPath': backupPath,
-        'subjectsAdded': subjectsAdded,
-        'subjectsExisting': subjectsExisting,
-        'progressCreated': progressCreated,
-        'progressSynced': progressSynced,
-        'modelWarning': modelWarning,
-      };
+    ...summary.toMap(),
+    'backupPath': backupPath,
+    'subjectsAdded': subjectsAdded,
+    'subjectsExisting': subjectsExisting,
+    'progressCreated': progressCreated,
+    'progressSynced': progressSynced,
+    'modelWarning': modelWarning,
+  };
 }
 
 /// 后台导入参数；只传路径与版本，不跨 isolate 传数据库连接或回调。
@@ -259,32 +260,32 @@ class PackageImportStageResult {
 }
 
 /// 复用同步导入的目录时间戳格式，避免两条路径的备份命名漂移。
-String _packageTimestamp(DateTime time) => CorpusPackageManager._timestamp(time);
+String _packageTimestamp(DateTime time) =>
+    CorpusPackageManager._timestamp(time);
 
 /// [CorpusPackageSummary.toMap] 的 subjects 是展示计数；wire 必须保留科目种子。
 Map<String, Object?> _summaryToWire(CorpusPackageSummary summary) => {
-      'zipPath': summary.zipPath,
-      ...summary.toMap(),
-      'subjects': <Map<String, Object?>>[
-        for (final subject in summary.subjects)
-          {
-            'id': subject.id,
-            'name': subject.name,
-            'textbook': subject.textbook,
-            'chapters': subject.chapters,
-          },
-      ],
-    };
+  'zipPath': summary.zipPath,
+  ...summary.toMap(),
+  'subjects': <Map<String, Object?>>[
+    for (final subject in summary.subjects)
+      {
+        'id': subject.id,
+        'name': subject.name,
+        'textbook': subject.textbook,
+        'chapters': subject.chapters,
+      },
+  ],
+};
 
 /// 只读校验 worker；不检查流水线占用，也不创建导入备份或替换本机库。
 void validatePackageWorkerEntry(IsolateWorkerBoot boot) {
   isolateWorkerRun(boot, (ctx) async {
     final args = boot.args! as Map<String, Object?>;
     ctx.checkCancelled();
-    ctx.emit(const IsolateProgressEvent(
-      stage: 'validating',
-      message: '正在校验语料包…',
-    ));
+    ctx.emit(
+      const IsolateProgressEvent(stage: 'validating', message: '正在校验语料包…'),
+    );
     final summary = CorpusPackageManager.instance.validatePackage(
       args['zipPath'] as String,
       appVersion: args['appVersion'] as String?,
@@ -308,10 +309,9 @@ void corpusPackageImportWorker(IsolateWorkerBoot boot) {
 
     try {
       ctx.checkCancelled();
-      ctx.emit(const IsolateProgressEvent(
-        stage: 'validating',
-        message: '正在校验语料包…',
-      ));
+      ctx.emit(
+        const IsolateProgressEvent(stage: 'validating', message: '正在校验语料包…'),
+      );
       final summary = mgr.validatePackage(
         req.zipPath,
         appVersion: req.appVersion,
@@ -319,10 +319,12 @@ void corpusPackageImportWorker(IsolateWorkerBoot boot) {
       corpusDir.createSync(recursive: true);
       if (mgr._anyCorpusArtifact(corpusDir)) {
         ctx.checkCancelled();
-        ctx.emit(const IsolateProgressEvent(
-          stage: 'backing-up',
-          message: '正在备份现有语料库…',
-        ));
+        ctx.emit(
+          const IsolateProgressEvent(
+            stage: 'backing-up',
+            message: '正在备份现有语料库…',
+          ),
+        );
         bakDir.createSync(recursive: true);
         // 先记路径：备份中途失败也能把部分清单交回主 isolate。
         backupPath = bakDir.path;
@@ -330,19 +332,17 @@ void corpusPackageImportWorker(IsolateWorkerBoot boot) {
       }
 
       ctx.checkCancelled();
-      ctx.emit(const IsolateProgressEvent(
-        stage: 'extracting',
-        message: '正在解包语料库…',
-      ));
+      ctx.emit(
+        const IsolateProgressEvent(stage: 'extracting', message: '正在解包语料库…'),
+      );
       if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
       tmpDir.createSync(recursive: true);
       mgr._extractContent(req.zipPath, tmpDir);
 
       ctx.checkCancelled();
-      ctx.emit(const IsolateProgressEvent(
-        stage: 'verifying',
-        message: '正在校验解包后的语料库…',
-      ));
+      ctx.emit(
+        const IsolateProgressEvent(stage: 'verifying', message: '正在校验解包后的语料库…'),
+      );
       mgr._verifyExtractedDb(
         '${tmpDir.path}/${CorpusPackageManager._corpusDbName}',
       );
@@ -362,8 +362,8 @@ void corpusPackageImportWorker(IsolateWorkerBoot boot) {
         error: ctx.cancelRequested
             ? '语料包导入已取消'
             : e is CorpusPackageException
-                ? e.message
-                : '导入准备失败：$e',
+            ? e.message
+            : '导入准备失败：$e',
       );
     }
   });
@@ -382,6 +382,8 @@ class CorpusPackageManager {
 
   static bool _defaultPipelineBusy() =>
       DataMaintenance.busy ||
+      LocalBackend.instance.corpusLibraryRunning ||
+      LocalBackend.instance.corpusDeletePending ||
       PipelineRunner.instance.running ||
       IsolateRunner.instance.isRunning(corpusBuildJobId);
 
@@ -419,10 +421,7 @@ class CorpusPackageManager {
       final handle = await IsolateRunner.instance.start<Map<String, Object?>>(
         jobId: _validateJobId,
         workerEntry: validatePackageWorkerEntry,
-        args: <String, Object?>{
-          'zipPath': zipPath,
-          'appVersion': appVersion,
-        },
+        args: <String, Object?>{'zipPath': zipPath, 'appVersion': appVersion},
       );
       final subscription = onProgress == null
           ? null
@@ -434,9 +433,11 @@ class CorpusPackageManager {
       }
     } on IsolateJobException catch (e) {
       const prefix = 'CorpusPackageException: ';
-      throw CorpusPackageException(e.message.startsWith(prefix)
-          ? e.message.substring(prefix.length)
-          : e.message);
+      throw CorpusPackageException(
+        e.message.startsWith(prefix)
+            ? e.message.substring(prefix.length)
+            : e.message,
+      );
     } catch (e) {
       throw CorpusPackageException('语料包校验失败：$e');
     }
@@ -444,7 +445,7 @@ class CorpusPackageManager {
 
   /// 只读校验语料包并返回摘要（导入预览用）。不满足契约抛
   /// [CorpusPackageException]（文件不存在/不是 zip/缺件/版本守卫/含主库）。
-CorpusPackageSummary validatePackage(String zipPath, {String? appVersion}) {
+  CorpusPackageSummary validatePackage(String zipPath, {String? appVersion}) {
     final f = File(zipPath);
     if (!f.existsSync()) {
       throw CorpusPackageException('文件不存在：$zipPath');
@@ -493,7 +494,7 @@ CorpusPackageSummary validatePackage(String zipPath, {String? appVersion}) {
     if (pkgEntry == null) {
       throw CorpusPackageException('包内缺 package.json');
     }
-final Map<String, Object?> pkg;
+    final Map<String, Object?> pkg;
     try {
       final obj = jsonDecode(utf8.decode(_readEntryBytes(pkgEntry)));
       if (obj is! Map) throw const FormatException('顶层非对象');
@@ -506,14 +507,14 @@ final Map<String, Object?> pkg;
     final sv = pkg['schemaVersion'];
     if (sv is! num || sv.toInt() != kPackageSchemaVersion) {
       throw CorpusPackageException(
-          '语料包格式版本不受支持（schemaVersion=$sv，本 App 支持 '
-          '$kPackageSchemaVersion）——请升级 App 后重试');
+        '语料包格式版本不受支持（schemaVersion=$sv，本 App 支持 '
+        '$kPackageSchemaVersion）——请升级 App 后重试',
+      );
     }
     final minV = (pkg['appMinVersion'] as String?) ?? '';
     final appV = (appVersion ?? '').trim();
     if (minV.isNotEmpty && appV.isNotEmpty && _versionBelow(appV, minV)) {
-      throw CorpusPackageException(
-          'App 版本过低（语料包要求 ≥ $minV，当前 $appV），请先升级 App');
+      throw CorpusPackageException('App 版本过低（语料包要求 ≥ $minV，当前 $appV），请先升级 App');
     }
 
     // 模型名 / 维度 / 科目种子
@@ -541,18 +542,21 @@ final Map<String, Object?> pkg;
       if (!seen.add(id)) {
         throw CorpusPackageException('package.json 科目短码重复：$id');
       }
-      subjects.add(PackageSubjectSeed(
-        id: id,
-        name: name,
-        textbook: (s['textbook'] as String?)?.trim(),
-        chapters: (s['chapters'] as num?)?.toInt() ?? 0,
-      ));
+      subjects.add(
+        PackageSubjectSeed(
+          id: id,
+          name: name,
+          textbook: (s['textbook'] as String?)?.trim(),
+          chapters: (s['chapters'] as num?)?.toInt() ?? 0,
+        ),
+      );
     }
 
-// corpus.db 落临时文件 → 只读校验（表齐全 + meta 可读 + 计数）
+    // corpus.db 落临时文件 → 只读校验（表齐全 + meta 可读 + 计数）
     // 流式写出：绝不 e.content 整文件进内存（192MB 的库一次展平 = OOM）。
-    final dbEntry = arc.files
-        .firstWhere((e) => _normalizeEntryName(e.name) == '$prefix$_corpusDbName');
+    final dbEntry = arc.files.firstWhere(
+      (e) => _normalizeEntryName(e.name) == '$prefix$_corpusDbName',
+    );
     final tmpDir = Directory.systemTemp.createTempSync('hengya-pkg-validate_');
     int chunks = 0, outlineEntries = 0;
     String? dbModelName;
@@ -563,23 +567,28 @@ final Map<String, Object?> pkg;
       try {
         db = sqlite3.open(tmpDb.path, mode: OpenMode.readOnly);
         final tables = {
-          for (final r in db
-              .select("SELECT name FROM sqlite_master WHERE type='table'"))
+          for (final r in db.select(
+            "SELECT name FROM sqlite_master WHERE type='table'",
+          ))
             r['name'] as String,
         };
         if (!tables.contains('chunks') || !tables.contains('meta')) {
-          throw CorpusPackageException(
-              'corpus.db 不是恒牙齿料库（缺 chunks/meta 表）');
+          throw CorpusPackageException('corpus.db 不是恒牙齿料库（缺 chunks/meta 表）');
         }
-        chunks = db.select('SELECT COUNT(*) AS n FROM chunks').first['n'] as int;
+        chunks =
+            db.select('SELECT COUNT(*) AS n FROM chunks').first['n'] as int;
         if (tables.contains('outline_entries')) {
           outlineEntries =
               db.select('SELECT COUNT(*) AS n FROM outline_entries').first['n']
                   as int;
         }
-        dbModelName = (db
-                .select("SELECT value FROM meta WHERE key = 'embedding_model'")
-                .firstOrNull?['value']) as String?;
+        dbModelName =
+            (db
+                    .select(
+                      "SELECT value FROM meta WHERE key = 'embedding_model'",
+                    )
+                    .firstOrNull?['value'])
+                as String?;
       } on CorpusPackageException {
         rethrow;
       } on SqliteException catch (e) {
@@ -597,11 +606,14 @@ final Map<String, Object?> pkg;
         dbModelName.isNotEmpty &&
         dbModelName.toLowerCase() != modelName.toLowerCase()) {
       throw CorpusPackageException(
-          '包自述模型「$modelName」与库内 meta「$dbModelName」不一致（包损坏）');
+        '包自述模型「$modelName」与库内 meta「$dbModelName」不一致（包损坏）',
+      );
     }
 
     final tocFiles = names
-        .where((n) => n.startsWith('$prefix$_tocDirName/') && n.endsWith('.json'))
+        .where(
+          (n) => n.startsWith('$prefix$_tocDirName/') && n.endsWith('.json'),
+        )
         .length;
 
     return CorpusPackageSummary(
@@ -615,7 +627,7 @@ final Map<String, Object?> pkg;
       chunks: chunks,
       outlineEntries: outlineEntries,
       tocFiles: tocFiles,
-packageBytes: f.lengthSync(),
+      packageBytes: f.lengthSync(),
       dbModelName: dbModelName,
       stats: pkg['stats'] is Map
           ? Map<String, Object?>.from(pkg['stats'] as Map)
@@ -635,12 +647,10 @@ packageBytes: f.lengthSync(),
     Future<void> Function()? onBeforeSwap,
   }) async {
     if (pipelineBusyCheck()) {
-      throw CorpusPackageException(
-          '拆卡流水线或建库任务正在运行，请等它结束后稍后再试');
+      throw CorpusPackageException('拆卡流水线或建库任务正在运行，请等它结束后稍后再试');
     }
     final summary = validatePackage(zipPath, appVersion: appVersion); // 再验一次
-    final corpusDir = Directory('$dataDir/corpus')
-      ..createSync(recursive: true);
+    final corpusDir = Directory('$dataDir/corpus')..createSync(recursive: true);
     final ts = _timestamp(DateTime.now());
 
     // ① 备份现有语料库（corpus.db 及 -wal/-shm、toc/、manifest）
@@ -665,8 +675,7 @@ packageBytes: f.lengthSync(),
       // 删旧 → rename 新到位（同卷 rename，DataManager 原子模式）
       _removeCorpusArtifacts(corpusDir);
       for (final item in tmpDir.listSync()) {
-        item.renameSync(
-            '${corpusDir.path}/${_basename(item.path)}');
+        item.renameSync('${corpusDir.path}/${_basename(item.path)}');
       }
       debugHook?.call('after-swap');
     } catch (e) {
@@ -678,7 +687,8 @@ packageBytes: f.lengthSync(),
         }
       } catch (_) {} // 回滚尽力而为；原异常优先上报
       throw CorpusPackageException(
-          e is CorpusPackageException ? e.message : '导入失败（已回滚原库）：$e');
+        e is CorpusPackageException ? e.message : '导入失败（已回滚原库）：$e',
+      );
     } finally {
       try {
         if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
@@ -703,10 +713,12 @@ packageBytes: f.lengthSync(),
           cur.toLowerCase() != summary.modelName.toLowerCase()) {
         modelWarning =
             '本机向量模型「$cur」与语料包「${summary.modelName}」不一致，'
-                '向量检索路将不可用（词面检索不受影响；可在 AI 服务配置中改一致）';
+            '向量检索路将不可用（词面检索不受影响；可在 AI 服务配置中改一致）';
       }
-final (progressCreated, progressSynced) =
-          _syncProgress(corpusDir.path, summary.subjects);
+      final (progressCreated, progressSynced) = _syncProgress(
+        corpusDir.path,
+        summary.subjects,
+      );
       // ④ 包 deck 豁免剪除（2026-09-11 bug 修复）：包库 deck_state.source
       // 原为 'tree'（建包时写入），而 ingestCorpus 的 pruneAbsent 恰好只剪
       // source='tree' 且不在本机 incoming 树的 deck——导入后再建库会把包内
@@ -740,8 +752,7 @@ final (progressCreated, progressSynced) =
     void Function(String stage, String message)? onProgress,
   }) async {
     if (pipelineBusyCheck()) {
-      throw CorpusPackageException(
-          '拆卡流水线或建库任务正在运行，请等它结束后稍后再试');
+      throw CorpusPackageException('拆卡流水线或建库任务正在运行，请等它结束后稍后再试');
     }
     if (_importBgRunning || IsolateRunner.instance.isRunning(_importJobId)) {
       throw CorpusPackageException('语料包正在导入，请稍后再试');
@@ -754,15 +765,16 @@ final (progressCreated, progressSynced) =
       late final CorpusPackageSummary summary;
       var swapStarted = false;
       try {
-        final handle = await IsolateRunner.instance.start<PackageImportStageResult>(
-          jobId: _importJobId,
-          workerEntry: corpusPackageImportWorker,
-          args: PackageImportJobRequest(
-            dataDir: dataDir,
-            zipPath: zipPath,
-            appVersion: appVersion,
-          ),
-        );
+        final handle = await IsolateRunner.instance
+            .start<PackageImportStageResult>(
+              jobId: _importJobId,
+              workerEntry: corpusPackageImportWorker,
+              args: PackageImportJobRequest(
+                dataDir: dataDir,
+                zipPath: zipPath,
+                appVersion: appVersion,
+              ),
+            );
         final subscription = onProgress == null
             ? null
             : handle.progress.listen((e) => onProgress(e.stage, e.message));
@@ -794,9 +806,11 @@ final (progressCreated, progressSynced) =
             _restoreBackup(Directory(backupPath), corpusDir, staged!.backed);
           }
         } catch (_) {} // 回滚尽力而为；保留原异常，备份不删除。
-        throw CorpusPackageException(e is CorpusPackageException
-            ? e.message
-            : '导入失败（已回滚原库）：${e is IsolateJobException ? e.message : e}');
+        throw CorpusPackageException(
+          e is CorpusPackageException
+              ? e.message
+              : '导入失败（已回滚原库）：${e is IsolateJobException ? e.message : e}',
+        );
       } finally {
         final tmpDirPath = staged?.tmpDirPath;
         if (tmpDirPath != null) {
@@ -827,8 +841,10 @@ final (progressCreated, progressSynced) =
               '本机向量模型「$cur」与语料包「${summary.modelName}」不一致，'
               '向量检索路将不可用（词面检索不受影响；可在 AI 服务配置中改一致）';
         }
-        final (progressCreated, progressSynced) =
-            _syncProgress(corpusDir.path, summary.subjects);
+        final (progressCreated, progressSynced) = _syncProgress(
+          corpusDir.path,
+          summary.subjects,
+        );
         _markPackageDecks(corpusDir.path);
         db.bumpDataVersion();
         return CorpusImportResult(
@@ -945,10 +961,11 @@ final (progressCreated, progressSynced) =
       }
       // 已有条目 → 仅同步 textbook/chapters（其余字段分毫不动；chapters
       // 与建库端同源走 effectiveTocChapters——旧库垃圾章列表借此升级）
-      final newTextbook =
-          ((sidecar?['textbook'] as String?) ?? s.textbook)?.trim();
-      final List<Map<String, Object?>>? newChapters0 =
-          sidecar == null ? null : effectiveTocChapters(sidecar);
+      final newTextbook = ((sidecar?['textbook'] as String?) ?? s.textbook)
+          ?.trim();
+      final List<Map<String, Object?>>? newChapters0 = sidecar == null
+          ? null
+          : effectiveTocChapters(sidecar);
       var changed = false;
       if (newTextbook != null &&
           newTextbook.isNotEmpty &&
@@ -971,8 +988,9 @@ final (progressCreated, progressSynced) =
             if (ch['no'] is int) ch['no'] as int,
         };
         final maxNo = nos.isEmpty ? 0 : nos.reduce((a, b) => a > b ? a : b);
-        final lt =
-            e0['learned_through'] is int ? e0['learned_through'] as int : 0;
+        final lt = e0['learned_through'] is int
+            ? e0['learned_through'] as int
+            : 0;
         if (lt > maxNo) {
           e0['learned_through'] = maxNo;
         }
@@ -1034,7 +1052,10 @@ final (progressCreated, progressSynced) =
 
   /// 备份清单（相对名）：corpus.db、-wal/-shm、extract_manifest.json、toc/**。
   void _backupArtifacts(
-      Directory corpusDir, Directory bakDir, List<String> backed) {
+    Directory corpusDir,
+    Directory bakDir,
+    List<String> backed,
+  ) {
     void backupFile(String rel) {
       final src = File('${corpusDir.path}/$rel');
       if (src.existsSync()) {
@@ -1058,7 +1079,7 @@ final (progressCreated, progressSynced) =
         backed.add(rel);
       }
     }
-}
+  }
 
   /// 包库 deck 豁免标记（2026-09-11 bug 修复）：把 corpus.db 的
   /// deck_state.source 从 'tree' 改为 'package'。原因：ingestCorpus 的
@@ -1091,7 +1112,8 @@ final (progressCreated, progressSynced) =
       final p = '${corpusDir.path}/$rel';
       if (FileSystemEntity.typeSync(p) == FileSystemEntityType.directory) {
         Directory(p).deleteSync(recursive: true);
-      } else if (FileSystemEntity.typeSync(p) != FileSystemEntityType.notFound) {
+      } else if (FileSystemEntity.typeSync(p) !=
+          FileSystemEntityType.notFound) {
         File(p).deleteSync();
       }
     }
@@ -1105,7 +1127,11 @@ final (progressCreated, progressSynced) =
   }
 
   /// 回滚：备份件原样拷回 corpusDir（备份含 toc/** 的相对层级）。
-  void _restoreBackup(Directory bakDir, Directory corpusDir, List<String> backed) {
+  void _restoreBackup(
+    Directory bakDir,
+    Directory corpusDir,
+    List<String> backed,
+  ) {
     for (final rel in backed) {
       final src = File('${bakDir.path}/$rel');
       final dest = File('${corpusDir.path}/$rel');
@@ -1132,7 +1158,7 @@ final (progressCreated, progressSynced) =
   /// 节点②若整目录打包会带上）一概忽略：progress.json 是手机侧「只补不改」
   /// 数据绝不随包覆盖；incoming/ 是手机自有上传队列；chunks.jsonl 为建库
   /// 中间产物。package.json 只作元数据不落盘。
-void _extractContent(String zipPath, Directory outDir) {
+  void _extractContent(String zipPath, Directory outDir) {
     // 资源边界常量（zip bomb 防护，对齐 full_backup.dart 的防护策略）
     const maxFileBytes = 2 * 1024 * 1024 * 1024; // 单文件 2GB
     const maxTotalBytes = 8 * 1024 * 1024 * 1024; // 总计 8GB
@@ -1186,21 +1212,23 @@ void _extractContent(String zipPath, Directory outDir) {
       final written = dest.lengthSync();
       if (written > maxFileBytes) {
         throw CorpusPackageException(
-            '单文件解压后超限（$rel: ${written ~/ (1024 * 1024)} MB，上限 2 GB）');
+          '单文件解压后超限（$rel: ${written ~/ (1024 * 1024)} MB，上限 2 GB）',
+        );
       }
       totalBytes += written;
       if (totalBytes > maxTotalBytes) {
         throw CorpusPackageException(
-            '解压总大小超限（${totalBytes ~/ (1024 * 1024)} MB，上限 8 GB）');
+          '解压总大小超限（${totalBytes ~/ (1024 * 1024)} MB，上限 8 GB）',
+        );
       }
     }
   }
 
-/// 流式把 zip 条目写到目标文件：仅当条目 content 已在内存时才走
+  /// 流式把 zip 条目写到目标文件：仅当条目 content 已在内存时才走
   /// 快速路径（测试用小 zip），否则逐块读流落盘（生产大包）。
   /// [ArchiveFile.getContent] 返回懒加载解码流，写盘峰值内存 ≈
   /// 单块缓冲（1MB），与文件大小无关。
-static void _streamEntryToFile(ArchiveFile e, String path) {
+  static void _streamEntryToFile(ArchiveFile e, String path) {
     final out = File(path).openSync(mode: FileMode.write);
     try {
       final stream = e.getContent();
@@ -1208,7 +1236,7 @@ static void _streamEntryToFile(ArchiveFile e, String path) {
         out.closeSync();
         throw CorpusPackageException('zip 条目不可读：${e.name}');
       }
-// 1MB 块缓冲：readBytes 按可用长度自动截断，EOF 返回空流。
+      // 1MB 块缓冲：readBytes 按可用长度自动截断，EOF 返回空流。
       // 峰值内存 ≈ 单块大小，与文件大小无关。
       while (true) {
         final buf = stream.readBytes(1 << 20);
@@ -1226,7 +1254,7 @@ static void _streamEntryToFile(ArchiveFile e, String path) {
     if (stream == null) {
       throw CorpusPackageException('zip 条目不可读：${e.name}');
     }
-final out = BytesBuilder(copy: false);
+    final out = BytesBuilder(copy: false);
     while (true) {
       final buf = stream.readBytes(1 << 20);
       if (buf.length == 0) break;
@@ -1276,7 +1304,7 @@ final out = BytesBuilder(copy: false);
     return out;
   }
 
-/// 语义化版本下界：a < b（'1.8.0+16' 的 +build 段忽略；非数字段按 0；
+  /// 语义化版本下界：a < b（'1.8.0+16' 的 +build 段忽略；非数字段按 0；
   /// 任一不可解析 → false 不拦）。appMinVersion 形如 '1.8.0'。
   ///
   /// 语义方向兼容：主版本号相差恰为 **1**（如 0.x 公开版 vs 1.x 内测版）
