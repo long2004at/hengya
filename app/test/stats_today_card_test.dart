@@ -227,7 +227,9 @@ void main() {
         child: MaterialApp.router(routerConfig: _testRouter()),
       ),
     );
-    await tester.pumpAndSettle();
+    // 今日卡进度条是常驻粒子动画（不可 pumpAndSettle），用固定 pump 等拉取收口。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
     });
@@ -263,12 +265,32 @@ void main() {
     expect(find.text('今日已完成 50/50 ✓'), findsOneWidget);
   });
 
-  testWidgets('点击今日卡 → push /review/today（今日复习会话页）', (tester) async {
+  testWidgets('今日卡不可点击：无 onTap 无 chevron，tap 不跳 /review/today（入口收敛首页 CTA）', (
+    tester,
+  ) async {
     await pumpPage(tester);
-    await tester.tap(find.byKey(const ValueKey('stats-today-card')));
-    await tester.pumpAndSettle();
-    expect(find.byType(TodayReviewPage), findsOneWidget,
-        reason: '跳转 /review/today（已完成态进入也是完成/加练视图）');
+    // 无 chevron 入口暗示、无 InkWell 手势层（chevron 断言限定今日卡内，
+    // 页面底部设置入口的 chevron 不受影响）
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('stats-today-card')),
+        matching: find.byIcon(Icons.chevron_right_rounded),
+      ),
+      findsNothing,
+      reason: '统计页今日卡不再呈现为可点击控件',
+    );
+    final tapTargets = find.descendant(
+      of: find.byKey(const ValueKey('stats-today-card')),
+      matching: find.byWidgetPredicate(
+        (w) => w is InkWell || w is InkResponse,
+      ),
+    );
+    expect(tapTargets, findsNothing, reason: '整卡不含任何手势控件');
+    await tester.tap(find.byKey(const ValueKey('stats-today-card')),
+        warnIfMissed: false);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(TodayReviewPage), findsNothing,
+        reason: '点击无跳转——开始/继续复习入口收敛在首页大 CTA');
   });
 
   testWidgets('remote 无 /stats/today（404）：今日卡不渲染，其余区块照常不崩', (tester) async {

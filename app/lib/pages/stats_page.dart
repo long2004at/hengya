@@ -6,8 +6,10 @@
 // remainingToday，随每张评分即时变化，不走离线缓存），五路历史统计是「历史回顾口径」
 // （streak/热力图/保留率/到期预测，可离线回退旧帧）。两者同屏并存、各司其职：
 // 今日任务看今日卡，历史趋势看下方各卡，任何数字不得互相换算或混用。
+import 'dart:math' as math;
+import 'dart:ui' show lerpDouble;
+
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:shared/hengya_shared.dart';
 
 import '../services/api/api_client.dart';
@@ -499,12 +501,12 @@ class _SettingsEntry extends StatelessWidget {
 /// 照抄 TodayProgress），禁止用热力图当天格或 forecast 今天柱另算 done——
 /// 热力图是历史回顾口径（断网时还会回退缓存旧帧），today 是实时任务口径
 /// （随每张评分即时变化），同一天数值同源但语义与时效不同，并存不混用。
-/// 三态措辞与首页大 CTA / 今日复习会话同一套基线：
+/// 三态措辞（纯状态播报，无引导动作）：
 ///   未开始（done==0 且未达目标）「开始今日复习 · 还剩 N 张」
 ///   进行中（0 < done < goal）  「继续今日复习 · M/目标 K」
 ///   已完成（done >= goal）      「今日已完成 M/K ✓」
-/// 整卡可点：context.push('/review/today')——已完成态进入也是完成/加练视图，
-/// 由 TodayReviewPage 按 remainingToday==0 自行渲染，统计页不重复判定。
+/// 整卡**不可点**：开始/继续复习的入口统一收敛在首页大 CTA（home_today_cta.dart），
+/// 本卡降级为纯进度展示，避免双入口功能重复；「还剩 N 张」文案保留为信息播报。
 /// remote 老服务器无 /stats/today（404）时外层不渲染本卡，不影响其余区块。
 class _TodayCard extends StatelessWidget {
   const _TodayCard({required this.progress});
@@ -526,75 +528,248 @@ class _TodayCard extends StatelessWidget {
       key: const ValueKey('stats-today-card'),
       elevation: 0,
       color: scheme.primaryContainer,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => context.push('/review/today'),
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    Icons.flag_outlined,
-                    size: 20,
-                    color: scheme.onPrimaryContainer,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '今日复习',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color: scheme.onPrimaryContainer,
-                    ),
-                  ),
-                  const Spacer(),
-                  Text(
-                    progress.display,
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w800,
-                      color: scheme.onPrimaryContainer,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: goal <= 0 ? 0.0 : (done / goal).clamp(0.0, 1.0),
-                  minHeight: 8,
-                  backgroundColor: scheme.surfaceContainerHighest,
-                  valueColor: AlwaysStoppedAnimation<Color>(scheme.primary),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.flag_outlined,
+                  size: 20,
+                  color: scheme.onPrimaryContainer,
                 ),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      statusText,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: scheme.onPrimaryContainer,
-                      ),
-                    ),
-                  ),
-                  Icon(
-                    Icons.chevron_right_rounded,
-                    size: 20,
+                const SizedBox(width: 8),
+                Text(
+                  '今日复习',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
                     color: scheme.onPrimaryContainer,
                   ),
-                ],
-              ),
-            ],
-          ),
+                ),
+                const Spacer(),
+                Text(
+                  progress.display,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: scheme.onPrimaryContainer,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _RainbowProgressBar(
+              value: goal <= 0 ? 0.0 : (done / goal).clamp(0.0, 1.0),
+              trackColor: scheme.surfaceContainerHighest,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              statusText,
+              style: TextStyle(fontSize: 13, color: scheme.onPrimaryContainer),
+            ),
+          ],
         ),
       ),
     );
   }
+}
+
+/// 今日卡专用动态进度条：类彩虹色「粒子光线」沿已填充段持续流动。
+///
+/// 效果强度与进度**反向**挂钩——进度越低越急切剧烈（督促开工），接近终点
+/// 越平缓舒缓（从容收尾）：
+///   粒子数量     = lerp(14, 4, p)     颗
+///   粒子大小     = lerp(3.5, 1.5, p)  倍条高
+///   流速         = lerp(0.55, 0.18, p) 周期/秒
+///   抖动幅度     = lerp(0.42, 0.12, p) ×条高
+/// 进度为零时不出粒子，但在轨道上呈现可辨识的空槽形态（内凹描边 + 微呼吸
+/// 的斑马纹理），一眼可辨「这是进度条」，不会被误读为灰色分隔线。
+///
+/// 实现注记：单个 AnimationController 驱动全部动画，CustomPainter 每帧重绘
+/// （粒子仅 4~14 颗 + 斑马线相位，无 saveLayer/shader 编译，开销可控）。
+class _RainbowProgressBar extends StatefulWidget {
+  const _RainbowProgressBar({required this.value, required this.trackColor});
+
+  /// 进度 0..1；null 或超界一律按 0 处理（与原 LinearProgressIndicator 语义对齐）。
+  final double value;
+  final Color trackColor;
+
+  @override
+  State<_RainbowProgressBar> createState() => _RainbowProgressBarState();
+}
+
+class _RainbowProgressBarState extends State<_RainbowProgressBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  double? _lastP;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: _cycleFor(widget.value.clamp(0.0, 1.0)),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 无障碍/测试静帧（MediaQuery.disableAnimations，如 course_flow_ui_test
+    // 的 stillFrame 包装）：粒子光线静止在初始相位，不出动态。
+    final still = MediaQuery.disableAnimationsOf(context);
+    if (still && _controller.isAnimating) _controller.stop();
+    if (!still && !_controller.isAnimating) _controller.repeat();
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        // 进度变化（评分后刷新）时仅调整流速，不重置动画相位。
+        final p = widget.value.clamp(0.0, 1.0);
+        if (_lastP != p) {
+          _lastP = p;
+          _controller.duration = _cycleFor(p);
+        }
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: SizedBox(
+            height: 12,
+            width: double.infinity,
+            child: CustomPaint(
+              painter: _RainbowProgressPainter(
+                progress: p,
+                trackColor: widget.trackColor,
+                phase: still ? 0.0 : _controller.value,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// 流动周期随进度反向插值：p=0 → 1.2s（急切），p=1 → 4.0s（舒缓）。
+  Duration _cycleFor(double p) => Duration(
+    milliseconds: lerpDouble(1200, 4000, Curves.easeOut.transform(p))!.round(),
+  );
+}
+
+class _RainbowProgressPainter extends CustomPainter {
+  _RainbowProgressPainter({
+    required this.progress,
+    required this.trackColor,
+    required this.phase,
+  });
+
+  final double progress;
+  final Color trackColor;
+  final double phase;
+
+  // 类彩虹色谱：沿条长循环取色，红→橙→黄→绿→蓝→紫（HSL 色相环）。
+  static Color _rainbow(double t) {
+    final hsl = HSLColor.fromAHSL(1, (t % 1) * 360, 0.85, 0.6);
+    return hsl.toColor();
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const barRadius = Radius.circular(6);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Offset.zero & size, barRadius),
+      Paint()..color = trackColor,
+    );
+
+    final w = size.width;
+    final h = size.height;
+    final filledW = w * progress;
+
+    if (progress <= 0) {
+      _paintEmptySlot(canvas, size);
+      return;
+    }
+
+    // 已填充段：彩虹渐变底 + 沿途流动的粒子光线。
+    canvas.clipRRect(
+      RRect.fromRectAndRadius(Offset.zero & Size(filledW, h), barRadius),
+    );
+    final fillRect = Rect.fromLTWH(0, 0, filledW, h);
+    final gradient = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          _rainbow(0.00),
+          _rainbow(0.17),
+          _rainbow(0.33),
+          _rainbow(0.50),
+          _rainbow(0.67),
+          _rainbow(0.83),
+          _rainbow(1.00),
+        ],
+      ).createShader(fillRect);
+    canvas.drawRect(fillRect, gradient);
+
+    // 粒子光线：数量/大小/速度/抖动随进度反向挂钩（低进度急切剧烈）。
+    final count = lerpDouble(14, 4, progress)!.round();
+    final radiusBase = lerpDouble(3.5, 1.5, progress)! * h / 2;
+    final jitter = lerpDouble(0.42, 0.12, progress)! * h;
+    for (var i = 0; i < count; i++) {
+      final seed = i / count;
+      final t = (phase + seed) % 1;
+      final x = t * (w + radiusBase * 4) - radiusBase * 2;
+      // 纵向正弦抖动：低进度高频大幅（急切），接近终点趋于平缓。
+      final sway =
+          math.sin((t * math.pi * 2 + seed * math.pi)) * jitter *
+          ((i.isOdd) ? -1 : 1);
+      final y = h / 2 + sway;
+      final color = _rainbow(t * 2 + seed);
+      final glow = Paint()
+        ..color = color.withValues(alpha: 0.35)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+      canvas.drawCircle(Offset(x, y), radiusBase * 1.8, glow);
+      canvas.drawCircle(
+        Offset(x, y),
+        radiusBase,
+        Paint()..color = Colors.white.withValues(alpha: 0.9),
+      );
+    }
+  }
+
+  /// 零进度空槽：轨道上叠加微呼吸明暗斑马纹 + 内描边，可辨「进度条空态」。
+  void _paintEmptySlot(Canvas canvas, Size size) {
+    final breathe = 0.5 + 0.5 * (0.5 + 0.5 * math.sin(phase * 2 * math.pi));
+    final stripe = Paint()..color = Colors.black.withValues(alpha: 0.10 + 0.08 * breathe);
+    const stripeW = 6.0;
+    for (double x = -stripeW; x < size.width + stripeW; x += stripeW * 2) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, 1.5, stripeW, size.height - 3),
+          const Radius.circular(3),
+        ),
+        stripe,
+      );
+    }
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(0.75, 0.75, size.width - 1.5, size.height - 1.5),
+        const Radius.circular(5),
+      ),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..color = Colors.black.withValues(alpha: 0.18),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_RainbowProgressPainter oldDelegate) =>
+      oldDelegate.progress != progress ||
+      oldDelegate.phase != phase ||
+      oldDelegate.trackColor != trackColor;
 }
 
 /// 头部 streak 卡（参考设计稿：大数字 + 火焰）
