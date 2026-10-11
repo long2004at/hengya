@@ -98,8 +98,10 @@ Future<void> _mainImpl() async {
       ),
     );
   }
-  // 每日提醒：按已存设置幂等重注册（开机自启后通知权限就绪场景）
+  // 每日提醒：按已存设置幂等重注册（开机自启后通知权限就绪场景）；
+  // Android 13+ 首次启动时顺带主动请求通知权限（每版本最多问一次）
   final s = await DailyReminder.instance.loadSettings();
+  await DailyReminder.instance.ensureNotificationsReady();
   await DailyReminder.instance.apply(
     enabled: s.enabled,
     hour: s.hour,
