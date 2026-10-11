@@ -1,16 +1,21 @@
-// 恒牙（hengya）· #13 统计页「卡生成队列」面板 + #4 待处理清单课程名 测试
+// 恒牙（hengya）· #13 「卡生成队列」面板 + #4 待处理清单课程名 测试
 // ============================================================================
+// 2026-10-11 面板迁入回炉工作台 + 折叠重构后同步更新：
+//   · 面板不再挂统计页——统计页用例改为断言面板不出现；
+//   · 直接挂 PipelineQueueCard 的用例改走「回炉工作台壳」pumpCard
+//    （Card > ExpansionTile「卡生成流水线」> PipelineQueueCard）；
+//   · 分组条目默认折叠——计数行用例保留，展开条目的用例先 tap 展开。
 //
 // 覆盖面：
-//   1. 统计页空态：无 last_run.json、无运行 → 面板在位 + 引导文案
-//   2. 非 local 模式：整面板不渲染（流水线为端上 local-first 链路）
+//   1. 统计页空态：无 last_run.json、无运行 → 面板不再出现在统计页
+//   2. 非 local 模式：统计页与回炉工作台均不渲染面板
 //   3. last_run.json 兜底：真实生产源 + 真实文件 → 终态快照全要素渲染
 //      （上次运行徽标 / 触发来源 scheduled=定时 22:55 / 分组计数 / 回炉条目 /
 //       重造完成数 / 汇总行）
 //   4. 实时流（fake 源）：启动过渡态 → 队列帧分组计数与条目 + 触发来源 +
 //      事件人读文案 → 失败帧 → 完成切换终态
 //   5. 完成事件先于运行位释放：短轮询等收口后切终态（_awaitTerminal 轮询路径）
-//   6. rev 刷新信号：自增 → 面板重读快照（统计页 pull-to-refresh 接线）
+//   6. rev 刷新信号：自增 → 面板重读快照（容器 rev 接线）
 //   7. #4 待处理清单：「课程名（短码）」逐字断言 + 未收录科目回退裸短码
 //   8. #16 终态学习记录摘要行：推进 N 章 / 未推进显示首因 note / 无条目不渲染
 //
@@ -219,20 +224,38 @@ void main() {
 
   // ---------------- 测试注入 fake 源（生产源 = PipelineRunner + last_run.json） ----
 
+  /// 展开「卡生成流水线」折叠区（回炉工作台壳），露出 PipelineQueueCard 面板
+  Future<void> openPipelineSection(WidgetTester tester) async {
+    await tester.tap(find.text('卡生成流水线'));
+    // 展开动画期间面板可能已在跑 live 流的 LinearProgressIndicator——
+    // 不可 pumpAndSettle，固定两拍推进
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+  }
+
   Future<void> pumpCard(
     WidgetTester tester,
     PipelineQueueSource src, {
     ValueNotifier<int>? rev,
   }) async {
-    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.physicalSize = const Size(800, 2400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    // 壳结构 = 回炉工作台 _TaskList 中的「卡生成流水线」折叠区（Card >
+    // ExpansionTile > PipelineQueueCard），与生产挂载保持同构。
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: ListView(
-            children: [PipelineQueueCard(source: src, rev: rev)],
+            children: [
+              Card(
+                child: ExpansionTile(
+                  title: const Text('卡生成流水线'),
+                  children: [PipelineQueueCard(source: src, rev: rev)],
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -242,21 +265,13 @@ void main() {
 
   // ------------------------------------------------------------ 用例 ----
 
-  testWidgets('统计页空态：无存档 → 面板在位 + 引导文案', (tester) async {
+  testWidgets('统计页空态：面板已迁入回炉工作台 → 统计页不再出现', (tester) async {
     await boot();
     await openStats(tester);
 
-    expect(find.text('卡生成队列'), findsOneWidget);
-    expect(
-      find.text(
-        '暂无队列数据——收件箱存入关键词、设置页「强制开始拆卡 / 改卡」'
-        '触发后，这里实时展示生成进度',
-      ),
-      findsOneWidget,
-      reason: '无 last_run.json、无运行 → 空态引导文案',
-    );
-    expect(find.text('上次运行'), findsNothing);
-    expect(find.text('生成中'), findsNothing);
+    expect(find.text('卡生成流水线'), findsNothing,
+        reason: '卡生成面板已迁入回炉工作台，统计页不再挂载');
+    expect(find.text('卡生成队列'), findsNothing);
   });
 
   testWidgets('非 local 模式：队列面板不渲染', (tester) async {
@@ -281,6 +296,23 @@ void main() {
 
     await openStats(tester);
 
+    expect(find.text('卡生成流水线'), findsNothing,
+        reason: '面板已迁入回炉工作台——last_run 快照渲染改由壳用例覆盖');
+  });
+
+  testWidgets('last_run.json 兜底：终态快照全要素渲染（真实生产源 + 真实文件）', (tester) async {
+    await boot();
+    // 冷启动语义：只写 last_run.json，无运行、无事件——面板必须靠文件兜底
+    Directory('${tmp.path}/corpus').createSync(recursive: true);
+    File('${tmp.path}/corpus/last_run.json').writeAsStringSync(
+      convert.jsonEncode(
+        lastRunArchive(trigger: kPipelineTriggerScheduled, reworkDone: 1),
+      ),
+    );
+
+    await pumpCard(tester, const PipelineQueueSource());
+    await openPipelineSection(tester);
+
     expect(find.text('卡生成队列'), findsOneWidget);
     expect(find.text('上次运行'), findsOneWidget);
     expect(find.text('生成中'), findsNothing);
@@ -290,7 +322,7 @@ void main() {
       findsOneWidget,
       reason: '触发来源 scheduled 必须显示「定时 22:55」',
     );
-    // 四分组计数
+    // 四分组：空组只显示计数行；非空组（回炉）计数行可见，条目默认折叠
     expect(find.text('正在生成 0'), findsOneWidget);
     expect(find.text('待生成 0'), findsOneWidget);
     expect(find.text('失败 0'), findsOneWidget);
@@ -299,8 +331,13 @@ void main() {
       findsOneWidget,
       reason: '终态回炉组 = 队列条目数 + counts.reworkDone',
     );
-    // 回炉条目（front + reason）
-    expect(find.text('· 扁平苔藓的临床表现（答案太啰嗦）'), findsOneWidget);
+    // 折叠重构：条目默认不可见——点开分组才展开
+    expect(find.text('· 扁平苔藓的临床表现（答案太啰嗦）'), findsNothing,
+        reason: '终态分组默认折叠，不一次性铺出条目');
+    await tester.tap(find.text('回炉 1 · 重造完成 1'));
+    await tester.pumpAndSettle();
+    expect(find.text('· 扁平苔藓的临床表现（答案太啰嗦）'), findsOneWidget,
+        reason: '展开后回炉条目（front + reason）可见');
     // 汇总行
     expect(find.text('已生成 10/10 · 入库 12 张 · 消费 10 条'), findsOneWidget);
   });
@@ -313,7 +350,8 @@ void main() {
     File(
       '${tmp.path}/corpus/last_run.json',
     ).writeAsStringSync(convert.jsonEncode(snapshot));
-    await openStats(tester);
+    await pumpCard(tester, const PipelineQueueSource());
+    await openPipelineSection(tester);
     expect(find.text('回炉 1 · 草案待确认 1'), findsOneWidget);
     expect(find.text('回炉 1 · 重造完成 1'), findsNothing);
   });
@@ -321,6 +359,7 @@ void main() {
   testWidgets('实时流：队列帧分组计数与条目 + 触发来源 + 失败帧 + 完成切换终态', (tester) async {
     final fake = FakeQueueSource();
     await pumpCard(tester, fake);
+    await openPipelineSection(tester);
 
     // ① worker 启动包裹事件（counts=null）：运行中过渡态
     fake.running = true;
@@ -387,11 +426,18 @@ void main() {
       reason: 'live 信息行含触发来源（manual → 手动触发）',
     );
     expect(find.text('正在生成 3'), findsOneWidget);
+    // 折叠重构：运行中「正在生成」组默认展开，其余分组条目收起
     expect(find.text('· 皮沟皮嵴'), findsOneWidget);
     expect(find.text('· 白斑'), findsOneWidget);
     expect(find.text('· 扁平苔藓'), findsOneWidget);
     expect(find.text('待生成 4'), findsOneWidget);
-    expect(find.text('· 过敏性紫癜'), findsOneWidget);
+    expect(find.text('· 过敏性紫癜'), findsNothing,
+        reason: '待生成组默认折叠——条目不一次性铺出');
+    await tester.tap(find.text('待生成 4'));
+    // 常驻 LinearProgressIndicator（indeterminate）在跑——不可 pumpAndSettle
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('· 过敏性紫癜'), findsOneWidget, reason: '点开后展开');
     expect(find.text('失败 0'), findsOneWidget);
     expect(find.text('回炉 1'), findsOneWidget);
     expect(find.text('已生成 3/10 · 入库 3 张'), findsOneWidget);
@@ -435,6 +481,10 @@ void main() {
     await tester.pump();
 
     expect(find.text('失败 1'), findsOneWidget);
+    // 折叠重构：失败组条目默认收起——点开展开后校验「关键词：错误摘要」
+    await tester.tap(find.text('失败 1'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(
       find.text('· 天疱疮：LLM 未配置（settings llm.* 缺 baseUrl/apiKey/model）'),
       findsOneWidget,
@@ -500,6 +550,7 @@ void main() {
       message: '开始生成 2/3：白斑',
     );
     await pumpCard(tester, fake);
+    await openPipelineSection(tester);
     expect(find.text('生成中'), findsOneWidget);
     expect(
       find.text('正在生成 1'),
@@ -564,6 +615,7 @@ void main() {
     final rev = ValueNotifier<int>(0);
     addTearDown(rev.dispose);
     await pumpCard(tester, fake, rev: rev);
+    await openPipelineSection(tester);
     expect(find.text('已生成 10/10 · 入库 12 张 · 消费 10 条'), findsOneWidget);
 
     // 存档更新（新的一轮跑完）+ rev 自增（统计页 _load / pull-to-refresh）→ 重读
@@ -678,6 +730,7 @@ void main() {
     final rev = ValueNotifier<int>(0);
     addTearDown(rev.dispose);
     await pumpCard(tester, fake, rev: rev);
+    await openPipelineSection(tester);
 
     // ① 推进 2 章（entries=3、advanced=2）
     fake.snapshot = runWithStudyLog(
@@ -750,6 +803,7 @@ void main() {
     final rev = ValueNotifier<int>(0);
     addTearDown(rev.dispose);
     await pumpCard(tester, fake, rev: rev);
+    await openPipelineSection(tester);
 
     // ① 未拉到（null）→ 行不渲染（不阻断队列主视图）；终态快照其余照常
     expect(find.textContaining('回炉待重造'), findsNothing, reason: '未拉到计数 → 行隐藏');
@@ -811,6 +865,7 @@ void main() {
     // ① ran=true 出卡 2 → 「真题周扫：出卡 2 张 · 入库 2 张」
     fake.snapshot = archiveWithWeekly({'ran': true, 'cards': 2, 'imported': 2});
     await pumpCard(tester, fake, rev: rev);
+    await openPipelineSection(tester);
     expect(find.text('真题周扫：出卡 2 张 · 入库 2 张'), findsOneWidget);
     expect(
       find.text('已生成 1/1 · 入库 2 张 · 消费 1 条'),

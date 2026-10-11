@@ -17,7 +17,6 @@ import '../services/api/local_cache.dart';
 import '../services/notification/daily_reminder.dart';
 import '../theme.dart';
 import '../widgets/offline_data_bar.dart';
-import '../widgets/pipeline_queue_card.dart';
 import 'settings_page.dart';
 
 class StatsPage extends StatefulWidget {
@@ -43,10 +42,6 @@ class _StatsPageState extends State<StatsPage> {
   /// fetchTodayStats 注释），断网/旧帧不回退，显示上次成功值即可。
   TodayProgress? _today;
 
-  /// #13：队列面板刷新信号（_load / pull-to-refresh 时自增——面板重读
-  /// 「卡生成队列」当前态；与设置页 _corpusRev 同一模式）。
-  final _queueRev = ValueNotifier<int>(0);
-
   @override
   void initState() {
     super.initState();
@@ -55,12 +50,10 @@ class _StatsPageState extends State<StatsPage> {
 
   @override
   void dispose() {
-    _queueRev.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
-    _queueRev.value++; // #13：队列面板随本页刷新一起重读
     setState(() {
       _loading = true;
       _error = null;
@@ -150,12 +143,6 @@ class _StatsPageState extends State<StatsPage> {
                   ],
                   _StreakCard(streak: _streak, scheme: scheme),
                   const SizedBox(height: 16),
-                  // #13：卡生成队列面板（local 模式显示——流水线为端上
-                  // local-first 链路，demo/remote 无此数据面）
-                  if (currentBackendMode == BackendMode.local) ...[
-                    PipelineQueueCard(rev: _queueRev),
-                    const SizedBox(height: 16),
-                  ],
                   HeatmapCard(data: _heatmap, scheme: scheme),
                   const SizedBox(height: 16),
                   _RetentionCard(retention: _retention, scheme: scheme),
