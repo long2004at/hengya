@@ -305,4 +305,56 @@ void main() {
     expect(c.isCleared, true);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  // 动画期遮罩 painter 是私有的 _FogTintPainter，字段通过 dynamic 运行时访问验证。
+  dynamic findTintPainter(WidgetTester tester) => tester
+      .widgetList<CustomPaint>(find.byType(CustomPaint))
+      .map((p) => p.painter)
+      .firstWhere((p) => p.runtimeType.toString() == '_FogTintPainter');
+
+  testWidgets('翻页动画期雾层走不透明遮罩分支（防透底），弹回后恢复静态雾', (tester) async {
+    final c = await pumpFog(tester);
+    expect((findTintPainter(tester) as dynamic).isAnimating, false, reason: '静态态走渐变底色分支');
+
+    // 拖纸角进入 peeling：动画态遮罩必须全不透明，否则未擦除/未揭开区域透出答案
+    final corner = tester.getBottomRight(find.byType(FogPeel));
+    final g = await tester.startGesture(corner - const Offset(20, 20));
+    await tester.pump();
+    await g.moveBy(const Offset(-60, -60));
+    await tester.pump();
+    expect(c.isPeeling, true);
+    expect((findTintPainter(tester) as dynamic).isAnimating, true);
+    expect(
+      (kFogAnimCoverLight.a * 255.0).round(),
+      255,
+      reason: '动画期遮罩色必须完全不透明（透底回归）',
+    );
+    expect((kFogAnimCoverDense.a * 255.0).round(), 255);
+
+    // 弹回动画期间仍处于动画态
+    await g.up();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(c.phase, FogPhase.springback);
+    expect((findTintPainter(tester) as dynamic).isAnimating, true);
+
+    // 弹回结束回到 idle：恢复静态真模糊雾
+    await tester.pumpAndSettle();
+    expect(c.phase, FogPhase.idle);
+    expect((findTintPainter(tester) as dynamic).isAnimating, false);
+    expect(find.byType(BackdropFilter), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('飞出动画期间遮罩层保持动画态，结束完全见答案', (tester) async {
+    final c = await pumpFog(tester);
+    await tester.tapAt(
+      tester.getBottomRight(find.byType(FogPeel)) - const Offset(25, 25),
+    );
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(c.isPeeling, true);
+    expect((findTintPainter(tester) as dynamic).isAnimating, true);
+    await tester.pumpAndSettle();
+    expect(c.isCleared, true);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }

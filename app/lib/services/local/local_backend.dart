@@ -568,6 +568,15 @@ class LocalBackend {
       return {'threshold': dupThresholdOf(db)};
     }
 
+    // /settings/daily（每日计划：每日复习目标张数；写入见 PUT）
+    if (path == '/settings/daily') {
+      return {
+        'goal': db.dailyGoal(),
+        'min': Db.kDailyGoalMin,
+        'max': Db.kDailyGoalMax,
+      };
+    }
+
     // /cards/pending?limit=&offset=（server 裸数组 → {'list': [...]} 约定形状）
     // #15（2026-09-13）：分页 + total——审核区加载更多（原 100 张硬截断
     // 会淹掉 created_at 较旧的回炉完成卡）。limit/offset 缺省行为不变。
@@ -582,6 +591,32 @@ class LocalBackend {
             c.toJson(),
         ],
         'total': db.pendingCardsCount(),
+      };
+    }
+
+    // /cards/queue/today（每日计划：跨科目今日队列）。
+    // ⚠️ 路由顺序警示：必须排在下方 startsWith('/cards/queue') 之前——
+    // 既有科目队列匹配是前缀匹配，'/cards/queue/today' 若落到其后会被
+    // 吞掉并因缺 subject 参数报 400。今天走精确匹配（无 query 参数）。
+    // 响应 = 既有 {'cards': [...]} 形状 + goal/doneToday/dueTotal/
+    // remainingToday 四个附加字段（**下游统一引用这套字段名**；口径与
+    // /stats/today 共用 db.todayPlan，禁止另写第二套算法）。
+    // 排序：跨科目合并所有 active 且到期卡，全局按 m_due_at 升序（科目内
+    // 升序与科目间按到期排序是同一条序，超期久的先出）；截断为
+    // remainingToday 张——done>=goal 或 remainingToday==0 时返回空数组。
+    if (path == '/cards/queue/today') {
+      final plan = db.todayPlan();
+      return {
+        'cards': [
+          for (final c in db.dueTodayCards(
+            limit: plan['remainingToday'] ?? 0,
+          ))
+            c.toJson(),
+        ],
+        'goal': plan['goal'],
+        'doneToday': plan['done'],
+        'dueTotal': plan['dueTotal'],
+        'remainingToday': plan['remainingToday'],
       };
     }
 
@@ -674,6 +709,13 @@ class LocalBackend {
     }
     if (path.startsWith('/stats/retention')) {
       return db.retentionStats();
+    }
+
+    // /stats/today（每日计划今日进度；四字段与 /cards/queue/today 附加
+    // 字段同名同义——共用 db.todayPlan，唯一口径。键恒为 goal/done/
+    // dueTotal/remainingToday，值 int，协变赋给 Map<String, dynamic>）
+    if (path == '/stats/today') {
+      return db.todayPlan();
     }
 
     // /progress（progress.json + 辅文章过滤，对照 routes/progress.dart）
@@ -1140,6 +1182,22 @@ class LocalBackend {
       db.settingSet(kDupThresholdSettingKey, t.toStringAsFixed(3));
       db.bumpDataVersion();
       return {'ok': true, 'threshold': t};
+    }
+
+    // /settings/daily（每日计划：每日复习目标张数，body {goal}；
+    // 范围 10-500，超界 400——UI 滑杆本身已限定，此处为契约层硬校验。
+    // 与 settings/ai 先例一致：local 特有配置，remote 不实装）
+    if (path == '/settings/daily') {
+      final g = (m['goal'] as num?)?.toInt();
+      if (g == null || g < Db.kDailyGoalMin || g > Db.kDailyGoalMax) {
+        throw ApiException(
+          400,
+          'goal 须为 ${Db.kDailyGoalMin} ~ ${Db.kDailyGoalMax} 之间的整数',
+        );
+      }
+      db.setDailyGoal(g);
+      db.bumpDataVersion();
+      return {'ok': true, 'goal': g};
     }
 
     // /settings/ai/<svc>（baseUrl 必须 https://、model 非空；apiKey 空=保持；

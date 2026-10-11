@@ -402,6 +402,35 @@ class ApiClient {
         ],
       );
 
+  /// 今日队列（每日计划：跨科目合并，截断为 remainingToday 张）。
+  /// **不走离线缓存**——与 fetchQueue 不同，本端点强依赖当日状态
+  /// （done/dueTotal 每答一张就变，跨自然日还要清零）：缓存会把昨天/几分钟
+  /// 前的旧进度当成今天的事实误导下游（首页大 CTA / 今日复习会话），
+  /// 断网时宁可报错也不回退旧帧。
+  Future<TodayQueue> fetchTodayQueue() async {
+    final json = await _getJson('/api/v1/cards/queue/today');
+    return TodayQueue.fromJson(json);
+  }
+
+  /// 今日进度（每日计划唯一口径：goal/done/dueTotal/remainingToday；
+  /// 与今日队列附加字段同名同义）。同样不走离线缓存（理由同 [fetchTodayQueue]）。
+  Future<TodayProgress> fetchTodayStats() async {
+    final json = await _getJson('/api/v1/stats/today');
+    return TodayProgress.fromJson(json);
+  }
+
+  /// 每日复习目标（GET /api/v1/settings/daily；local 特有——remote 无此
+  /// 路由抛 404，调用方走默认值兜底，与 llm_backup 先例一致）
+  Future<DailyGoalSettings> fetchDailyGoal() async {
+    final json = await _getJson('/api/v1/settings/daily');
+    return DailyGoalSettings.fromJson(json);
+  }
+
+  /// 每日复习目标写入（PUT /api/v1/settings/daily；范围 10-500，超界 400）
+  Future<void> updateDailyGoal(int goal) async {
+    await _putJson('/api/v1/settings/daily', {'goal': goal});
+  }
+
   // ---------------- 审核面 ----------------
 
   Future<void> approveCard(String id) =>
@@ -1962,5 +1991,105 @@ class ProgressChaptersUpdate {
         ok: json['ok'] == true,
         note: json['note'] as String?,
         chapters: SubjectChapters.fromJson(json),
+      );
+}
+
+/// ---------------- 每日计划数据类（daily plan） ----------------
+///
+/// 今日进度四字段（goal / done / dueTotal / remainingToday）是**全 App
+/// 唯一口径**：下游首页大 CTA、今日复习会话、统计页总结一律引用本组字段，
+/// 字段名与 /stats/today、/cards/queue/today 附加字段保持逐字一致，禁止
+/// 各页面自行另算。措辞基线：「今日复习」= 跨科目每日任务；「N/目标 M」=
+/// 进度写法；「已完成/还剩」两种状态措辞；不要用「新学词」这种本项目
+/// 不存在的概念。
+
+/// 今日进度四字段（`GET /api/v1/stats/today`）
+class TodayProgress {
+  const TodayProgress({
+    required this.goal,
+    required this.done,
+    required this.dueTotal,
+    required this.remainingToday,
+  });
+
+  /// 每日复习目标张数（settings 表 daily.goal；未设置回退 50）
+  final int goal;
+
+  /// 今日已完成：review_logs 中 reviewed_at 落在今天（本地自然日）的记录数
+  final int done;
+
+  /// 到期总数：全科目 active 且 m_due_at<=now 的卡数（含超期）
+  final int dueTotal;
+
+  /// 今日还剩 = clamp(goal - done, 0, dueTotal)
+  final int remainingToday;
+
+  factory TodayProgress.fromJson(Map<String, dynamic> json) => TodayProgress(
+    goal: (json['goal'] as num?)?.toInt() ?? 0,
+    done: (json['done'] as num?)?.toInt() ?? 0,
+    dueTotal: (json['dueTotal'] as num?)?.toInt() ?? 0,
+    remainingToday: (json['remainingToday'] as num?)?.toInt() ?? 0,
+  );
+
+  /// 进度写法基线：「N/目标 M」（如「12/目标 50」）
+  String get display => '$done/目标 $goal';
+}
+
+/// 今日队列（`GET /api/v1/cards/queue/today`）：cards 形状与既有
+/// /cards/queue 一致，附加四字段与 [TodayProgress] 同名同义。
+class TodayQueue {
+  const TodayQueue({
+    required this.cards,
+    required this.goal,
+    required this.doneToday,
+    required this.dueTotal,
+    required this.remainingToday,
+  });
+
+  final List<FlashCard> cards;
+
+  /// 每日复习目标张数（= TodayProgress.goal）
+  final int goal;
+
+  /// 今日已完成（= TodayProgress.done；队列端点字段名带 Today 后缀）
+  final int doneToday;
+
+  /// 到期总数（= TodayProgress.dueTotal）
+  final int dueTotal;
+
+  /// 今日还剩（= TodayProgress.remainingToday；= 本帧 cards 上限）
+  final int remainingToday;
+
+  bool get isEmpty => cards.isEmpty;
+
+  factory TodayQueue.fromJson(Map<String, dynamic> json) => TodayQueue(
+    cards: [
+      for (final e in (json['cards'] as List? ?? const []))
+        FlashCard.fromJson(Map<String, dynamic>.from(e as Map)),
+    ],
+    goal: (json['goal'] as num?)?.toInt() ?? 0,
+    doneToday: (json['doneToday'] as num?)?.toInt() ?? 0,
+    dueTotal: (json['dueTotal'] as num?)?.toInt() ?? 0,
+    remainingToday: (json['remainingToday'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// 每日复习目标设置（`GET /api/v1/settings/daily`；local 特有）
+class DailyGoalSettings {
+  const DailyGoalSettings({
+    required this.goal,
+    required this.min,
+    required this.max,
+  });
+
+  final int goal;
+  final int min;
+  final int max;
+
+  factory DailyGoalSettings.fromJson(Map<String, dynamic> json) =>
+      DailyGoalSettings(
+        goal: (json['goal'] as num?)?.toInt() ?? 50,
+        min: (json['min'] as num?)?.toInt() ?? 10,
+        max: (json['max'] as num?)?.toInt() ?? 500,
       );
 }

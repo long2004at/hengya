@@ -36,6 +36,12 @@ const Color kFogGradientLight = Color(0x20F5F0E6);
 /// 渐变浓雾：右下角浓色
 const Color kFogGradientDense = Color(0x70F5F0E6);
 
+/// 翻页动画期不透明补偿层：左上略亮 / 右下略暗（保留雾面明暗质感）。
+/// 动画期没有 BackdropFilter 真模糊，全靠这层遮盖——必须完全不透明，
+/// 否则半透明叠加会透出答案文字（透底 bug）。
+const Color kFogAnimCoverLight = Color(0xFFE8E0D4);
+const Color kFogAnimCoverDense = Color(0xFFD8CEC0);
+
 /// 擦除笔刷半径（dp）
 const double kEraseBrushRadius = 26.0;
 
@@ -690,24 +696,25 @@ class _FogTintPainter extends CustomPainter {
     // saveLayer 以支持 dstOut 擦除
     canvas.saveLayer(rect, Paint());
 
-    // P1: 渐变浓雾底色 —— 左上淡，右下浓
-    final gradientPaint = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [kFogGradientLight, kFogGradientDense],
-      ).createShader(rect);
-    canvas.drawRect(rect, gradientPaint);
-
-    // 翻页动画时叠加额外不透明度补偿（取代 BackdropFilter 的遮盖力）
     if (isAnimating) {
+      // 翻页动画期：BackdropFilter 已移除，由这层完全不透明遮罩承担全部遮盖
+      // （原补偿层最高约 45% 不透明度，答案文字直接透底）。
       final solidPaint = Paint()
         ..shader = const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0x60E8E0D4), Color(0xC0E8E0D4)],
+          colors: [kFogAnimCoverLight, kFogAnimCoverDense],
         ).createShader(rect);
       canvas.drawRect(rect, solidPaint);
+    } else {
+      // 静态状态：渐变浓雾底色 —— 左上淡，右下浓（BackdropFilter 真模糊负责遮盖）
+      final gradientPaint = Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [kFogGradientLight, kFogGradientDense],
+        ).createShader(rect);
+      canvas.drawRect(rect, gradientPaint);
     }
 
     // P2 + P5: 擦除（saveLayer 内 dstOut，无缝隙 + 柔和消散边缘）

@@ -11,6 +11,7 @@ import 'pages/pending_page.dart';
 import 'pages/progress_page.dart';
 import 'pages/review_page.dart';
 import 'pages/stats_page.dart';
+import 'pages/today_review_page.dart';
 import 'services/api/api_client.dart';
 import 'services/review/session_store.dart';
 import 'theme.dart';
@@ -40,6 +41,10 @@ GoRouter _router(SessionStore store) => GoRouter(
             ),
           ],
         ),
+        // 今日复习（跨科目每日任务）：顶层路由（根导航器全屏——同 /progress
+        // 惯例，不进底部导航壳；go_router 不允许 ShellRoute 直接子路由指向
+        // 根键，故与 /progress 一样放 ShellRoute 之外。首页大 CTA / 任意处
+        // context.push('/review/today')）
         GoRoute(
           path: '/bank',
           builder: (context, state) => const BankPage(),
@@ -65,6 +70,13 @@ GoRouter _router(SessionStore store) => GoRouter(
       path: '/progress',
       parentNavigatorKey: _rootKey,
       builder: (context, state) => const ProgressPage(),
+    ),
+    // 今日复习页（§每日计划）：顶层路由（根导航器渲染 → 全屏带返回键，
+    // 无底部导航壳——与 /progress 同款约束）
+    GoRoute(
+      path: '/review/today',
+      parentNavigatorKey: _rootKey,
+      builder: (context, state) => const TodayReviewPage(),
     ),
   ],
 );

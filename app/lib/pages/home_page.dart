@@ -3,9 +3,18 @@
 //       GET /progress（尽力而为第四路——罗盘表盘按钮进度弧/指针数据源；
 //       拉不到 → 空表盘仍可点击，完整错误态由进度页兜底）
 // M3：Hero 右上角关键词收件箱入口（上课随手记重点 → 22:55 自动化拆卡）
-// 1.4.0+5：Hero 右上角新增「学习进度」入口（§7.5 学习罗盘 → /progress）
-// 2026-09-06：学习进度入口重设计为罗盘表盘按钮（刻度环 + 进度弧 + 指针，
-//       widgets/compass_dial_button.dart）——与「进度+罗盘」主题契合。
+// 2026-10-11 首页信息架构重构（单一大 CTA 主导 + 次要收纳，参考多邻国/
+// 扇贝的「单主导」架构但保留恒牙 Hero 氛围）：
+//   1. 顶部行只留「记课堂重点」（核心闭环）+ 罗盘表盘（动效特色）+
+//      MoreVert 溢出菜单（收纳「语料库」「回炉工作台」，local 模式才显示）。
+//   2. 三玻璃胶囊裁剪：连续天数保留（打卡心智）；待审核 >0 才显示；
+//      7 天复习量移除（统计页已有）。
+//   3. 大 CTA「开始今日复习」全宽主按钮（信息架构主角，home_today_cta.dart）：
+//      数据源 GET /stats/today 四字段唯一口径（禁止另算），三态文案
+//      未开始/进行中/已完成；拉不到 → 降级「开始今日复习」仍可点，
+//      大数字回退 totalDue。Hero 大数字与 CTA 同口径展示 remainingToday。
+//   4. 科目卡移除卡内语料按钮（语料入口已收进溢出菜单）；到期副文案
+//      注明「全部到期」，与今日 CTA 的「今日任务」口径区分。
 // 动效基调（2026-09-06 用户拍板「随机可变动态色彩」；2026-09-07 节点⑧
 // 改版海浪）：Hero 渐变上是「多层正弦海浪涌动」（AuroraAmbient）——四层
 // 柔彩波面自远而近层叠缓涌，传播方向与各层振幅/波长/速度在构建时随机
@@ -32,6 +41,7 @@ import '../widgets/aurora_ambient.dart';
 import '../widgets/compass_dial_button.dart';
 import '../widgets/hero_shimmer.dart';
 import '../widgets/offline_data_bar.dart';
+import 'home_today_cta.dart';
 import 'inbox_sheet.dart';
 import 'corpus_library_page.dart';
 import 'rework_workbench_page.dart';
@@ -58,13 +68,14 @@ double compassFractionOf(ProgressOverview progress) {
   return total > 0 ? (learned / total).clamp(0.0, 1.0).toDouble() : 0.0;
 }
 
-/// 首页四路数据快照：数据 + 整体离线态（cacheAt != null = 全部/部分来自缓存）
+/// 首页五路数据快照：数据 + 整体离线态（cacheAt != null = 全部/部分来自缓存）
 class _HomeSnapshot {
   const _HomeSnapshot({
     required this.subjects,
     required this.streak,
     required this.summary,
     required this.compassFraction,
+    required this.today,
     this.cacheAt,
   });
 
@@ -74,11 +85,15 @@ class _HomeSnapshot {
 
   /// 罗盘总进度 0.0~1.0（罗盘表盘按钮数据源；0 = 拉不到 → 空表盘）
   final double compassFraction;
+
+  /// 今日进度四字段（/stats/today 唯一口径，大 CTA 与 Hero 大数字数据源；
+  /// null = 拉不到 → CTA 与大数字走降级，与罗盘第四路同「尽力而为」）
+  final TodayProgress? today;
   final DateTime? cacheAt; // null = 新鲜数据；非 null = 有端点走了缓存回退
 }
 
 class _HomePageState extends State<HomePage> {
-  /// 四路并发数据 future：缓存于 state，FutureBuilder 不再每帧重建 future
+  /// 五路并发数据 future：缓存于 state，FutureBuilder 不再每帧重建 future
   late Future<_HomeSnapshot> _future;
 
   @override
@@ -93,20 +108,35 @@ class _HomePageState extends State<HomePage> {
       ApiClient.instance.fetchStreak(),
       ApiClient.instance.fetchSummary(),
       _fetchCompassFraction(), // 尽力而为第四路：永不抛错
+      _fetchToday(), // 尽力而为第五路：大 CTA / Hero 大数字数据源，永不抛错
     ]);
     return _HomeSnapshot(
       subjects: results[0] as List<SubjectWithDue>,
       streak: results[1] as int,
       summary: results[2] as StatsSummary,
       compassFraction: results[3] as double,
-      // 罗盘第四路刻意不计入离线态旁路检查：它是装饰性数据源，若只它
-      // 命中缓存而三路主数据新鲜，不应误报「离线数据」提示条
+      today: results[4] as TodayProgress?,
+      // 罗盘/今日两路尽力而为数据刻意不计入离线态旁路检查：装饰性与
+      // 增强性数据源，若只它们命中缓存而三路主数据新鲜，不应误报「离线
+      // 数据」提示条
       cacheAt: ApiClient.instance.latestCacheHitAmong([
         CacheKeys.subjects,
         CacheKeys.streak,
         CacheKeys.summary(7),
       ]),
     );
+  }
+
+  /// 今日进度（尽力而为，仿 [_fetchCompassFraction] 写法）：拉不到（断网 /
+  /// 旧服务器 404 / remote 模式未升级）→ null 降级——CTA 退「开始今日
+  /// 复习」仍可点击进会话页（页面自会兜底错误态），绝不阻断三路主数据。
+  /// 今日两端点刻意不走离线缓存（上游决策：缓存会把旧进度当成今天的事实）。
+  Future<TodayProgress?> _fetchToday() async {
+    try {
+      return await ApiClient.instance.fetchTodayStats();
+    } on ApiException {
+      return null;
+    }
   }
 
   /// 罗盘总进度（尽力而为）：拉不到（断网且无缓存 / 旧服务器 404 /
@@ -120,10 +150,13 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// 下拉刷新：重新发起四路并发并 setState 替换 future → 界面真正更新
+  /// 下拉刷新：重新发起五路并发并 setState 替换 future → 界面真正更新
+  /// （注意 setState 回调必须块体：箭头体会把 Future 当返回值触发断言）
   Future<void> _refresh() async {
     final next = _fetch();
-    setState(() => _future = next);
+    setState(() {
+      _future = next;
+    });
     await next;
   }
 
@@ -170,6 +203,8 @@ class _HomePageState extends State<HomePage> {
                     streak: data.streak,
                     summary: data.summary,
                     compassFraction: data.compassFraction,
+                    today: data.today,
+                    onReviewReturned: _refresh,
                   ),
                   // 离线缓存回退提示条（数据来自缓存时可见；置于 Hero 与科目卡
                   // 之间的常规列表流，不触碰 Hero 内部的氛围层与信息层级）
@@ -184,7 +219,7 @@ class _HomePageState extends State<HomePage> {
                       children: [
                         for (final s in subjects) _SubjectCard(item: s),
                         // 首启空库语义（0.3.1 开源去内置）：新库零科目——
-                        // 引导用户经 Hero 右上「记课堂重点」内联新建第一门课程
+                        // 引导用户经 Hero 顶部「记课堂重点」内联新建第一门课程
                         if (subjects.isEmpty)
                           Padding(
                             padding: const EdgeInsets.only(top: 8),
@@ -269,15 +304,20 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
-/// 渐变 Hero 头部：问候语 + 今日到期大数字 + 三玻璃胶囊
-class _HeroHeader extends StatelessWidget {
+/// 渐变 Hero 头部：问候语 + 今日大数字（与 CTA 同口径）+ 大 CTA + 玻璃胶囊。
+/// Stateful：大 CTA push 会话页返回后回调 State 的 _refresh 重拉今日数据
+/// （评分改变 done → CTA 三态与 Hero 大数字同步刷新）。
+class _HeroHeader extends StatefulWidget {
   const _HeroHeader({
     required this.totalDue,
     required this.streak,
     required this.summary,
     required this.compassFraction,
+    required this.today,
+    required this.onReviewReturned,
   });
 
+  /// 科目到期汇总（旧「今日到期」口径）——today 拉不到时大数字回退值
   final int totalDue;
   final int streak;
   final StatsSummary summary;
@@ -285,6 +325,19 @@ class _HeroHeader extends StatelessWidget {
   /// 学习罗盘总进度（表盘按钮的进度弧/指针数据源）
   final double compassFraction;
 
+  /// 今日进度四字段（/stats/today 唯一口径）；null = 降级（大数字回退
+  /// totalDue，CTA 退「开始今日复习」，见 home_today_cta.dart 注释）
+  final TodayProgress? today;
+
+  /// 今日复习会话页 pop 返回后的回调（HomePage._refresh 重拉五路，
+  /// 刷新 CTA 三态与 Hero 大数字——评分后的服务端账本已更新）
+  final Future<void> Function() onReviewReturned;
+
+  @override
+  State<_HeroHeader> createState() => _HeroHeaderState();
+}
+
+class _HeroHeaderState extends State<_HeroHeader> {
   String get _greeting {
     final h = DateTime.now().hour;
     if (h < 6) return '夜深了';
@@ -355,38 +408,59 @@ class _HeroHeader extends StatelessWidget {
                           ),
                         ],
                         const Spacer(),
+                        // 溢出菜单（次要收纳）：语料库 / 回炉工作台——
+                        // local 模式专属能力才进菜单（remote 无此二功能）；
+                        // 菜单项带图标与文字，样式同右上玻璃圆钮
                         if (currentBackendMode == BackendMode.local)
-                          IconButton(
-                            tooltip: '全部语料与资料管理',
-                            icon: const Icon(
-                              Icons.folder_copy_outlined,
-                              color: Colors.white,
+                          Container(
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.18),
+                              shape: BoxShape.circle,
                             ),
-                            onPressed: () =>
-                                Navigator.of(context, rootNavigator: true).push(
-                                  MaterialPageRoute<void>(
-                                    builder: (_) => const CorpusLibraryPage(),
+                            child: PopupMenuButton<String>(
+                              tooltip: '更多功能',
+                              icon: const Icon(
+                                Icons.more_vert,
+                                color: Colors.white,
+                                size: 22,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              onSelected: (value) =>
+                                  Navigator.of(context, rootNavigator: true).push(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => value == 'corpus'
+                                          ? const CorpusLibraryPage()
+                                          : const ReworkWorkbenchPage(),
+                                    ),
+                                  ),
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(
+                                  value: 'corpus',
+                                  child: ListTile(
+                                    dense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: Icon(Icons.folder_copy_outlined),
+                                    title: Text('语料库'),
                                   ),
                                 ),
-                          ),
-                        if (currentBackendMode == BackendMode.local)
-                          IconButton(
-                            tooltip: '回炉工作台',
-                            icon: const Icon(
-                              Icons.build_circle_outlined,
-                              color: Colors.white,
-                            ),
-                            onPressed: () =>
-                                Navigator.of(context, rootNavigator: true).push(
-                                  MaterialPageRoute<void>(
-                                    builder: (_) => const ReworkWorkbenchPage(),
+                                PopupMenuItem(
+                                  value: 'rework',
+                                  child: ListTile(
+                                    dense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: Icon(Icons.build_circle_outlined),
+                                    title: Text('回炉工作台'),
                                   ),
                                 ),
+                              ],
+                            ),
                           ),
                         // 学习罗盘表盘按钮：刻度环 + 进度弧 + 指针随罗盘
                         // 总进度走（点击整圈旋摆 → /progress）
                         CompassDialButton(
-                          fraction: compassFraction,
+                          fraction: widget.compassFraction,
                           onPressed: () => context.push('/progress'),
                         ),
                         const SizedBox(width: 8),
@@ -416,11 +490,14 @@ class _HeroHeader extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 6),
+                    // Hero 大数字（与 CTA 同口径，见 todayHeroNumber 注释）：
+                    // 有 today → remainingToday（今日还剩）；降级 → totalDue。
+                    // 副文案随口径切换，绝不出现「按钮说 5 大数字却是 23」。
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         Text(
-                          '$totalDue',
+                          '${todayHeroNumber(widget.today, widget.totalDue)}',
                           style: const TextStyle(
                             fontSize: 42,
                             fontWeight: FontWeight.w800,
@@ -428,11 +505,11 @@ class _HeroHeader extends StatelessWidget {
                             height: 1.1,
                           ),
                         ),
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 5, left: 4),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 5, left: 4),
                           child: Text(
-                            '张今日到期',
-                            style: TextStyle(
+                            widget.today != null ? '张今日还剩' : '张今日到期',
+                            style: const TextStyle(
                               fontSize: 15,
                               fontWeight: FontWeight.w600,
                               color: Colors.white,
@@ -442,22 +519,35 @@ class _HeroHeader extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 18),
+                    // 大 CTA（信息架构主角）：三态文案 + 降级由
+                    // TodayCtaButton / todayCtaLabel 统一处理；
+                    // push 返回后回调 onReviewReturned 重拉五路
+                    // （评分改变 done → CTA/大数字刷新）
+                    TodayCtaButton(
+                      today: widget.today,
+                      fallbackDue: widget.totalDue,
+                      onPressed: () async {
+                        await context.push('/review/today');
+                        await widget.onReviewReturned();
+                      },
+                    ),
+                    const SizedBox(height: 16),
                     Wrap(
                       spacing: 10,
                       runSpacing: 8,
                       children: [
-                        _GlassPill(
-                          icon: Icons.rate_review_outlined,
-                          label: '待审核 ${summary.pendingCards}',
-                        ),
+                        // 待审核：仅 >0 才占一胶囊位（0 是常态，不占视觉）
+                        if (widget.summary.pendingCards > 0)
+                          _GlassPill(
+                            icon: Icons.rate_review_outlined,
+                            label: '待审核 ${widget.summary.pendingCards}',
+                          ),
+                        // 连续天数：打卡心智保留显性
                         _GlassPill(
                           icon: Icons.local_fire_department_outlined,
-                          label: '连续 $streak 天',
+                          label: '连续 ${widget.streak} 天',
                         ),
-                        _GlassPill(
-                          icon: Icons.done_all_outlined,
-                          label: '7 天复习 ${summary.totalReviews}',
-                        ),
+                        // 7 天复习量胶囊已移除（2026-10-11 重构）：统计页已有
                       ],
                     ),
                   ],
@@ -589,8 +679,12 @@ class _SubjectCard extends StatelessWidget {
                         ],
                       ),
                       const SizedBox(height: 3),
+                      // 副文案口径区分（2026-10-11 重构）：这里是「全部到期」
+                      // 存量（/subjects 的 dueCount），与大 CTA 的「今日任务」
+                      // （/stats/today 的 remainingToday=目标截断后）刻意区分，
+                      // 避免两个数字打架
                       Text(
-                        due > 0 ? '有 $due 张卡到期，去巩固一轮' : '暂无到期卡',
+                        due > 0 ? '全部到期 $due 张，去巩固一轮' : '暂无到期卡',
                         style: const TextStyle(
                           fontSize: 12,
                           color: HengyaColors.textSecondary,
@@ -599,17 +693,8 @@ class _SubjectCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (currentBackendMode == BackendMode.local)
-                  IconButton(
-                    tooltip: '查看本科语料',
-                    icon: const Icon(Icons.folder_open_outlined),
-                    onPressed: () =>
-                        Navigator.of(context, rootNavigator: true).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => CorpusLibraryPage(subjectId: s.id),
-                          ),
-                        ),
-                  ),
+                // 卡内语料按钮已移除（2026-10-11 重构）：语料入口收进顶部
+                // 溢出菜单；整卡点击进科目会话不变
                 const SizedBox(width: 8),
                 if (due > 0)
                   Row(

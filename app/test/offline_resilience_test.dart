@@ -399,11 +399,16 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    // 缓存数据渲染完整（totalDue = 3 + 5）
+    // 缓存数据渲染完整（2026-10-11 重构：今日数据强依赖当日状态不走缓存，
+    // 断网 → today 降级 → 大数字回退 totalDue = 3 + 5 = 8，CTA 退通用文案）
     expect(find.text('恒牙'), findsOneWidget);
     expect(find.text('8'), findsOneWidget);
+    expect(find.textContaining('张今日到期'), findsOneWidget);
+    expect(find.text('开始今日复习'), findsOneWidget,
+        reason: 'today 拉不到 → CTA 降级仍可点击');
     expect(find.textContaining('连续 4 天'), findsOneWidget);
-    expect(find.textContaining('7 天复习 21'), findsOneWidget);
+    expect(find.textContaining('7 天复习'), findsNothing,
+        reason: '7 天复习胶囊已移除（统计页已有）');
     // 离线提示条可见
     expect(find.textContaining('离线数据 · 更新于'), findsOneWidget);
     // 上游兼容锚点：流彩氛围层在位且被驱动（离线条叠加不破坏装饰层）

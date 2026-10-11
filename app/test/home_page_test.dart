@@ -5,6 +5,10 @@
 //           静态一帧），信息完整可读
 //   罗盘表盘：第四路 GET /progress 尽力而为接入（进度弧/指针数据到位）；
 //             404（旧服务器）/ 拉不到 → 空表盘在位仍可点击
+//   2026-10-11 首页重构适配：第五路 GET /stats/today（大 CTA / Hero 大数字
+//           唯一口径）接入假路由；断言改新信息架构——大 CTA 三态文案、
+//           「张今日还剩」副文案、待审核 >0 才显胶囊、无「7 天复习」、
+//           顶部溢出菜单收纳语料/回炉、科目卡「全部到期」副文案。
 //
 // 测试基建：同 progress_page_test.dart——经 [ApiClient.debugInjectHttpClient]
 // 注入假 HttpClient（契约路由应答、微任务即答）。
@@ -119,7 +123,11 @@ class _FakeRouter {
   /// true → GET /api/v1/progress 回 404（旧服务器降级路径）
   bool progressMissing = false;
 
-  /// 两科到期 3+5 → totalDue = 8（Hero 大数字断言依据）
+  /// 非 null → GET /api/v1/stats/today 应答（大 CTA / Hero 大数字口径）；
+  /// null → 404（旧服务器降级：CTA 退「开始今日复习」、大数字回退 totalDue）
+  Map<String, dynamic>? todayStats;
+
+  /// 两科到期 3+5 → totalDue = 8（Hero 大数字降级断言依据）
   static const _subjects = {
     'subjects': [
       {'id': 'endo', 'name': '世界历史', 'dueCount': 3},
@@ -177,6 +185,11 @@ class _FakeRouter {
         return progressMissing
             ? _FakeHttpClientResponse(404, jsonEncode({'error': 'not found'}))
             : _ok(_progress);
+      case 'GET /api/v1/stats/today':
+        final t = todayStats;
+        return t != null
+            ? _ok(t)
+            : _FakeHttpClientResponse(404, jsonEncode({'error': 'not found'}));
       default:
         return _FakeHttpClientResponse(404, jsonEncode({'error': 'not found'}));
     }
@@ -196,6 +209,15 @@ void main() {
     //（假 HttpClient 注入只走 remote 分支），显式钉住 remote。
     debugBackendMode = BackendMode.remote;
     router = _FakeRouter();
+    // 今日数据默认注入（未开始态：goal 10 / done 0 / dueTotal 8 /
+    // remainingToday 6）——大 CTA「开始今日复习 · 还剩 6 张」+ Hero 大数字
+    // 6「张今日还剩」。取 6 避开科目卡到期数 3/5 的文本撞车。
+    router.todayStats = const {
+      'goal': 10,
+      'done': 0,
+      'dueTotal': 8,
+      'remainingToday': 6,
+    };
     ApiClient.instance.debugInjectHttpClient(_FakeHttpClient(router));
     ApiClient.instance.resetSubjectCaches();
   });
@@ -239,10 +261,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
   }
 
-  testWidgets('正常态：流彩氛围层在位且被驱动，Hero 信息完整', (tester) async {
+  testWidgets('正常态：流彩氛围层在位且被驱动，Hero 信息完整（2026-10-11 新信息架构）', (tester) async {
     await pumpPage(tester);
 
-    // 三路并发请求都发生（subjects / streak / summary）
+    // 三路并发请求都发生（subjects / streak / summary）+ 第五路今日进度
     expect(
       router.requests.where((r) => r['path'] == '/api/v1/subjects'),
       isNotEmpty,
@@ -254,6 +276,11 @@ void main() {
     expect(
       router.requests.where((r) => r['path'] == '/api/v1/stats/summary'),
       isNotEmpty,
+    );
+    expect(
+      router.requests.where((r) => r['path'] == '/api/v1/stats/today'),
+      isNotEmpty,
+      reason: '第五路 /stats/today（大 CTA / Hero 大数字唯一口径）必须并发拉取',
     );
 
     // 流彩层在位且在动（AnimatedBuilder 驱动）
@@ -275,14 +302,27 @@ void main() {
       reason: '流彩配色必须来自受控色池（会话级随机不越池）',
     );
 
-    // 信息完整可读：标题 / 问候 / 到期大数字 / 三玻璃胶囊
+    // 信息完整可读（新信息架构）：标题 / 问候 / 今日大数字（与 CTA 同口径
+    // remainingToday=6）/ 大 CTA 未开始态 / 玻璃胶囊（待审核>0 才显）
     expect(find.text('恒牙'), findsOneWidget);
     expect(find.textContaining('今天也要巩固记忆'), findsOneWidget);
-    expect(find.text('8'), findsOneWidget); // totalDue = 3 + 5
-    expect(find.textContaining('张今日到期'), findsOneWidget);
+    expect(find.text('6'), findsOneWidget, reason: '大数字 = remainingToday 6（与 CTA 同口径）');
+    expect(find.textContaining('张今日还剩'), findsOneWidget);
+    expect(find.text('开始今日复习 · 还剩 6 张'), findsOneWidget);
     expect(find.textContaining('待审核 6'), findsOneWidget);
     expect(find.textContaining('连续 4 天'), findsOneWidget);
-    expect(find.textContaining('7 天复习 21'), findsOneWidget);
+    expect(find.textContaining('7 天复习'), findsNothing,
+        reason: '7 天复习胶囊已移除（统计页已有）');
+    // 科目卡副文案改「全部到期」口径（与今日 CTA 的「今日任务」区分）
+    expect(find.textContaining('全部到期 3 张'), findsOneWidget);
+    expect(find.textContaining('全部到期 5 张'), findsOneWidget);
+    expect(find.textContaining('查看本科语料'), findsNothing,
+        reason: '卡内语料按钮已收进溢出菜单');
+    // 顶部行：罗盘表盘 + 记课堂重点在位；溢出菜单 local 专属（本套件
+    // 钉 remote → 语料/回炉入口整体收起，收纳项存在性见 home_today_cta_test）
+    expect(find.byTooltip('记课堂重点（今晚自动拆卡）'), findsOneWidget);
+    expect(find.byTooltip('更多功能'), findsNothing,
+        reason: '溢出菜单（语料/回炉收纳）仅 local 模式显示');
 
     // 罗盘表盘按钮在位（进度数据接入见专项用例）
     expect(find.byType(CompassDialButton), findsOneWidget);
@@ -308,13 +348,52 @@ void main() {
     expect(painter.t, 0);
     expect(AuroraPalette.pool.contains(painter.palette), isTrue);
 
-    // 信息完整可读：Hero 关键信息全部在位
+    // 信息完整可读：Hero 关键信息全部在位（今日口径）
     expect(find.text('恒牙'), findsOneWidget);
-    expect(find.text('8'), findsOneWidget);
-    expect(find.textContaining('张今日到期'), findsOneWidget);
+    expect(find.text('6'), findsOneWidget);
+    expect(find.textContaining('张今日还剩'), findsOneWidget);
+    expect(find.text('开始今日复习 · 还剩 6 张'), findsOneWidget);
     expect(find.textContaining('待审核 6'), findsOneWidget);
     expect(find.textContaining('连续 4 天'), findsOneWidget);
-    expect(find.textContaining('7 天复习 21'), findsOneWidget);
+  });
+
+  testWidgets('今日降级：/stats/today 404（旧服务器）→ CTA 退「开始今日复习」、大数字回退 totalDue', (tester) async {
+    router.todayStats = null; // 旧服务器（0.2.0）：/stats/today 404
+    await pumpPage(tester);
+
+    // 尽力而为第五路不阻断：三路主数据照常渲染
+    expect(find.text('恒牙'), findsOneWidget);
+    // 大数字回退旧口径 totalDue = 3 + 5 = 8，「张今日到期」
+    expect(find.text('8'), findsOneWidget);
+    expect(find.textContaining('张今日到期'), findsOneWidget);
+    // CTA 降级为通用文案，仍可点击（点击路由见 home_today_cta_test）
+    expect(find.text('开始今日复习'), findsOneWidget);
+  });
+
+  testWidgets('今日进行中态：done>0 未达目标 → 「继续今日复习 · M/目标 K」', (tester) async {
+    router.todayStats = const {
+      'goal': 10,
+      'done': 2,
+      'dueTotal': 8,
+      'remainingToday': 6,
+    };
+    await pumpPage(tester);
+    expect(find.text('继续今日复习 · 2/目标 10'), findsOneWidget,
+        reason: '进行中态沿用「N/目标 M」措辞基线');
+  });
+
+  testWidgets('今日已完成态：done>=goal → 「今日已完成 M/K ✓」', (tester) async {
+    router.todayStats = const {
+      'goal': 10,
+      'done': 10,
+      'dueTotal': 3,
+      'remainingToday': 0,
+    };
+    await pumpPage(tester);
+    expect(find.text('今日已完成 10/10 ✓'), findsOneWidget,
+        reason: '完成态仍展示（点击可进会话页再加练到期卡）');
+    // 完成态大数字 remainingToday=0 与 CTA 完成语义一致
+    expect(find.text('0'), findsOneWidget);
   });
 
   testWidgets('罗盘表盘：第四路 GET /progress 尽力而为接入，进度弧数据到位', (tester) async {
@@ -360,7 +439,7 @@ void main() {
 
     // 尽力而为第四路不阻断：首页主数据照常渲染
     expect(find.text('恒牙'), findsOneWidget);
-    expect(find.text('8'), findsOneWidget);
+    expect(find.text('6'), findsOneWidget);
     expect(find.textContaining('待审核 6'), findsOneWidget);
 
     // 空表盘：fraction 0（无进度弧），按钮仍可点击进进度页（导航由 sweep 测试覆盖）
@@ -412,8 +491,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('恒牙'), findsOneWidget);
-    expect(find.text('8'), findsOneWidget);
-    expect(find.textContaining('张今日到期'), findsOneWidget);
+    expect(find.text('6'), findsOneWidget);
+    expect(find.textContaining('张今日还剩'), findsOneWidget);
     // 卸载收尾在 pumpPage 的 addTearDown：控制器 dispose → Ticker 注销，
     // 若有泄漏框架以「active Ticker」自动判失败（结构性兜底）
   });

@@ -1,8 +1,13 @@
-// 统计页（M3）：streak + 打卡热力图 + 保留率 + 未来 7 天到期预测 + leech 弱卡榜
-// 数据源：/api/v1/stats/{streak,heatmap,retention,forecast} + /cards/leech
-// 离线韧性（问1+5）：五路读端点带缓存回退——断网时整页可用（含底部设置入口），
+// 统计页（M3）：今日复习进度 + streak + 打卡热力图 + 保留率 + 未来 7 天到期预测 + leech 弱卡榜
+// 数据源：/api/v1/stats/today + /api/v1/stats/{streak,heatmap,retention,forecast} + /cards/leech
+// 离线韧性（问1+5）：五路历史读端点带缓存回退——断网时整页可用（含底部设置入口），
 // 并显示「离线数据 · 更新于 HH:mm」提示条。
+// 口径注记（与每日计划对齐）：/stats/today 是「实时任务口径」（goal/done/dueTotal/
+// remainingToday，随每张评分即时变化，不走离线缓存），五路历史统计是「历史回顾口径」
+// （streak/热力图/保留率/到期预测，可离线回退旧帧）。两者同屏并存、各司其职：
+// 今日任务看今日卡，历史趋势看下方各卡，任何数字不得互相换算或混用。
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared/hengya_shared.dart';
 
 import '../services/api/api_client.dart';
@@ -29,6 +34,12 @@ class _StatsPageState extends State<StatsPage> {
   List<DueForecastDay> _forecast = [];
   List<FlashCard> _leech = [];
   DateTime? _cacheAt; // 非 null = 有端点走了离线缓存回退
+
+  /// 今日进度（每日计划唯一口径 GET /stats/today）：null = 尚未取到 /
+  /// 端点不可用（remote 老服务器 404）→ 今日区块不渲染，绝不阻断整页。
+  /// 刻意不参与离线缓存回退——今日进度与队列同属实时任务口径（api_client
+  /// fetchTodayStats 注释），断网/旧帧不回退，显示上次成功值即可。
+  TodayProgress? _today;
 
   /// #13：队列面板刷新信号（_load / pull-to-refresh 时自增——面板重读
   /// 「卡生成队列」当前态；与设置页 _corpusRev 同一模式）。
@@ -63,6 +74,15 @@ class _StatsPageState extends State<StatsPage> {
         ApiClient.instance.fetchForecast(),
         ApiClient.instance.fetchLeechCards(),
       ]);
+      // 今日进度单独拉取、不进 Future.wait 主链路：端点不可用时（remote 老
+      // 服务器 404 / 断网）只影响今日区块自身（不渲染或保留旧值），绝不把
+      // 整页拖入错误态——历史五路与今日任务两条数据面互不阻断。
+      try {
+        _today = await ApiClient.instance.fetchTodayStats();
+      } on ApiException catch (e) {
+        // 首拉即失败（404/断网）：区块不渲染；刷新时保留旧值，不闪没
+        if (_today == null) debugPrint('stats/today 不可用，今日区块隐藏：${e.message}');
+      }
       setState(() {
         _streak = results[0] as int;
         _heatmap = results[1] as Map<String, int>;
@@ -118,6 +138,12 @@ class _StatsPageState extends State<StatsPage> {
                 children: [
                   if (_cacheAt != null) ...[
                     OfflineDataBar(savedAt: _cacheAt),
+                    const SizedBox(height: 16),
+                  ],
+                  // 今日任务是本页主角（实时任务口径），历史统计是陪衬：
+                  // streak 卡下移一层、配色改 surface 版本以拉开视觉层级
+                  if (_today != null) ...[
+                    _TodayCard(progress: _today!),
                     const SizedBox(height: 16),
                   ],
                   _StreakCard(streak: _streak, scheme: scheme),
@@ -257,6 +283,13 @@ class _RetentionWindowCell extends StatelessWidget {
 ///   ④ 按日复习量配色强度（沿用旧版色阶）
 /// 数据侧：fetchHeatmap(days: 365)（服务端钳制 1..365）；
 /// 空历史（如刚还原复习记录后）显示引导空态而非空白错乱。
+///
+/// 口径注记：热力图是**历史回顾口径**（每日复习量的逐日存档，断网可回退缓存
+/// 旧帧），与顶部「今日复习」卡的 /stats/today **实时任务口径**并存不混用——
+/// 热力图最后一格（今天）的颜色在断网时可能滞后于今日卡的实际进度，属预期：
+/// 今日任务以今日卡为准，历史趋势以热力图为准。两者日界同为本地自然日
+/// （heatmapDays 按 reviewed_at 日期前缀聚合，today.done 同规则），不存在
+/// 同一天归属歧义。
 
 /// 时间轴格序列：首格 = 最早学习日，逐日递增到今天；无记录返回空
 /// （调用方显示空态）。坏日期键自动忽略；未来记录（时钟偏移）收敛为今天单格。
@@ -460,7 +493,119 @@ class _SettingsEntry extends StatelessWidget {
   }
 }
 
+/// 今日复习进度卡（本页主角）：进度条 + 「N/目标 M」+ 三态状态文案
+///
+/// 数据源：GET /stats/today 唯一口径（goal/done/dueTotal/remainingToday 四字段
+/// 照抄 TodayProgress），禁止用热力图当天格或 forecast 今天柱另算 done——
+/// 热力图是历史回顾口径（断网时还会回退缓存旧帧），today 是实时任务口径
+/// （随每张评分即时变化），同一天数值同源但语义与时效不同，并存不混用。
+/// 三态措辞与首页大 CTA / 今日复习会话同一套基线：
+///   未开始（done==0 且未达目标）「开始今日复习 · 还剩 N 张」
+///   进行中（0 < done < goal）  「继续今日复习 · M/目标 K」
+///   已完成（done >= goal）      「今日已完成 M/K ✓」
+/// 整卡可点：context.push('/review/today')——已完成态进入也是完成/加练视图，
+/// 由 TodayReviewPage 按 remainingToday==0 自行渲染，统计页不重复判定。
+/// remote 老服务器无 /stats/today（404）时外层不渲染本卡，不影响其余区块。
+class _TodayCard extends StatelessWidget {
+  const _TodayCard({required this.progress});
+
+  final TodayProgress progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final goal = progress.goal;
+    final done = progress.done;
+    final reached = goal > 0 && done >= goal;
+    final statusText = done <= 0
+        ? '开始今日复习 · 还剩 ${progress.remainingToday} 张'
+        : reached
+        ? '今日已完成 $done/$goal ✓'
+        : '继续今日复习 · ${progress.display}';
+    return Card(
+      key: const ValueKey('stats-today-card'),
+      elevation: 0,
+      color: scheme.primaryContainer,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => context.push('/review/today'),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.flag_outlined,
+                    size: 20,
+                    color: scheme.onPrimaryContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '今日复习',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: scheme.onPrimaryContainer,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    progress.display,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: scheme.onPrimaryContainer,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: goal <= 0 ? 0.0 : (done / goal).clamp(0.0, 1.0),
+                  minHeight: 8,
+                  backgroundColor: scheme.surfaceContainerHighest,
+                  valueColor: AlwaysStoppedAnimation<Color>(scheme.primary),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      statusText,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: scheme.onPrimaryContainer,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    size: 20,
+                    color: scheme.onPrimaryContainer,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 头部 streak 卡（参考设计稿：大数字 + 火焰）
+///
+/// 视觉层级：每日计划上线后，本页主角是「今日复习」进度卡（_TodayCard），
+/// streak 降为历史陪衬——背景从 primaryContainer 改 surfaceContainerLow，
+/// 火焰改描边图标弱化。口径注记：streak 与 /stats/today 的 done 同为
+/// **本地自然日**口径（db.streakDays 按 reviewed_at 日期前缀从今天往回数，
+/// 今日未复习不打断昨日 streak），两者数字不相矛盾、也不互相换算：
+/// streak 答「连续多少天有复习」，today.done 答「今天完成多少张」——
+/// 同屏并存无割裂（例：连续 4 天 + 今日 0/目标 50 = 昨天之前连着、今天还没开始）。
 class _StreakCard extends StatelessWidget {
   const _StreakCard({required this.streak, required this.scheme});
 
@@ -471,12 +616,16 @@ class _StreakCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       elevation: 0,
-      color: scheme.primaryContainer,
+      color: scheme.surfaceContainerLow,
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: Row(
           children: [
-            const Text('🔥', style: TextStyle(fontSize: 36)),
+            Icon(
+              Icons.local_fire_department_outlined,
+              size: 34,
+              color: scheme.outline,
+            ),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
@@ -486,7 +635,7 @@ class _StreakCard extends StatelessWidget {
                     '连续打卡 $streak 天',
                     style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                       fontWeight: FontWeight.w800,
-                      color: scheme.onPrimaryContainer,
+                      color: scheme.onSurface,
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -498,7 +647,7 @@ class _StreakCard extends StatelessWidget {
                         : '坚持 7 天形成习惯',
                     style: TextStyle(
                       fontSize: 13,
-                      color: scheme.onPrimaryContainer,
+                      color: scheme.outline,
                     ),
                   ),
                 ],

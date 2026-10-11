@@ -183,6 +183,96 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // ---------------- 每日计划：每日复习目标（local 特有） ----------------
+
+  /// 目标调节弹层：拉当前值 → 底部面板滑杆 10~500 → PUT /settings/daily。
+  /// 默认 50 张（未设置时后端兜底）；与查重阈值弹层同一套统一风格。
+  Future<void> _editDailyGoal() async {
+    DailyGoalSettings settings;
+    try {
+      settings = await ApiClient.instance.fetchDailyGoal();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(context, '读取失败：${e.message}', type: TopToastType.error);
+      return;
+    }
+    if (!mounted) return;
+    var value = settings.goal.toDouble();
+    final go = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (dlgCtx) => StatefulBuilder(
+        builder: (dlgCtx, setDlg) => Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '每日复习目标',
+                style: Theme.of(
+                  dlgCtx,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '「今日复习」每天要背的张数（跨科目合并，${settings.min}~${settings.max}）',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(dlgCtx).colorScheme.outline,
+                ),
+              ),
+              Slider(
+                value: value.clamp(
+                  settings.min.toDouble(),
+                  settings.max.toDouble(),
+                ),
+                min: settings.min.toDouble(),
+                max: settings.max.toDouble(),
+                divisions: settings.max - settings.min,
+                label: value.round().toString(),
+                onChanged: (v) => setDlg(() => value = v),
+              ),
+              Text('当前：${value.round()} 张'),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(dlgCtx, false),
+                    child: const Text('取消'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(dlgCtx, true),
+                    child: const Text('保存'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (go != true || !mounted) return;
+    try {
+      await ApiClient.instance.updateDailyGoal(value.round());
+      if (!mounted) return;
+      TopToast.show(
+        context,
+        '已保存：每日复习目标 ${value.round()} 张',
+        type: TopToastType.success,
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(
+        context,
+        '保存失败：${e.message}',
+        type: TopToastType.error,
+        stayDuration: const Duration(milliseconds: 1800),
+      );
+    }
+  }
+
   // ---------------- 强制开始拆卡 / 改卡（server 0.4.1+ / Phase 4 端上） ----------------
 
   /// 触发拆卡流水线尽快运行：先弹确认，确认后 POST /api/v1/pipeline/trigger，
@@ -697,6 +787,20 @@ class _SettingsPageState extends State<SettingsPage> {
                   onTap: _weeklyTriggering ? null : _confirmWeeklyScan,
                 ),
                 if (currentBackendMode == BackendMode.local) ...[
+                  const Divider(height: 1, indent: 16, endIndent: 16),
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                    title: const Text(
+                      '每日复习目标',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: const Text(
+                      '「今日复习」每天要背的张数（跨科目合并），默认 50 张',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    trailing: const Icon(Icons.flag_outlined),
+                    onTap: _editDailyGoal,
+                  ),
                   const Divider(height: 1, indent: 16, endIndent: 16),
                   ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 16),

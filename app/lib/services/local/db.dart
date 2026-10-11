@@ -424,6 +424,100 @@ class Db {
     return {for (var r in rows) r['subject_id'] as String: r['n'] as int};
   }
 
+  // ---------------- 每日计划（daily plan） ----------------
+  //
+  // 今日进度口径（**全 App 唯一口径**，下游首页大 CTA / 今日复习会话 /
+  // 统计页总结一律经 [todayPlan] 取数，绝不允许各页面自行另算）：
+  //   done            今日已完成 = review_logs 中 reviewed_at 落在「今天」
+  //                   （本地时区自然日 00:00-24:00）的记录数；
+  //   dueTotal        到期总数 = 全科目 status='active' 且 m_due_at<=now 的卡数；
+  //   remainingToday  今日还剩 = clamp(goal - done, 0, dueTotal)。
+  //
+  // 时区坑规避：reviewed_at 存 ISO 字符串（DateTime.toIso8601String，本地
+  // 时区、无 Z 后缀，与 m_due_at 同形）。若解析成 DateTime 再比较，会引入
+  // 「本地自然日边界 ↔ UTC 换算」的时区坑；这里统一用「当天日期前缀 +
+  // 边界字符串比较」实现：reviewed_at >= '<今天YYYY-MM-DD>' AND
+  // reviewed_at < '<明天YYYY-MM-DD>'——字符串序与时间序在 ISO 格式下一致，
+  // 等价于半开区间 [今天00:00, 明天00:00)，零时区换算（idx_logs_time 索引
+  // 可直接命中范围扫描）。
+
+  /// settings 表键：每日复习目标张数（GET/PUT /settings/daily；仅 local）
+  static const String kDailyGoalSettingKey = 'daily.goal';
+  static const int kDailyGoalDefault = 50;
+  static const int kDailyGoalMin = 10;
+  static const int kDailyGoalMax = 500;
+
+  /// 每日复习目标（settings 表；未设置/脏数据回退默认 50，范围外钳制）
+  int dailyGoal() {
+    final raw = settingGet(kDailyGoalSettingKey);
+    final n = raw == null || raw.isEmpty ? null : int.tryParse(raw);
+    if (n == null) return kDailyGoalDefault;
+    return n.clamp(kDailyGoalMin, kDailyGoalMax);
+  }
+
+  /// 写每日复习目标（调用方路由层已校验范围；此处防御性钳制）
+  void setDailyGoal(int goal) => settingSet(
+    kDailyGoalSettingKey,
+    goal.clamp(kDailyGoalMin, kDailyGoalMax).toString(),
+  );
+
+  /// 今日已完成（口径见本区块头注释：当天日期前缀 + 边界字符串比较）
+  int todayDoneCount() {
+    final today = DateTime.now();
+    final start = _dayKey(today);
+    final end = _dayKey(today.add(const Duration(days: 1)));
+    final row = _db
+        .select(
+          'SELECT COUNT(*) AS n FROM review_logs '
+          'WHERE reviewed_at >= ? AND reviewed_at < ?',
+          [start, end],
+        )
+        .first;
+    return (row['n'] as int?) ?? 0;
+  }
+
+  /// 到期总数（全科目 active 且到期，含超期；口径见本区块头注释）
+  int dueTotalCount() {
+    final row = _db
+        .select(
+          "SELECT COUNT(*) AS n FROM cards "
+          "WHERE status = 'active' AND m_due_at <= ?",
+          [DateTime.now().toIso8601String()],
+        )
+        .first;
+    return (row['n'] as int?) ?? 0;
+  }
+
+  /// 今日计划四字段聚合（唯一口径出口；/stats/today 与 /cards/queue/today
+  /// 附加字段共用本方法，禁止另写第二套算法）
+  Map<String, int> todayPlan({int? goal}) {
+    final g = goal ?? dailyGoal();
+    final done = todayDoneCount();
+    final dueTotal = dueTotalCount();
+    final remaining = (g - done).clamp(0, dueTotal);
+    return {
+      'goal': g,
+      'done': done,
+      'dueTotal': dueTotal,
+      'remainingToday': remaining,
+    };
+  }
+
+  /// 今日跨科目到期队列（GET /cards/queue/today 数据层）。
+  /// 排序取舍：单条 SQL 全局 ORDER BY m_due_at——「科目内升序」与「科目间
+  /// 按到期时间全局排序」是同一条序（到期时间即唯一序，超期久的先出），
+  /// 无需按科目分组再归并。[limit] = remainingToday（≤0 返回空——
+  /// done>=goal 或无到期卡时今日队列即空）。
+  List<FlashCard> dueTodayCards({required int limit}) {
+    if (limit <= 0) return const [];
+    final rows = _db.select(
+      "SELECT * FROM cards WHERE status = 'active' AND m_due_at <= ? "
+      'ORDER BY m_due_at ASC LIMIT ?',
+      [DateTime.now().toIso8601String(), limit],
+    );
+    return rows.map(_rowToCard).toList();
+  }
+
   /// 插入（导入用）；幂等：已存在的 id 跳过。
   /// 返回 true=新插入，false=已存在跳过
   bool importCard(FlashCard card) {
