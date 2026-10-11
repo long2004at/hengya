@@ -4,7 +4,7 @@
 
 ## 验证纪律（重要）
 
-本仓库有 GitHub Actions CI（`.github/workflows/ci.yml`）：**每次 push / PR 自动在云端跑 `flutter analyze` + 全量测试（Windows job，约 5 分钟）**。
+本仓库有 GitHub Actions CI（`.github/workflows/ci.yml`）：**每次 push / PR 自动在云端跑 `flutter analyze` + 全量测试（Windows job，约 5 分钟）**。tag 触发时，APK 构建 job 与测试 job **并行**执行，发布 job 在两者都通过后才运行（发布门禁语义不变）。
 
 - 改动代码后**不要**在本机跑全量 `flutter test` 或 `flutter build apk`——commit + push，让 CI 验证。
 - 本地允许且推荐的快检：`flutter analyze`（约 3 秒，cwd=app/）。
@@ -17,7 +17,7 @@
 
 1. `app/pubspec.yaml` 版本递增——**versionCode 严格递增**（Android 不允许降级覆盖安装；应用内更新比较只认 versionCode）；
 2. commit → `git tag v<版本>` → push（含 tag）；
-3. CI 自动完成：构建 APK → 创建**草稿** Release → 同步 **ECS 通道**（latest.json 上传，连接信息在 Secrets）→ 回写 **GitHub 通道**（`update/latest.json`，apk 为 Release 资产绝对链接）；
+3. CI 自动完成：tag 触发后 `build-android`（构建 APK）与 `test-windows`（全量测试）**并行**；`publish-android` 在两者都通过后创建**草稿** Release → 同步 **ECS 通道**（latest.json 上传，连接信息在 Secrets）→ 回写 **GitHub 通道**（`update/latest.json`，apk 为 Release 资产绝对链接）；
 4. 人工润色中文发布说明 → 发布 Release。
 
 双更新通道（内容一致，CI 保证同步）：
@@ -26,7 +26,7 @@
 
 ### 发布签名 Secrets 清单（发版前置条件）
 
-release-android job 的 APK 签名凭据**全部来自 GitHub Secrets**，仓库内不出现任何明文密码：
+`build-android` job 的 APK 签名凭据**全部来自 GitHub Secrets**（`publish-android` 只负责通道同步，不再接触签名），仓库内不出现任何明文密码：
 
 | Secret | 用途 |
 |---|---|

@@ -35,43 +35,12 @@ jobs:
       # 同 commit main 绿 tag 红且每轮挂的用例不同即此因。确定性优先。
       - run: flutter test --concurrency=1
 
-  # Linux 宿主：试探性验证（PDF/金样用例自动 SKIP；sqlite3 走系统库）
-  test-linux:
-    name: analyze + 测试（Linux，非阻断试探）
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: true
-    defaults:
-      run:
-        working-directory: app
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装系统 libsqlite3
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: 3.44.6
-          channel: stable
-          cache: true
-
-      - run: flutter pub get
-      - run: flutter analyze
-      # 串行跑套件（--concurrency=1）：共享 runner 负载下并发套件互相挤兑，
-      # 重 IO/时序敏感用例（full_backup 换库、pipeline 池上限）会 flake——
-      # 同 commit main 绿 tag 红且每轮挂的用例不同即此因。确定性优先。
-      - run: flutter test --concurrency=1
-
-  # 打 tag（v*）时：Android release 构建并附到草稿 Release（发布前可编辑中文说明）
-  release-android:
-    name: Android APK 出包（tag 触发）
+  # 打 tag（v*）时：Android release 构建，仅产 artifact，与 test-windows 并行
+  build-android:
+    name: Android APK 构建（tag 触发，仅产 artifact）
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test-windows
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions:
-      contents: write
     defaults:
       run:
         working-directory: app
@@ -134,12 +103,43 @@ jobs:
             exit 1
           fi
 
+      # 重命名产物携带 tag 名：artifact 单独传递 tag 信息，构建与发布两 job 解耦
+      - run: mv build/app/outputs/flutter-apk/app-release.apk hengya-${{ github.ref_name }}-release.apk
+
+      # upload-artifact 的 path 相对仓库根写全：defaults.run.working-directory
+      # 只作用于 run 步骤，不影响 uses 步骤
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hengya-apk
+          path: app/hengya-${{ github.ref_name }}-release.apk
+          retention-days: 14
+
+  # 发布 job：构建与测试都绿才跑，坏包不进任何通道
+  publish-android:
+    name: Android APK 发布（门禁通过后上传通道）
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-android, test-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      # path 相对仓库根写全：APK 落到 app/hengya-<tag>-release.apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: hengya-apk
+          path: app
+
       - name: 附到 Release（已存在则上传，否则建草稿）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mv build/app/outputs/flutter-apk/app-release.apk hengya-${{ github.ref_name }}-release.apk
           APK="hengya-${{ github.ref_name }}-release.apk"
           # 显式分支：gh release view 判断同名 Release 是否已存在。
           # 不要依赖 `gh release create ... || gh release upload ...`——create 对

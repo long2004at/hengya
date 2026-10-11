@@ -11,7 +11,8 @@
 #   [1] flutter analyze quick gate (~3s, cwd=app/, per AGENTS.md discipline)
 #   [2] Bump app/pubspec.yaml: versionName per -Bump, versionCode always +1
 #   [3] git commit + tag vX.Y.Z + push origin main vX.Y.Z
-#   CI does the rest (test -> build -> sign -> draft Release -> channel sync)
+#   CI does the rest (build and test run in parallel; after both pass,
+#   publish: sign -> draft Release -> channel sync)
 #
 # You still do (by design - human gates):
 #   - Releases page: polish notes on the draft, then Publish
@@ -105,7 +106,7 @@ if ($LASTEXITCODE -ne 0) { Fail "git push failed" }
 # --- [5/5] done - what happens next ---------------------------------------------
 
 Write-Host ""
-Write-Host "[release] pushed $tagName - CI release pipeline started (~10-25 min)."
+Write-Host "[release] pushed $tagName - CI release pipeline started (build + test in parallel, then publish; ~10-25 min)."
 Write-Host "  1. Watch:  https://github.com/long2004at/hengya/actions"
 Write-Host "  2. Then:   Releases -> Drafts -> $tagName -> polish notes -> Publish"
 Write-Host "  3. Phone:  check update -> v$newName -> download & install"
