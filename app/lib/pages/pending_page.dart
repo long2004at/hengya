@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:shared/hengya_shared.dart';
 
 import '../services/api/api_client.dart';
+import '../theme.dart';
 import '../widgets/reason_action_dialog.dart';
 import 'rework_request_sheet.dart';
 import 'rework_workbench_page.dart';
@@ -133,14 +134,26 @@ class _PendingPageState extends State<PendingPage> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 视觉重构（2026-10-11 整体质感）：头部改品牌蓝渐变（呼应首页 Hero），
+    // 深色底自然压住下方内容，形成「稳重厚重」的第一层视觉锚点。
     return Scaffold(
+      backgroundColor: scheme.surfaceContainerLow,
       appBar: AppBar(
         title: const Text('待审核池'),
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(gradient: kHeroGradient),
+        ),
+        foregroundColor: Colors.white,
+        titleTextStyle: const TextStyle(
+          fontSize: 20,
+          fontWeight: FontWeight.w800,
+          color: Colors.white,
+        ),
         actions: [
           if (currentBackendMode == BackendMode.local)
             IconButton(
               tooltip: '回炉草案与任务',
-              icon: const Icon(Icons.build_circle_outlined),
+              icon: const Icon(Icons.build_circle_outlined, color: Colors.white),
               onPressed: () async {
                 await Navigator.of(context, rootNavigator: true).push(
                   MaterialPageRoute<void>(
@@ -154,22 +167,34 @@ class _PendingPageState extends State<PendingPage> {
             Padding(
               padding: const EdgeInsets.only(right: 16),
               child: Center(
+                // 计数徽章厚重化：白底 10% 半透明 + 白描边 + 柔影，浮于渐变之上
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 4,
+                    horizontal: 12,
+                    vertical: 5,
                   ),
                   decoration: BoxDecoration(
-                    color: scheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(12),
+                    color: Colors.white.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.35),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: HengyaColors.brandDeep.withValues(alpha: 0.35),
+                        offset: const Offset(0, 3),
+                        blurRadius: 8,
+                      ),
+                    ],
                   ),
                   child: Text(
                     _total > _cards.length
                         ? '${_cards.length}/$_total 张待审'
                         : '${_cards.length} 张待审',
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 12,
-                      color: scheme.onPrimaryContainer,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
                     ),
                   ),
                 ),
@@ -187,10 +212,11 @@ class _PendingPageState extends State<PendingPage> {
               onRefresh: _load,
               child: ListView.separated(
                 physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(16),
+                // 视觉重构：水平留白 20 + 底部 28，给卡影留出呼吸空间
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
                 // #15 分页：列表末尾追加「加载更多」（还有剩余时）
                 itemCount: _cards.length + (_hasMore ? 1 : 0),
-                separatorBuilder: (_, _) => const SizedBox(height: 12),
+                separatorBuilder: (_, _) => const SizedBox(height: 14),
                 itemBuilder: (context, i) {
                   if (i >= _cards.length) {
                     return _LoadMoreTile(
@@ -500,191 +526,308 @@ class _PendingCard extends StatelessWidget {
       CardType.caseChain => '病例',
       CardType.image => '图像',
     };
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: scheme.secondaryContainer,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    typeLabel,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: scheme.onSecondaryContainer,
-                    ),
-                  ),
-                ),
-                // 教材兜底标识（批4 节点①）：sourceTier=textbook 的卡证据来自
-                // 教材树（ppt 主源未命中后的兜底检索）——同款徽标风格、
-                // tertiaryContainer 配色与类型徽标区分。
-                if (card.sourceTier == SourceTier.textbook) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: scheme.tertiaryContainer,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Text(
-                      '教材',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: scheme.onTertiaryContainer,
-                      ),
-                    ),
-                  ),
-                ],
-                // #11 查重徽标（用户要求标识明显）：红=疑似重复；橙=未查重降级
-                if (card.dupCheck == 'dup') ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFDE8E8),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Text(
-                      '疑似重复',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFFD54941),
-                      ),
-                    ),
-                  ),
-                ],
-                if (card.dupCheck == 'skipped') ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFFF3E0),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Text(
-                      '未查重',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFFE37318),
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(width: 8),
-                if (card.tags.isNotEmpty)
-                  Expanded(
-                    child: Text(
-                      card.tags.take(3).join(' · '),
-                      style: TextStyle(fontSize: 11, color: scheme.outline),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              card.front,
-              style: const TextStyle(
-                fontSize: 16,
-                height: 1.4,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              card.back,
-              style: TextStyle(
-                fontSize: 14,
-                height: 1.5,
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(Icons.anchor, size: 13, color: scheme.outline),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    '${card.anchor} · ${card.source}',
-                    style: TextStyle(fontSize: 11, color: scheme.outline),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-            const Divider(height: 20),
-            // #11：疑似重复卡并排对比（新卡 vs 已有卡），方便人工裁决
-            if (card.dupCheck == 'dup')
+    // 视觉重构（2026-10-11 整体质感）：白卡承载在「底层柔影 + 顶部品牌色条」
+    // 的厚重容器上——柔影让卡浮出底色，色条与头部渐变同源，保持全页一体感。
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          // 底层柔影：品牌深蓝调，下沉感（呼应 kCardSoftShadow，略加重）
+          BoxShadow(
+            color: HengyaColors.brandDeep.withValues(alpha: 0.10),
+            offset: const Offset(0, 8),
+            blurRadius: 24,
+          ),
+          // 贴地硬影：勾勒卡片轮廓，强化「纸叠在桌上」的厚度
+          BoxShadow(
+            color: const Color(0x1A000000),
+            offset: const Offset(0, 2),
+            blurRadius: 4,
+          ),
+        ],
+      ),
+      child: Card(
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 顶部品牌色条：与 AppBar 渐变同源的 4px 深蓝条，
+              // 是卡片与头部「同一视觉体系」的锚点
+              Container(height: 4, color: HengyaColors.brand),
               Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _DupCompare(
-                  newCard: card,
-                  oldCard: dupTarget,
-                  oldCardId: card.dupOf ?? '',
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _badgesRow(typeLabel, scheme),
+                    // 标签行（原挤在标识行尾，挤压徽标、有无不定——移到独立行固定展示）
+                    if (card.tags.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          card.tags.join(' · '),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            height: 1.3,
+                            color: scheme.outline,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 10),
+                    Text(
+                      card.front,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        height: 1.4,
+                        fontWeight: FontWeight.w600,
+                        color: HengyaColors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      card.back,
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.5,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Icon(Icons.anchor, size: 13, color: scheme.outline),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            '${card.anchor} · ${card.source}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: scheme.outline,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                    // #11：疑似重复卡并排对比（新卡 vs 已有卡），方便人工裁决
+                    if (card.dupCheck == 'dup') ...[
+                      const SizedBox(height: 12),
+                      _DupCompare(
+                        newCard: card,
+                        oldCard: dupTarget,
+                        oldCardId: card.dupOf ?? '',
+                      ),
+                    ],
+                  ],
                 ),
               ),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: scheme.primaryContainer,
-                      foregroundColor: scheme.onPrimaryContainer,
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                    ),
-                    icon: const Icon(Icons.check_rounded, size: 18),
-                    label: const Text('批准'),
-                    onPressed: onApprove,
-                  ),
+              // 操作区（视觉重构）：浅底嵌板承托三键——与白色正文区形成
+              // 明暗对比、边界分明，但仍在同一张卡内，不散成孤立 UI
+              Container(
+                width: double.infinity,
+                decoration: const BoxDecoration(
+                  color: Color(0xFFF7F8FA),
+                  border: Border(top: BorderSide(color: Color(0xFFE4E8EF))),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 10),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _ActionButton(
+                        label: '批准',
+                        icon: Icons.check_rounded,
+                        onPressed: onApprove,
+                        style: _ActionButtonStyle.approve,
+                      ),
                     ),
-                    icon: const Icon(Icons.edit_outlined, size: 18),
-                    label: const Text('编辑'),
-                    onPressed: onEdit,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    style: FilledButton.styleFrom(
-                      foregroundColor: scheme.error,
-                      padding: const EdgeInsets.symmetric(vertical: 10),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _ActionButton(
+                        label: '编辑',
+                        icon: Icons.edit_outlined,
+                        onPressed: onEdit,
+                        style: _ActionButtonStyle.neutral,
+                      ),
                     ),
-                    icon: const Icon(Icons.close_rounded, size: 18),
-                    label: const Text('拒绝'),
-                    onPressed: onReject,
-                  ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _ActionButton(
+                        label: '拒绝',
+                        icon: Icons.close_rounded,
+                        onPressed: onReject,
+                        style: _ActionButtonStyle.reject,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 标识行（标识规范化改造，2026-10-11）：三类标识各占一个固定槽位、
+  /// 每槽必有内容——无值时显示灰色「—」占位，保证所有卡头版式完全一致：
+  ///   槽1 卡型 ｜ 槽2 来源层级（PPT/教材/真题） ｜ 槽3 查重（疑似重复/未查重/已查重）
+  /// 查重需人工关注，槽 3 非中性态时加强调色。
+  Widget _badgesRow(String typeLabel, ColorScheme scheme) {
+    const placeholder = '—';
+    final tierLabel = switch (card.sourceTier) {
+      SourceTier.ppt => 'PPT',
+      SourceTier.exam => '真题',
+      SourceTier.textbook => '教材',
+      SourceTier.user => placeholder,
+    };
+    final dupNeutral = card.dupCheck != 'dup' && card.dupCheck != 'skipped';
+    return Row(
+      children: [
+        _BadgeChip(label: typeLabel, color: scheme.secondaryContainer),
+        const SizedBox(width: 6),
+        _BadgeChip(label: tierLabel, color: scheme.tertiaryContainer),
+        const SizedBox(width: 6),
+        _BadgeChip(
+          label: switch (card.dupCheck) {
+            'dup' => '疑似重复',
+            'skipped' => '未查重',
+            _ => '已查重',
+          },
+          color: dupNeutral
+              ? scheme.surfaceContainerHighest
+              : const Color(0xFFFDE8E8),
+          foregroundColor: dupNeutral
+              ? scheme.onSurfaceVariant
+              : const Color(0xFFD54941),
+          emphasized: !dupNeutral,
+        ),
+      ],
+    );
+  }
+}
+
+/// 统一规格徽标（标识规范化改造，2026-10-11）：待审核卡头所有标识共用
+/// 同一芯片版式（字号 11 / 同内边距 / 同圆角），差异只在配色与字重。
+/// 视觉重构：加 1px 半透明边线，让芯片在白底上也有清晰的界面感。
+class _BadgeChip extends StatelessWidget {
+  const _BadgeChip({
+    required this.label,
+    required this.color,
+    this.foregroundColor,
+    this.emphasized = false,
+  });
+
+  final String label;
+  final Color color;
+  final Color? foregroundColor;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: (foregroundColor ?? HengyaColors.textSecondary).withValues(
+            alpha: 0.18,
+          ),
+        ),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          height: 1.4,
+          fontWeight: emphasized ? FontWeight.w600 : FontWeight.w500,
+          color: foregroundColor,
+        ),
+      ),
+    );
+  }
+}
+
+/// 操作按钮语义（视觉重构 2026-10-11）：批准=品牌蓝（主行动）/ 编辑=白底
+/// 描边（中性）/ 拒绝=警示红（破坏性）。
+enum _ActionButtonStyle { approve, neutral, reject }
+
+/// 卡片操作三键（视觉重构 2026-10-11）：实底 + 下沉硬影的立体按钮——
+/// 主行动最重、中性次之、破坏性红底，权重一眼可辨且不依赖颜色单一维度。
+class _ActionButton extends StatelessWidget {
+  const _ActionButton({
+    required this.label,
+    required this.icon,
+    required this.onPressed,
+    required this.style,
+  });
+
+  final String label;
+  final IconData icon;
+  final VoidCallback onPressed;
+  final _ActionButtonStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final (Color bg, Color fg, Color border) = switch (style) {
+      _ActionButtonStyle.approve => (
+        HengyaColors.brand,
+        Colors.white,
+        Colors.transparent,
+      ),
+      _ActionButtonStyle.neutral => (
+        Colors.white,
+        HengyaColors.textSecondary,
+        HengyaColors.divider,
+      ),
+      _ActionButtonStyle.reject => (
+        HengyaColors.danger,
+        Colors.white,
+        Colors.transparent,
+      ),
+    };
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onPressed,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: border),
+            boxShadow: [
+              // 下沉硬影：按钮「立」在嵌板上的厚度感
+              BoxShadow(
+                color: bg == Colors.transparent
+                    ? const Color(0x14000000)
+                    : bg.withValues(alpha: 0.28),
+                offset: const Offset(0, 2),
+                blurRadius: 4,
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 17, color: fg),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: fg,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -706,15 +849,29 @@ class _LoadMoreTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: FilledButton.tonal(
-        onPressed: loading ? null : onTap,
-        child: loading
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Text('加载更多'),
+      // 视觉重构：白底描边胶囊 + 柔影，与卡片语言一致（浅色嵌板承托操作）
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: HengyaColors.divider),
+          boxShadow: kCardSoftShadow,
+        ),
+        child: TextButton.icon(
+          style: TextButton.styleFrom(
+            foregroundColor: HengyaColors.brand,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+          ),
+          onPressed: loading ? null : onTap,
+          icon: loading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.expand_more_rounded, size: 18),
+          label: Text(loading ? '加载中…' : '加载更多'),
+        ),
       ),
     );
   }
@@ -740,14 +897,28 @@ class _DupCompare extends StatelessWidget {
     bool highlight = false,
   }) {
     final scheme = Theme.of(context).colorScheme;
+    // 视觉重构：对比面板改「下沉内嵌」质感——深色底 + 内描边，
+    // 与操作区嵌板同一语言（浅色嵌板承托、面板内凹承内容）。
     return Expanded(
       child: Container(
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: highlight
-              ? const Color(0xFFFDE8E8)
-              : scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          color: highlight ? const Color(0xFFFDECEC) : scheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: highlight
+                ? const Color(0xFFD54941).withValues(alpha: 0.25)
+                : HengyaColors.divider,
+          ),
+          boxShadow: highlight
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFFD54941).withValues(alpha: 0.08),
+                    offset: const Offset(0, 2),
+                    blurRadius: 6,
+                  ),
+                ]
+              : null,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -756,12 +927,21 @@ class _DupCompare extends StatelessWidget {
               title,
               style: TextStyle(
                 fontSize: 11,
-                fontWeight: FontWeight.w600,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.3,
                 color: highlight ? const Color(0xFFD54941) : scheme.outline,
               ),
             ),
             const SizedBox(height: 6),
-            Text(front, style: const TextStyle(fontSize: 13, height: 1.35)),
+            Text(
+              front,
+              style: const TextStyle(
+                fontSize: 13,
+                height: 1.35,
+                fontWeight: FontWeight.w600,
+                color: HengyaColors.textPrimary,
+              ),
+            ),
             const SizedBox(height: 6),
             Text(
               back,
@@ -803,25 +983,45 @@ class _EmptyPool extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 视觉重构：白卡 + 柔影承载空态，与列表卡片同一视觉语言，
+    // 避免空态「孤零零漂在底色上」的割裂感。
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.verified_outlined,
-            size: 56,
-            color: Theme.of(context).colorScheme.primary,
-          ),
-          const SizedBox(height: 12),
-          const Text('审核池已清空', style: TextStyle(fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          Text(
-            currentBackendMode == BackendMode.local
-                ? '拆卡流水线运行后新卡会送来审核（设置页「强制开始拆卡」可立即触发）'
-                : '每日 22:55 自动化拆卡后会推送新卡来审',
-            style: const TextStyle(fontSize: 12),
-          ),
-        ],
+      child: Container(
+        margin: const EdgeInsets.all(32),
+        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 36),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: HengyaColors.divider),
+          boxShadow: kCardSoftShadow,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.verified_outlined,
+              size: 52,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '审核池已清空',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              currentBackendMode == BackendMode.local
+                  ? '拆卡流水线运行后新卡会送来审核（设置页「强制开始拆卡」可立即触发）'
+                  : '每日 22:55 自动化拆卡后会推送新卡来审',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: HengyaColors.textSecondary,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -835,21 +1035,29 @@ class _ErrorState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 视觉重构：错误态与空态同一视觉语言（白卡 + 柔影），保持整页质感统一
     return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
+      child: Container(
+        margin: const EdgeInsets.all(32),
+        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 36),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: HengyaColors.divider),
+          boxShadow: kCardSoftShadow,
+        ),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
+            const Icon(
               Icons.wifi_off_outlined,
-              size: 48,
-              color: Theme.of(context).colorScheme.outline,
+              size: 44,
+              color: HengyaColors.textSecondary,
             ),
             const SizedBox(height: 12),
             const Text(
               '拉取待审核卡失败',
-              style: TextStyle(fontWeight: FontWeight.w600),
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
             ),
             const SizedBox(height: 16),
             FilledButton.tonal(onPressed: onRetry, child: const Text('重试')),
