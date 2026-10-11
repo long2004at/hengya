@@ -168,6 +168,54 @@ class LocalBackend {
     }
   }
 
+  /// 按「科目 + deck + 页码区间」反查语料原文（复习页锚点/来源 → 原文证据
+  /// 弹层数据源）。卡片入库时不存 evidenceChunkId（只拼进 anchor），故按
+  /// anchor 组成（deck 名 + 页码）在 chunks 表反查；同页多块合并为一段原文
+  /// 按页升序拼接。查不到返回空 list（弹层提示「未找到/已失效」），不抛错。
+  List<Map<String, Object?>> _cardEvidence(
+    String subject,
+    String deck,
+    int? pageStart,
+    int? pageEnd,
+  ) {
+    if (subject.isEmpty || deck.isEmpty) return [];
+    final file = File('$_corpusDir/corpus.db');
+    if (!file.existsSync()) return [];
+    final corpus = sqlite3.open(file.path, mode: OpenMode.readOnly);
+    try {
+      final rows = corpus.select(
+        "SELECT chunk_id, deck, title, source_type, page_start, page_end, text "
+        "FROM chunks WHERE COALESCE(subject_id,'')=? AND deck=? "
+        "AND source_type IN ('ppt','textbook') ORDER BY "
+        "CAST(page_start AS INTEGER), chunk_id",
+        [subject, deck],
+      );
+      final hits = <Map<String, Object?>>[];
+      for (final r in rows) {
+        final ps = int.tryParse('${r['page_start']}');
+        if (pageStart != null && ps != null && ps < pageStart) continue;
+        if (pageEnd != null && ps != null && ps > pageEnd) continue;
+        final text = (r['text'] as String?) ?? '';
+        if (text.trim().isEmpty) continue;
+        hits.add({
+          'chunkId': r['chunk_id'],
+          'deck': r['deck'],
+          'title': r['title'],
+          'sourceType': r['source_type'],
+          'pageRange':
+              '${r['page_start'] ?? '?'}${r['page_end'] == null || '${r['page_end']}' == '${r['page_start']}' ? '' : '-${r['page_end']}'}',
+          'text': text,
+        });
+      }
+      // 弱相关截断：原文证据只给最贴近锚点页码的几块，不一股脑全量上屏
+      return hits.take(6).toList();
+    } catch (_) {
+      return []; // 语料库损坏/表缺失等 → 静默降级为「未找到」
+    } finally {
+      corpus.dispose();
+    }
+  }
+
   Future<Map<String, dynamic>> _handleReworkRequest(
     Db db,
     String path,
@@ -491,6 +539,20 @@ class LocalBackend {
           for (final s in db.subjectRows())
             {...s, 'dueCount': dueCounts[s['id']] ?? 0},
         ],
+      };
+    }
+
+    // /evidence（锚点/来源反查语料原文；复习页「查看原文证据」弹层数据源。
+    // 只读 corpus.db；查不到 → 空 list，由弹层提示「未找到/已失效」）
+    if (path.startsWith('/evidence')) {
+      final q = _parseQuery(path);
+      return {
+        'evidence': _cardEvidence(
+          q['subject'] ?? '',
+          q['deck'] ?? '',
+          int.tryParse(q['pageStart'] ?? ''),
+          int.tryParse(q['pageEnd'] ?? ''),
+        ),
       };
     }
 

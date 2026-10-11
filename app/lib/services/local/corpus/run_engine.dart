@@ -575,7 +575,11 @@ final Map<String, String> kFallbackPrompts = {
       '$kMaxSubtopicsPerKeyword 个，宁缺毋滥不硬凑）；第二段输出一个 JSON 对象 '
       '{"cards":[...]}，逐子考点出卡（每子考点 1-2 张，每张卡用 subtopic 字段'
       '标注所属子考点）。每张卡一个考点（back 要点≤4，禁「和、以及、并简述」'
-      '触发词）；答案以 evidence 的语料原文为准（PPT 课件或教材，见 '
+      '触发词）；答案精简准确、分点式、得分点一针见血：只写得分点、每点独占'
+      '一行（1. 2. 编号或 • 分点），数值/年份类 ≤50 字、简答/列举类 ≤200 字、'
+      'caseChain ≤300 字；禁止整段照抄证据原文——原文只用来提炼不搬运，'
+      '衔接性叙述一律删除，术语/数值/关键限定词保留原文表述。'
+      '答案以 evidence 的语料原文为准（PPT 课件或教材，见 '
       'evidence.sourceType；两者内容冲突时以教材为准）；pptHit=false 时只输出'
       '一张占位卡（back=【语料未覆盖】请结合课堂笔记/教材补全原文后审核）。'
       'exam 卡每关键词 ≤2 张，需 examMeta{year,no}。',
@@ -587,6 +591,7 @@ rewrite 必须输出一张确有改进的卡；split 必须输出 targetCount �
 输出结构：{"action":"rewrite或split","cards":[{"front":"题干","back":"答案","evidenceChunkIds":["证据chunkId"]}],"issueResults":[{"id":"输入的理由id","resolved":true,"explanation":"可核验的修改说明"}],"summary":"修复摘要"}。
 必须逐项返回所有 issues 的处理结果；没有解决的理由 resolved=false，并说明还缺什么。不能仅凭换词或更换锚点宣称答案错误已修复。
 每张卡必须非空、题干自包含、引用真实原文，题干最多2000字、答案最多12000字。不要输出卡片ID、记忆参数或自行决定生效。
+答案要精简准确、分点式、得分点一针见血：rewrite 的 back 只写得分点、每点独占一行；禁止整段照抄证据原文；衔接性叙述一律删除；术语、数值、关键限定词保留原文表述——精简的是篇幅，不是忠实性。
 如果证据不足或要求不可实现，输出 {"action":"needs_input","message":"具体缺少什么或需要用户决定什么"}，不能回退到原卡或编造替代答案。''',
   'synonym':
       '为课堂关键词生成最多 $kMaxSynonymQueries 条同义表述检索式'
