@@ -88,8 +88,10 @@ void main() {
     expect(find.text('2 张待审'), findsOneWidget);
     expect(find.text('教材兜底卡的题干'), findsOneWidget);
     expect(find.text('PPT 主源卡的题干'), findsOneWidget);
-    // 「教材」徽标恰一处（textbook 卡）；ppt 卡无徽标
+    // 「教材」徽标恰一处（textbook 卡）
     expect(find.text('教材'), findsOneWidget);
+    // 标识规范化（2026-10-11）：来源槽位每卡必有——ppt 卡显示「PPT」徽标
+    expect(find.text('PPT'), findsOneWidget);
 
     // 收尾：卸载页面 + 关连接
     await tester.pumpWidget(const SizedBox.shrink());
