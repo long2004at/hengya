@@ -3,8 +3,11 @@
 // flutter_local_notifications zonedSchedule 每日固定时间触发；
 // 不依赖 FCM/服务器——国产 ROM 无推送也能到点提醒。
 // 国产 ROM 注意：需引导用户开启「自启动 + 通知权限」（首次注册时弹提示）。
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
@@ -17,6 +20,9 @@ class DailyReminder {
   static const _keyEnabled = 'hengya.reminder.enabled';
   static const _keyHour = 'hengya.reminder.hour';
   static const _keyMinute = 'hengya.reminder.minute';
+  // Android 13+ 运行时权限：启动时主动请求（每安装版本最多问一次，
+  // 用户拒绝过就不再打扰——后续仍可去「我的-数据与提醒」手动开启）。
+  static const _keyPermAskedVersion = 'hengya.reminder.permAskedVersion';
 
   static const _channelId = 'hengya.daily';
   static const _channelName = '每日复习提醒';
@@ -40,6 +46,37 @@ class DailyReminder {
       ),
     );
     _initialized = true;
+  }
+
+  /// 启动时主动请求 Android 13+ 通知权限（POST_NOTIFICATIONS 运行时权限）。
+  ///
+  /// 提醒开关开启且「本安装版本还没问过」时弹系统对话框；已授权 /
+  /// 用户拒绝过 / 非 Android / 任何异常 → 静默返回，不阻塞启动流程。
+  Future<void> ensureNotificationsReady() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!(prefs.getBool(_keyEnabled) ?? true)) return; // 提醒已关 → 不打扰
+
+      await ensureInit();
+      final android = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      final enabled = await android?.areNotificationsEnabled();
+      if (enabled ?? true) {
+        return; // 已授权（或探测不到状态），无需再问
+      }
+      var version = 'unknown';
+      try {
+        version = (await PackageInfo.fromPlatform()).version;
+      } catch (_) {}
+      if (prefs.getString(_keyPermAskedVersion) == version) {
+        return; // 本版本已问过（多半被拒），不再打扰
+      }
+      await android?.requestNotificationsPermission();
+      await prefs.setString(_keyPermAskedVersion, version);
+    } catch (_) {
+      // 权限检测/请求失败不阻塞启动；用户仍可到「我的-数据与提醒」手动开启
+    }
   }
 
   /// 读取用户设置（开关 + 时刻）；未设置过 → 默认开 20:30
