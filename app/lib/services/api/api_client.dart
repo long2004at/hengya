@@ -373,7 +373,7 @@ class ApiClient {
     if (m == null) return ('', null, null);
     final deck = m.group(1)!.trim();
     final ps = int.tryParse(m.group(2)!);
-    final pe = int.tryParse(m.group(3)!) ?? ps;
+    final pe = m.group(3) != null ? int.tryParse(m.group(3)!) ?? ps : ps;
     return (deck, ps, pe);
   }
 
