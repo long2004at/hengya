@@ -323,6 +323,7 @@ class _AboutPageState extends State<AboutPage> {
               children: [
                 Text('将清理以下缓存（共 ${_mb(scan.totalBytes)}）：'),
                 const SizedBox(height: 8),
+                _cacheLine(ctx, CacheCategory.updateApks, scan, '旧版安装包（update 目录）'),
                 _cacheLine(ctx, CacheCategory.importTmp, scan, '导入中断残留'),
                 _cacheLine(ctx, CacheCategory.pkgValidate, scan, '校验临时文件'),
                 _cacheLine(ctx, CacheCategory.zipCopies, scan, '已选语料包拷贝'),
@@ -1508,7 +1509,7 @@ class _AboutPageState extends State<AboutPage> {
                         ? '正在清理…'
                         : (_cacheScan == null
                               ? '正在统计缓存占用…'
-                              : '导入中断残留、打包校验临时文件、旧库备份等'),
+                              : '旧版安装包、导入中断残留、校验临时文件等'),
                     style: const TextStyle(fontSize: 12),
                   ),
                   trailing: _cleaningCache
