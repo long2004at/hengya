@@ -1,4 +1,4 @@
-// 统计页「卡生成队列」面板（#13，2026-09-07）：
+// 统计页「卡生成队列」面板（#13，2026-09-07；2026-10-11 迁入回炉工作台 + 折叠重构）：
 // ============================================================================
 // 拆卡流水线的生成过程透明化——用户手机曾只出 6 张真卡 vs 预期 11 张、过程
 // 不可见；本面板让「正在生成 / 待生成 / 失败 / 回炉」的队列状态实时可见。
@@ -37,6 +37,13 @@
 // .fetchReworkPending → 语料状态端点 `GET /api/v1/corpus/status` 的
 // reworkPending 字段读取；initState / rev 自增 / 流水线收尾三处重读，
 // 空态与终态均渲染（N=0 也显示）。
+// 本面板不再挂在统计页——整卡迁入「回炉工作台」（rework_workbench_page.dart）
+// 页面底部；统计页保持纯数据统计视图。
+//
+// 2026-10-11 信息密度重构（折叠式）：不再一次性铺出全部拆卡条目——四个分组
+// （正在生成/待生成/失败/回炉）默认只显示「分组名 + 计数」摘要行，条目列表
+// 收进 ExpansionTile，用户点开才展开；「正在生成」组在运行中默认展开（唯一
+// 需要即时可见的动态信息），终态全部收起。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -424,7 +431,7 @@ class _PipelineQueueCardState extends State<PipelineQueueCard> {
       const SizedBox(height: 10),
       _group(scheme, '正在生成', f.runningCount, [
         for (final m in f.running) '· ${m['keyword'] ?? ''}',
-      ], highlight: true),
+      ], highlight: true, initiallyExpanded: f.live),
       _group(scheme, '待生成', f.waitingCount, [
         for (final m in f.waiting) '· ${m['keyword'] ?? ''}',
       ]),
@@ -464,8 +471,9 @@ class _PipelineQueueCardState extends State<PipelineQueueCard> {
     ];
   }
 
-  /// 分组：标题行（含计数或纯标签）+ 条目行（单行省略）。
-  /// [count] 为 null 时标题行直接用 [label]（回炉组的计数已拼入标签）。
+  /// 折叠分组：默认只显示「分组名 + 计数」摘要行，条目收进 ExpansionTile
+  /// 点开才展开（信息密度重构——不再一次性铺出全部拆卡条目）。
+  /// [initiallyExpanded] 运行中的「正在生成」组为 true（唯一默认展开的组）。
   Widget _group(
     ColorScheme scheme,
     String label,
@@ -473,18 +481,39 @@ class _PipelineQueueCardState extends State<PipelineQueueCard> {
     List<String> items, {
     bool highlight = false,
     bool danger = false,
+    bool initiallyExpanded = false,
   }) {
     final titleColor = danger
         ? scheme.error
         : highlight
         ? scheme.primary
         : scheme.onSurface;
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
+    if (items.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(
+          count == null ? label : '$label $count',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: titleColor,
+          ),
+        ),
+      );
+    }
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: const EdgeInsets.only(bottom: 4, left: 4),
+          initiallyExpanded: initiallyExpanded,
+          maintainState: true,
+          minTileHeight: 36,
+          iconColor: scheme.outline,
+          collapsedIconColor: scheme.outline,
+          title: Text(
             count == null ? label : '$label $count',
             style: TextStyle(
               fontSize: 12,
@@ -492,17 +521,22 @@ class _PipelineQueueCardState extends State<PipelineQueueCard> {
               color: titleColor,
             ),
           ),
-          for (final line in items)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                line,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: scheme.outline),
+          children: [
+            for (final line in items)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    line,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12, color: scheme.outline),
+                  ),
+                ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }

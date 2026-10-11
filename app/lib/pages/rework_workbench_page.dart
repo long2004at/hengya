@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/api/api_client.dart';
 import '../services/review/rework_models.dart';
+import '../widgets/pipeline_queue_card.dart';
 import '../widgets/top_toast.dart';
 import 'corpus_library_page.dart';
 import 'bank_page.dart';
@@ -27,6 +28,8 @@ class _TaskListState extends State<_TaskList> {
   String? _error;
   int _total = 0;
   bool _loading = false;
+  // 「卡生成流水线」折叠区状态（迁自统计页的 PipelineQueueCard 容器）。
+  bool _pipelineOpen = false;
   Timer? _poll;
   @override
   void initState() {
@@ -140,6 +143,40 @@ class _TaskListState extends State<_TaskList> {
                   style: TextStyle(fontSize: 12),
                 ),
               ),
+              // 「卡生成流水线」折叠区（原统计页「卡生成队列」面板迁入）：
+              // local 模式显示；默认收起只留摘要行，点开渲染完整队列面板
+              //（面板内部各分组同样默认折叠——双层折叠控制信息密度）。
+              if (currentBackendMode == BackendMode.local)
+                Card(
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  elevation: 0,
+                  color: Theme.of(context).colorScheme.surfaceContainerLow,
+                  child: Theme(
+                    data: Theme.of(context).copyWith(
+                      dividerColor: Colors.transparent,
+                    ),
+                    child: ExpansionTile(
+                      initiallyExpanded: _pipelineOpen,
+                      maintainState: true,
+                      onExpansionChanged: (v) => _pipelineOpen = v,
+                      leading: const Icon(Icons.dynamic_feed_outlined),
+                      title: const Text(
+                        '卡生成流水线',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: const Text('生成进度与队列明细（点开查看）'),
+                      children: const [
+                        Padding(
+                          padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+                          child: PipelineQueueCard(),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               if (_loading) const LinearProgressIndicator(),
               if (_error != null)
                 Padding(
