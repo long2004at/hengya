@@ -342,6 +342,41 @@ class ApiClient {
     _parseSubjectsWithDue,
   );
 
+  /// 卡片原文证据（复习页锚点/来源 → 原文弹层）：按「科目+deck+页码」反查
+  /// 语料库。尽力而为——任何失败（无本地库/demo/旧服务器 404）返回空列表，
+  /// 由弹层显示「未找到原文」兜底，不向调用方抛错。
+  Future<List<Map<String, Object?>>> fetchCardEvidence(
+    String subject,
+    String anchor,
+  ) async {
+    final (deck, ps, pe) = _parseAnchor(anchor);
+    if (deck.isEmpty) return [];
+    try {
+      final json = await _getJson(
+        '/api/v1/evidence?subject=${Uri.encodeComponent(subject)}'
+        '&deck=${Uri.encodeComponent(deck)}'
+        '${ps != null ? '&pageStart=$ps' : ''}'
+        '${pe != null ? '&pageEnd=$pe' : ''}',
+      );
+      final list = (json as Map)['evidence'] as List<dynamic>? ?? const [];
+      return [for (final e in list) Map<String, Object?>.from(e as Map)];
+    } on ApiException {
+      return [];
+    }
+  }
+
+  /// anchor「deck名 p页码区间」（composeAnchor 产物）→ deck 与页码上下限。
+  /// 解析不出页码时页码为 null（只按 deck 反查）；exam 卡锚点（2021年第3题）
+  /// 无 p 前缀 → deck 为空 → 调用方显示「未找到原文」。
+  (String, int?, int?) _parseAnchor(String anchor) {
+    final m = RegExp(r'^(.*)\bp(\d+)(?:-(\d+))?$').firstMatch(anchor.trim());
+    if (m == null) return ('', null, null);
+    final deck = m.group(1)!.trim();
+    final ps = int.tryParse(m.group(2)!);
+    final pe = int.tryParse(m.group(3)!) ?? ps;
+    return (deck, ps, pe);
+  }
+
   List<SubjectWithDue> _parseSubjectsWithDue(Object json) {
     final list = (json as Map<String, dynamic>)['subjects'] as List<dynamic>;
     final items = list.map((e) {

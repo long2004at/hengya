@@ -22,6 +22,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api/local_cache.dart';
 import '../services/review/session_store.dart';
 import '../widgets/offline_data_bar.dart';
+import '../widgets/evidence_sheet.dart';
 import '../widgets/reason_action_dialog.dart';
 import 'rework_request_sheet.dart';
 import 'rework_workbench_page.dart';
@@ -1019,14 +1020,30 @@ class _ReviewSessionPageState extends State<ReviewSessionPage>
     );
   }
 
-  /// 锚点/来源区（FogPeel 外面，卡片底部）
+  /// 锚点/来源区（FogPeel 外面，卡片底部）；chip 可点击 → 原文证据弹层
   Widget _buildMetaRow(FlashCard card) {
+    void openEvidence() => unawaited(
+          showEvidenceSheet(
+            context,
+            subjectId: card.subjectId,
+            anchor: card.anchor,
+            source: card.source,
+          ),
+        );
     return Wrap(
       spacing: 12,
       runSpacing: 4,
       children: [
-        _MetaChip(icon: Icons.anchor, label: '锚点 ${card.anchor}'),
-        _MetaChip(icon: Icons.menu_book_outlined, label: card.source),
+        _MetaChip(
+          icon: Icons.anchor,
+          label: '锚点 ${card.anchor}',
+          onTap: card.anchor.isEmpty ? null : openEvidence,
+        ),
+        _MetaChip(
+          icon: Icons.menu_book_outlined,
+          label: card.source,
+          onTap: openEvidence,
+        ),
       ],
     );
   }
@@ -1064,20 +1081,30 @@ class _TypeChip extends StatelessWidget {
 }
 
 class _MetaChip extends StatelessWidget {
-  const _MetaChip({required this.icon, required this.label});
+  const _MetaChip({required this.icon, required this.label, this.onTap});
 
   final IconData icon;
   final String label;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final row = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(icon, size: 13, color: _kTextMuted),
         const SizedBox(width: 4),
         Text(label, style: const TextStyle(fontSize: 11, color: _kTextMuted)),
       ],
+    );
+    if (onTap == null) return row;
+    return InkWell(
+      borderRadius: BorderRadius.circular(4),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+        child: row,
+      ),
     );
   }
 }

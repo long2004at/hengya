@@ -110,8 +110,18 @@ class _HomePageState extends State<HomePage> {
       _fetchCompassFraction(), // 尽力而为第四路：永不抛错
       _fetchToday(), // 尽力而为第五路：大 CTA / Hero 大数字数据源，永不抛错
     ]);
+    // 科目卡按剩余待复习数降序（dueCount 多的排前面）；并列时保持 /subjects
+    // 接口原序（Dart sort 非稳定，索引兜底保证确定性行为）
+    final raw = results[0] as List<SubjectWithDue>;
+    final subjects =
+        List<(int, SubjectWithDue)>.generate(
+            raw.length, (i) => (i, raw[i]),
+          )..sort((a, b) {
+            final byDue = b.$2.dueCount.compareTo(a.$2.dueCount);
+            return byDue != 0 ? byDue : a.$1.compareTo(b.$1);
+          });
     return _HomeSnapshot(
-      subjects: results[0] as List<SubjectWithDue>,
+      subjects: [for (final (_, s) in subjects) s],
       streak: results[1] as int,
       summary: results[2] as StatsSummary,
       compassFraction: results[3] as double,
