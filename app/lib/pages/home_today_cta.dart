@@ -9,12 +9,11 @@
 //               剩余到期卡（页面自会落完成态/到期清完态）。
 //   · 降级：拉不到 today（断网 / 旧服务器 404）→ null，文案退「开始今日
 //     复习」仍可点击；Hero 大数字同步回退 totalDue（见 todayHeroNumber）。
-//   · 全宽白底主按钮压在 kHeroGradient 上（品牌深蓝文字），与玻璃胶囊
-//     同一视觉家族；Key 'home-today-cta' 供测试定位。
+//   · 全宽暖纸黄按钮（#E3CB98）配深棕文字压在 kHeroGradient 上，
+//     与下方白色科目卡区分；Key 'home-today-cta' 供测试定位。
 import 'package:flutter/material.dart';
 
 import '../services/api/api_client.dart';
-import '../theme.dart';
 
 /// 今日 CTA 三态（口径唯一：TodayProgress.done 对比 goal，禁止另算）
 enum TodayCtaState { notStarted, inProgress, done }
@@ -72,8 +71,8 @@ class TodayCtaButton extends StatelessWidget {
       child: FilledButton.icon(
         key: const ValueKey('home-today-cta'),
         style: FilledButton.styleFrom(
-          backgroundColor: Colors.white,
-          foregroundColor: HengyaColors.brandDeep,
+          backgroundColor: const Color(0xFFE3CB98),
+          foregroundColor: const Color(0xFF3C2D19),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(18),
           ),

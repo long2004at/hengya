@@ -249,6 +249,11 @@ void main() {
   testWidgets('点击 CTA → push /review/today；pop 返回 → 重拉 /stats/today 刷新', (tester) async {
     await pumpPage(tester);
     expect(find.text('开始今日复习 · 还剩 6 张'), findsOneWidget);
+    final cta = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('home-today-cta')),
+    );
+    expect(cta.style!.backgroundColor!.resolve({}), const Color(0xFFE3CB98));
+    expect(cta.style!.foregroundColor!.resolve({}), const Color(0xFF3C2D19));
     final todayReadsBefore = router.requests
         .where((r) => r == 'GET /api/v1/stats/today')
         .length;
