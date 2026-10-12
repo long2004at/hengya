@@ -12,6 +12,7 @@
 // 代码不再写 1；新库零科目，科目全部用户自建）。
 import 'dart:io';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:shared/hengya_shared.dart';
@@ -23,6 +24,30 @@ part 'rework_store.dart';
 /// 占位卡题干前缀（与 run_engine kPlaceholderBack 的前缀一致）：
 /// 占位卡无实质内容，不参与查重（不入比对域、不嵌向量）。
 const String kDupPlaceholderPrefix = '【语料未覆盖】';
+
+/// 聊天消息行（chat_messages 只读投影；refs 为原始 JSON 字符串，
+/// 解析/建模留给上层——P4 语料检索引用才定型结构）。
+class ChatMessageRow {
+  const ChatMessageRow({
+    required this.id,
+    required this.sessionId,
+    required this.role,
+    required this.content,
+    required this.refs,
+    required this.tokens,
+    required this.channel,
+    required this.createdAt,
+  });
+
+  final int id;
+  final String sessionId;
+  final String role;
+  final String content;
+  final String refs;
+  final int tokens;
+  final String channel;
+  final String createdAt;
+}
 
 class Db {
   Db._(this._db);
@@ -219,6 +244,36 @@ class Db {
         updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
       );
     ''');
+
+    // DeepSeek 双通道聊天（P2.2）：会话 + 消息两表。留存消息、绝不含密钥
+    // （apiKey 只在 settings 密文行/secure storage，聊天表无涉）；
+    // full_backup 走整库快照，聊天数据自然随库备份，无需表白名单维护。
+    // refs：引用来源 JSON 数组（P4 语料检索用，先留结构）；
+    // channel：本次回答实际通道 'proxy' | 'official' | ''（用户消息恒空）。
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS chat_sessions (
+        id         TEXT PRIMARY KEY,
+        title      TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        role       TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        refs       TEXT NOT NULL DEFAULT '[]',
+        tokens     INTEGER NOT NULL DEFAULT 0,
+        channel    TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    ''');
+    db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_chat_messages_session '
+      'ON chat_messages(session_id, id);',
+    );
   }
 
   /// 既有表补列（幂等）：列缺失才 ALTER ADD（0.3.0 subjects.is_builtin）
@@ -375,6 +430,107 @@ class Db {
       [key, value],
     );
   }
+
+  /// 删除配置项（presets 路由删档案用；不存在时零副作用）。
+  void settingDelete(String key) {
+    _db.execute('DELETE FROM settings WHERE key = ?', [key]);
+  }
+
+  /// 某前缀下全部键名（presets 路由枚举 `preset.<id>.*` 用；按 key 有序）。
+  List<String> settingKeysWithPrefix(String prefix) {
+    final rows = _db.select(
+      "SELECT key FROM settings WHERE key LIKE ? || '%' ORDER BY key",
+      [prefix],
+    );
+    return [for (final r in rows) r['key'] as String];
+  }
+
+  // ---------------- chat（DeepSeek 双通道聊天会话持久化，P2.2） ----------------
+  //
+  // 聊天数据不 bump data_version（同 settings：data_version 是学习数据增量
+  // 同步判据，聊天不参与）。消息级联删除靠 ON DELETE CASCADE，openSync/open
+  // 均已 PRAGMA foreign_keys = ON。
+
+  /// 新建会话，返回新 id（uuid 形态；无 uuid 包，随机十六进制自拼，勿加依赖）
+  String chatSessionCreate({String title = ''}) {
+    final rnd = Random.secure();
+    final id = List.generate(
+      32,
+      (_) => rnd.nextInt(16).toRadixString(16),
+    ).join();
+    _db.execute(
+      'INSERT INTO chat_sessions (id, title) VALUES (?, ?)',
+      [id, title],
+    );
+    return id;
+  }
+
+  /// 全部会话，最近活跃在前（会话列表数据源）
+  List<({String id, String title, String updatedAt})> chatSessions() => _db
+      .select(
+        'SELECT id, title, updated_at FROM chat_sessions ORDER BY updated_at DESC',
+      )
+      .map(
+        (r) => (
+          id: r['id'] as String,
+          title: r['title'] as String,
+          updatedAt: r['updated_at'] as String,
+        ),
+      )
+      .toList();
+
+  void chatSessionRename(String id, String title) {
+    _db.execute(
+      "UPDATE chat_sessions SET title = ? WHERE id = ?",
+      [title, id],
+    );
+  }
+
+  /// 删除会话（消息经 ON DELETE CASCADE 连带清理；foreign_keys 已开）
+  void chatSessionDelete(String id) {
+    _db.execute('DELETE FROM chat_sessions WHERE id = ?', [id]);
+  }
+
+  /// 追加一条消息并 touch 会话 updated_at（会话列表按活跃排序的依据）
+  void chatMessageAppend(
+    String sessionId, {
+    required String role,
+    required String content,
+    String refs = '[]',
+    int tokens = 0,
+    String channel = '',
+  }) {
+    _db.execute(
+      'INSERT INTO chat_messages (session_id, role, content, refs, tokens, channel) '
+      'VALUES (?, ?, ?, ?, ?, ?)',
+      [sessionId, role, content, refs, tokens, channel],
+    );
+    _db.execute(
+      "UPDATE chat_sessions SET updated_at = datetime('now') WHERE id = ?",
+      [sessionId],
+    );
+  }
+
+  /// 单会话消息，按写入序（id ASC）；refs 保持原始 JSON 字符串，解析留给上层
+  List<ChatMessageRow> chatMessages(String sessionId) => _db
+      .select(
+        'SELECT id, session_id, role, content, refs, tokens, channel, created_at '
+        'FROM chat_messages WHERE session_id = ? ORDER BY id ASC',
+        [sessionId],
+      )
+      .map(
+        (r) => ChatMessageRow(
+          id: r['id'] as int,
+          sessionId: r['session_id'] as String,
+          role: r['role'] as String,
+          content: r['content'] as String,
+          refs: r['refs'] as String,
+          tokens: r['tokens'] as int,
+          channel: r['channel'] as String,
+          createdAt: r['created_at'] as String,
+        ),
+      )
+      .toList();
 
   // ---------------- cards ----------------
 

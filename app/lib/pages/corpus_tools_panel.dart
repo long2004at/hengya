@@ -212,8 +212,12 @@ class _CorpusToolsPanelState extends State<CorpusToolsPanel> {
       if (mounted) {
         TopToast.show(
           context,
-          e.statusCode == 404 ? '需服务器 0.3.0+，暂未部署' : '上传失败：${e.message}',
-          type: TopToastType.error,
+          e.statusCode == 409
+              ? e.message
+              : e.statusCode == 404
+              ? '需服务器 0.3.0+，暂未部署'
+              : '上传失败：${e.message}',
+          type: e.statusCode == 409 ? TopToastType.info : TopToastType.error,
         );
       }
     } catch (e) {

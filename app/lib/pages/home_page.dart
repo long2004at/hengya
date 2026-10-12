@@ -47,6 +47,7 @@ import 'home_today_cta.dart';
 import 'inbox_sheet.dart';
 import 'corpus_library_page.dart';
 import 'rework_workbench_page.dart';
+import 'chat_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -476,6 +477,27 @@ class _HeroHeaderState extends State<_HeroHeader> {
                           onPressed: () => context.push('/progress'),
                         ),
                         const SizedBox(width: 8),
+                        // AI 问答入口（P2.3 聊天页）：与收件箱同款玻璃圆钮
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.18),
+                            shape: BoxShape.circle,
+                          ),
+                          child: IconButton(
+                            tooltip: 'AI 问答',
+                            icon: const Icon(
+                              Icons.forum_outlined,
+                              color: Colors.white,
+                              size: 22,
+                            ),
+                            onPressed: () =>
+                                Navigator.of(context, rootNavigator: true).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => const ChatPage(),
+                                  ),
+                                ),
+                          ),
+                        ),
                         Container(
                           decoration: BoxDecoration(
                             color: Colors.white.withValues(alpha: 0.18),

@@ -11,6 +11,7 @@
 //   · 清除缓存（CacheCleaner 分类扫描 + 手动确认清理）
 // 只读展示版本信息；源 URL 持久化走 UpdateService（update.source）。
 import 'dart:io';
+import 'dart:math';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -87,6 +88,16 @@ class _AboutPageState extends State<AboutPage> {
   bool _aiLoading = true;
   bool _aiUnsupported = false; // 旧服务器（0.2.0）404 → 需 0.3.0+
 
+  // ---------------- LLM 预设档案（P3.2，聊天与拆卡共用；local 专属） ----------------
+  // GET /settings/presets 的原始 JSON（presets 列表 + chatPresetId/llmPresetId）。
+  Map<String, dynamic>? _presets;
+
+  /// 档案列表（safe cast；空 _presets → []）。
+  List<Map<String, dynamic>> get _presetList => [
+    for (final p in (_presets?['presets'] as List? ?? const []))
+      Map<String, dynamic>.from(p as Map),
+  ];
+
   // ---------------- instruct 前缀开关（批5 节点③，local 模式） ----------------
   // settings embedding.instructQuery：'0' = 关（queryInstruct=''）；
   // 缺省/'1' = 开（null = 内置 kQueryInstruct）。默认开 = 保持旧行为。
@@ -103,6 +114,7 @@ class _AboutPageState extends State<AboutPage> {
     _loadAi();
     _loadInstructFlag();
     _loadBackups();
+    _loadPresets();
   }
 
   @override
@@ -810,6 +822,42 @@ class _AboutPageState extends State<AboutPage> {
     );
   }
 
+  // ---------------- LLM 预设档案（P3.2，local 模式） ----------------
+  //
+  // 最小可用 UI：列表弹层（名称/baseUrl/model + 聊天/拆卡使用标记）+
+  // 新建/编辑表单（名称/baseUrl/model/温度/key）+ 删除 + 「用于聊天」
+  // 「用于拆卡」切换。全走 LocalBackend /settings/presets/* 路由；remote /
+  // demo 模式不显示（LocalBackend 路由仅 local 存在）。
+
+  Future<void> _loadPresets() async {
+    if (kBackendMode != BackendMode.local) return;
+    try {
+      final r = await LocalBackend.instance.get('/settings/presets');
+      if (!mounted) return;
+      setState(() => _presets = r);
+    } catch (_) {
+      // 加载失败保持空态（弹层内可见空列表，不阻塞页面其余区块）
+    }
+  }
+
+  void _showPresetsSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetCtx) => const _PresetsSheet(),
+    ).then((_) => _loadPresets()); // 关闭后刷新使用标记（编辑/删除/切换后）
+  }
+
+  /// 入口卡副标题用：presetId → 档案名；空/未找到 → 「默认」。
+  String _presetUseLabel(String presetId) {
+    if (presetId.isEmpty) return '默认';
+    for (final p in _presetList) {
+      if (p['id'] == presetId) return (p['name'] as String?) ?? presetId;
+    }
+    return '默认';
+  }
+
   // ---------------- instruct 前缀开关（批5 节点③，local 模式；自设置页迁入） ----------------
 
   /// instruct 前缀开关回显（settings embedding.instructQuery）
@@ -1421,6 +1469,47 @@ class _AboutPageState extends State<AboutPage> {
                       config: _ai!.reranker,
                       onEdit: () => _editAiService('reranker'),
                     ),
+                    const SizedBox(height: 8),
+                    AiServiceCard(
+                      scheme: scheme,
+                      title: '聊天服务',
+                      desc: 'AI 问答（DeepSeek 反代）',
+                      config: _ai!.chat,
+                      onEdit: () => _editAiService('chat'),
+                    ),
+                    // 预设档案入口（P3.2，local 专属）：聊天与拆卡共用的
+                    // LLM 预设档案池，一键切换各自使用的档案。
+                    if (kBackendMode == BackendMode.local) ...[
+                      const SizedBox(height: 8),
+                      Card(
+                        elevation: 0,
+                        color: scheme.surfaceContainerLow,
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 4,
+                          ),
+                          title: const Text(
+                            '预设档案',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          subtitle: Text(
+                            _presetList.isEmpty
+                                ? '聊天/拆卡共用的 LLM 预设档案（未创建）'
+                                : '${_presetList.length} 套档案 · '
+                                    '聊天：${_presetUseLabel(_presets?['chatPresetId'] as String? ?? '')} · '
+                                    '拆卡：${_presetUseLabel(_presets?['llmPresetId'] as String? ?? '')}',
+                            style: TextStyle(fontSize: 11, color: scheme.outline),
+                          ),
+                          trailing: Icon(
+                            Icons.tune_rounded,
+                            size: 20,
+                            color: scheme.primary,
+                          ),
+                          onTap: _showPresetsSheet,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
 
@@ -1553,6 +1642,429 @@ class _AboutSectionHeader extends StatelessWidget {
           fontWeight: FontWeight.w700,
           color: scheme.primary,
         ),
+      ),
+    );
+  }
+}
+
+// ---------------- LLM 预设档案弹层（P3.2，聊天与拆卡共用） ----------------
+//
+// 档案池列表（名称 / baseUrl / model + 聊天·拆卡使用标记）+ 新建/编辑表单
+// （名称 / baseUrl / model / 温度 / key）+ 删除 + 「用于聊天」「用于拆卡」
+// 一键切换。全走 LocalBackend /settings/presets/* 路由（local 专属）。key 明文
+// 只存在于表单内存，保存成功即清空；列表只显示服务端掩码。
+class _PresetsSheet extends StatefulWidget {
+  const _PresetsSheet();
+
+  @override
+  State<_PresetsSheet> createState() => _PresetsSheetState();
+}
+
+class _PresetsSheetState extends State<_PresetsSheet> {
+  Map<String, dynamic>? _data;
+  bool _loading = true;
+  String? _error;
+
+  List<Map<String, dynamic>> get _list => [
+    for (final p in (_data?['presets'] as List? ?? const []))
+      Map<String, dynamic>.from(p as Map),
+  ];
+
+  String get _chatId => (_data?['chatPresetId'] as String?) ?? '';
+  String get _llmId => (_data?['llmPresetId'] as String?) ?? '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await LocalBackend.instance.get('/settings/presets');
+      if (!mounted) return;
+      setState(() {
+        _data = r;
+        _loading = false;
+        _error = null;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '加载失败（${e.statusCode}）';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '加载失败';
+      });
+    }
+  }
+
+  /// 新建档案 id（短随机串，与后端路由 [A-Za-z0-9]+ 校验一致）。
+  String _newId() {
+    final rnd = Random.secure();
+    return List.generate(10, (_) => rnd.nextInt(36).toRadixString(36)).join();
+  }
+
+  Future<void> _use(String id, String scope) async {
+    try {
+      await LocalBackend.instance.post('/settings/presets/$id/use?scope=$scope', {});
+      if (!mounted) return;
+      TopToast.show(
+        context,
+        scope == 'chat' ? '聊天已切换该档案' : '拆卡已切换该档案',
+        type: TopToastType.success,
+      );
+      await _load();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(context, e.message, type: TopToastType.error);
+    }
+  }
+
+  Future<void> _delete(String id) async {
+    try {
+      await LocalBackend.instance.delete('/settings/presets/$id');
+      if (!mounted) return;
+      TopToast.show(context, '已删除档案');
+      await _load();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      TopToast.show(context, e.message, type: TopToastType.error);
+    }
+  }
+
+  Future<void> _edit({Map<String, dynamic>? preset}) async {
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _PresetEditSheet(
+        presetId: (preset?['id'] as String?) ?? _newId(),
+        isNew: preset == null,
+        initial: preset,
+      ),
+    );
+    if (saved == true) await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 20,
+          right: 20,
+          top: 4,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '预设档案',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => _edit(),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('新建'),
+                ),
+              ],
+            ),
+            Text(
+              '聊天与拆卡共用的 LLM 预设档案；key 加密存本机',
+              style: TextStyle(fontSize: 11, color: scheme.outline),
+            ),
+            const SizedBox(height: 8),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_error != null)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  _error!,
+                  style: TextStyle(fontSize: 13, color: scheme.error),
+                ),
+              )
+            else if (_list.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(
+                  child: Text('暂无档案，点「新建」创建', style: TextStyle(fontSize: 13)),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [for (final p in _list) _presetTile(scheme, p)],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _presetTile(ColorScheme scheme, Map<String, dynamic> p) {
+    final id = (p['id'] as String?) ?? '';
+    final name = (p['name'] as String?) ?? '';
+    final baseUrl = (p['baseUrl'] as String?) ?? '';
+    final model = (p['model'] as String?) ?? '';
+    final temp = (p['temperature'] as String?) ?? '';
+    final keyMasked = (p['keyMasked'] as String?) ?? '';
+    final usedChat = id == _chatId;
+    final usedLlm = id == _llmId;
+    return Card(
+      elevation: 0,
+      color: scheme.surfaceContainerLow,
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    name.isEmpty ? '（未命名）' : name,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: '编辑',
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  onPressed: () => _edit(preset: p),
+                ),
+                IconButton(
+                  tooltip: '删除',
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  onPressed: () => _delete(id),
+                ),
+              ],
+            ),
+            Text(baseUrl, style: TextStyle(fontSize: 11, color: scheme.outline)),
+            Text(
+              'model：$model'
+              '${temp.isEmpty ? '' : ' · 温度 $temp'}'
+              '${keyMasked.isEmpty ? ' · 未设 key' : ' · $keyMasked'}',
+              style: TextStyle(fontSize: 11, color: scheme.outline),
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                OutlinedButton(
+                  onPressed: usedChat ? null : () => _use(id, 'chat'),
+                  child: Text(usedChat ? '聊天使用中' : '用于聊天'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: usedLlm ? null : () => _use(id, 'llm'),
+                  child: Text(usedLlm ? '拆卡使用中' : '用于拆卡'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 新建 / 编辑表单（名称 / baseUrl / model / 温度 / key）；apiKey 留空 = 保持原值。
+class _PresetEditSheet extends StatefulWidget {
+  const _PresetEditSheet({
+    required this.presetId,
+    required this.isNew,
+    this.initial,
+  });
+
+  final String presetId;
+  final bool isNew;
+  final Map<String, dynamic>? initial;
+
+  @override
+  State<_PresetEditSheet> createState() => _PresetEditSheetState();
+}
+
+class _PresetEditSheetState extends State<_PresetEditSheet> {
+  late final _nameCtrl = TextEditingController(
+    text: (widget.initial?['name'] as String?) ?? '',
+  );
+  late final _baseUrlCtrl = TextEditingController(
+    text: (widget.initial?['baseUrl'] as String?) ?? '',
+  );
+  late final _modelCtrl = TextEditingController(
+    text: (widget.initial?['model'] as String?) ?? '',
+  );
+  late final _tempCtrl = TextEditingController(
+    text: (widget.initial?['temperature'] as String?) ?? '',
+  );
+  final _keyCtrl = TextEditingController();
+
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _baseUrlCtrl.dispose();
+    _modelCtrl.dispose();
+    _tempCtrl.dispose();
+    _keyCtrl.dispose(); // 含明文 key 的控制器随弹层销毁
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final name = _nameCtrl.text.trim();
+    final baseUrl = _baseUrlCtrl.text.trim();
+    final model = _modelCtrl.text.trim();
+    final temp = _tempCtrl.text.trim();
+    if (name.isEmpty || baseUrl.isEmpty || model.isEmpty) {
+      setState(() => _error = '名称 / baseUrl / model 不能为空');
+      return;
+    }
+    if (!baseUrl.startsWith('https://')) {
+      setState(() => _error = 'baseUrl 必须以 https:// 开头');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await LocalBackend.instance.put('/settings/presets/${widget.presetId}', {
+        'name': name,
+        'baseUrl': baseUrl,
+        'model': model,
+        if (temp.isNotEmpty) 'temperature': temp,
+        'apiKey': _keyCtrl.text.trim(), // 空 = 保持原值
+      });
+      _keyCtrl.clear(); // 安全：保存成功即清空明文 key
+      if (!mounted) return;
+      TopToast.show(context, '已保存档案', type: TopToastType.success);
+      Navigator.of(context).pop(true);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = e.message;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 20,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.isNew ? '新建预设档案' : '编辑预设档案',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _nameCtrl,
+            decoration: const InputDecoration(
+              labelText: '名称',
+              hintText: '如 反代 / 官方 DeepSeek',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _baseUrlCtrl,
+            decoration: const InputDecoration(
+              labelText: 'baseUrl',
+              hintText: '如 https://api.deepseek.com/v1',
+              helperText: 'OpenAI 兼容基址，填到 /v1 即可',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _modelCtrl,
+            decoration: const InputDecoration(
+              labelText: 'model',
+              hintText: '服务方模型 ID',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _tempCtrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(
+              labelText: '温度（可选，0 ~ 2）',
+              hintText: '留空用服务端默认',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _keyCtrl,
+            obscureText: true,
+            decoration: const InputDecoration(
+              labelText: 'apiKey',
+              hintText: '留空保持不变',
+              helperText: '加密存储在本机，界面只显示掩码',
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(_error!, style: TextStyle(fontSize: 12, color: scheme.error)),
+          ],
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton(
+                  onPressed: _saving ? null : _save,
+                  child: _saving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('保存'),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

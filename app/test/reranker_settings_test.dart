@@ -97,7 +97,7 @@ void main() {
     expect(ApiClient.kAiServices.contains('llm'), isTrue);
     expect(ApiClient.kAiServices.contains('embedding'), isTrue);
     expect(
-      () => ApiClient.instance.updateAiService('chat',
+      () => ApiClient.instance.updateAiService('vector',
           baseUrl: 'x', model: 'y'),
       throwsArgumentError,
     );
@@ -209,7 +209,7 @@ void main() {
           .having((e) => e.message, 'message', 'model 不能为空')),
     );
     await expectLater(
-      be.put('/settings/ai/chat', {'baseUrl': 'https://x', 'model': 'm'}),
+      be.put('/settings/ai/nope', {'baseUrl': 'https://x', 'model': 'm'}),
       throwsA(
           isA<ApiException>().having((e) => e.statusCode, 'status', 404)),
     );

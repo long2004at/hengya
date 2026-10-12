@@ -1054,7 +1054,16 @@ class ApiClient {
   ///   · 读取接口：本类 fetchAiSettings().reranker（掩码态）或
   ///     LocalBackend GET /settings/ai；明文 key 仅 LocalBackend 内部经
   ///     AiKeyVault 实例取用
-  static const Set<String> kAiServices = {'llm', 'embedding', 'reranker'};
+  /// AI 服务白名单：生卡 LLM（含备用）+ 向量 + 重排序 + 聊天（chat 为
+  /// DeepSeek 双通道聊天反代通道，P2.4；llm_backup 由 local failover 用，
+  /// 端上专用，server 白名单不含——此处统一放行，由各后端自行校验）。
+  static const Set<String> kAiServices = {
+    'llm',
+    'llm_backup',
+    'embedding',
+    'reranker',
+    'chat',
+  };
 
   /// reranker 默认预填（未配置时编辑层回填；用户可改任意）：
   /// URL = SiliconFlow 完整 rerank 端点，模型 = SiliconFlow 实际模型 ID
@@ -1068,7 +1077,7 @@ class ApiClient {
       throw ArgumentError.value(
         service,
         'service',
-        '必须是 llm、embedding 或 reranker',
+        '必须是 llm、llm_backup、embedding、reranker 或 chat',
       );
     }
   }
@@ -1453,6 +1462,7 @@ class AiSettings {
     required this.embedding,
     this.reranker = AiServiceConfig.empty,
     this.llmBackup = AiServiceConfig.empty,
+    this.chat = AiServiceConfig.empty,
   });
 
   final AiServiceConfig llm;
@@ -1462,11 +1472,15 @@ class AiSettings {
   /// 备用生卡 LLM（local 模式主备 failover；旧后端无此节点 → empty 兜底）。
   final AiServiceConfig llmBackup;
 
+  /// 聊天服务（DeepSeek 双通道聊天反代通道，P2.4；旧后端无此节点 → empty）。
+  final AiServiceConfig chat;
+
   factory AiSettings.fromJson(Map<String, dynamic> json) {
     final llm = json['llm'];
     final embedding = json['embedding'];
     final reranker = json['reranker'];
     final llmBackup = json['llm_backup'];
+    final chat = json['chat'];
     return AiSettings(
       llm: llm is Map
           ? AiServiceConfig.fromJson(Map<String, dynamic>.from(llm))
@@ -1480,14 +1494,18 @@ class AiSettings {
       llmBackup: llmBackup is Map
           ? AiServiceConfig.fromJson(Map<String, dynamic>.from(llmBackup))
           : AiServiceConfig.empty,
+      chat: chat is Map
+          ? AiServiceConfig.fromJson(Map<String, dynamic>.from(chat))
+          : AiServiceConfig.empty,
     );
   }
 
-  /// 按服务名取配置（service ∈ llm | llm_backup | embedding | reranker）
+  /// 按服务名取配置（service ∈ llm | llm_backup | embedding | reranker | chat）
   AiServiceConfig of(String service) => switch (service) {
     'embedding' => embedding,
     'reranker' => reranker,
     'llm_backup' => llmBackup,
+    'chat' => chat,
     _ => llm,
   };
 }

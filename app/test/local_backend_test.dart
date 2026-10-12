@@ -20,6 +20,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' show md5;
 import 'package:hengya/services/api/api_client.dart';
 import 'package:hengya/services/local/ai_key_vault.dart';
 import 'package:hengya/services/local/corpus/progress_db.dart'
@@ -595,6 +596,59 @@ void main() {
     expect(st1['storageMB'], greaterThanOrEqualTo(0));
   });
 
+  test('上传按内容查重：同树异名拒收，同名新内容及跨树并存', () async {
+    await boot();
+    final be = LocalBackend.instance;
+    await be.post('/subjects', {'name': '世界历史', 'id': 'oms'});
+    final pdf = [0x25, 0x50, 0x44, 0x46, 0x11];
+    await be.upload('/corpus/upload?subject=oms&filename=first.pdf', pdf);
+    await expectLater(
+      be.upload('/corpus/upload?subject=oms&filename=copy%20(1).pdf', pdf),
+      throwsA(isA<ApiException>()
+          .having((e) => e.statusCode, 'statusCode', 409)
+          .having((e) => e.message, 'existing file', contains('oms/first.pdf'))),
+    );
+    expect(File('${tmp.path}/corpus/incoming/oms/copy (1).pdf').existsSync(), false);
+    final newer = [0x25, 0x50, 0x44, 0x46, 0x22];
+    expect((await be.upload('/corpus/upload?subject=oms&filename=first.pdf', newer))['ok'], true);
+    expect(File('${tmp.path}/corpus/incoming/oms/first.pdf').readAsBytesSync(), newer);
+    expect((await be.upload(
+      '/corpus/upload?subject=oms&filename=book.pdf&source=textbook', newer,
+    ))['ok'], true);
+  });
+
+  test('上传使用有效 manifest 哈希，失效条目按磁盘重新校验', () async {
+    await boot();
+    final be = LocalBackend.instance;
+    await be.post('/subjects', {'name': '世界历史', 'id': 'oms'});
+    final pdf = [0x25, 0x50, 0x44, 0x46, 0x11];
+    await be.upload('/corpus/upload?subject=oms&filename=built.pdf', pdf);
+    final original = File('${tmp.path}/corpus/incoming/oms/built.pdf');
+    final manifest = File('${tmp.path}/corpus/extract_manifest.json');
+    manifest.writeAsStringSync(jsonEncode({'files': {
+      'oms/built.pdf': {
+        'size': original.lengthSync(),
+        'mtime': original.lastModifiedSync().millisecondsSinceEpoch ~/ 1000,
+        'md5': md5.convert(pdf).toString(),
+      },
+      'oms/deleted.pdf': {
+        'size': pdf.length,
+        'mtime': 0,
+        'md5': md5.convert(pdf).toString(),
+      },
+    }}));
+    await expectLater(
+      be.upload('/corpus/upload?subject=oms&filename=copy.pdf', pdf),
+      throwsA(isA<ApiException>()
+          .having((e) => e.statusCode, 'statusCode', 409)
+          .having((e) => e.message, 'existing file', contains('oms/built.pdf'))),
+    );
+    // 原件已被外部覆盖：清单里旧 md5 不能错误阻止重新上传。
+    original.writeAsBytesSync([0x25, 0x50, 0x44, 0x46, 0x22]);
+    original.setLastModifiedSync(DateTime.now().add(const Duration(seconds: 5)));
+    expect((await be.upload('/corpus/upload?subject=oms&filename=copy.pdf', pdf))['ok'], true);
+  });
+
   test('教材标注 upload：source=textbook 落 -textbook 教材树；'
       '两棵树并存分键；未知 source 值回课件', () async {
     await boot();
@@ -632,7 +686,7 @@ void main() {
     // 不另开目录（'exam' 自节点③起为合法真题类型，路由见下一用例）
     final u = await be.upload(
       '/corpus/upload?subject=oms&filename=other.pdf&source=other',
-      pdf,
+      [0x25, 0x50, 0x44, 0x46, 0x01],
     );
     expect(u['ok'], true);
     expect(

@@ -76,10 +76,12 @@ void main() {
     expect(failTest.status, 401);
   });
 
-  test('非法 service 名直接拒绝（llm | embedding 白名单）', () {
-    expect(() => ApiClient.instance.updateAiService('chat',
+  test('非法 service 名直接拒绝（llm/llm_backup/embedding/reranker/chat 白名单）', () {
+    // 2026-10-11：白名单扩 llm_backup（备用生卡，local failover）与 chat
+    //（DeepSeek 双通道聊天反代通道，P2.4）——原「chat 非法」断言随之翻转
+    expect(() => ApiClient.instance.updateAiService('vector',
         baseUrl: 'x', model: 'y'), throwsArgumentError);
-    expect(() => ApiClient.instance.testAiService('vector',
+    expect(() => ApiClient.instance.testAiService('dialog',
         baseUrl: 'x', model: 'y'), throwsArgumentError);
   });
 
