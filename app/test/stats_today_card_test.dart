@@ -227,7 +227,7 @@ void main() {
         child: MaterialApp.router(routerConfig: _testRouter()),
       ),
     );
-    // 今日卡进度条是常驻粒子动画（不可 pumpAndSettle），用固定 pump 等拉取收口。
+    // 今日卡进度条是常驻雾面/扫光动画（不可 pumpAndSettle），用固定 pump 等拉取收口。
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
     addTearDown(() async {

@@ -563,21 +563,35 @@ class _TodayCard extends StatelessWidget {
   }
 }
 
-/// 今日卡专用动态进度条：类彩虹色「粒子光线」沿已填充段持续流动。
+/// 今日卡专用动态进度条（2026-10-12 视觉返工）：
+///   未开始（p=0） 整体灰面 + 两条灰白雾带极缓慢横移（20s 一轮）；
+///   进行中（p>0） 彩虹渐变底 + 一条软边高光带缓慢扫过已填充段。
 ///
-/// 效果强度与进度**反向**挂钩——进度越低越急切剧烈（督促开工），接近终点
-/// 越平缓舒缓（从容收尾）：
-///   粒子数量     = lerp(14, 4, p)     颗
-///   粒子大小     = lerp(3.5, 1.5, p)  倍条高
-///   流速         = lerp(0.55, 0.18, p) 周期/秒
-///   抖动幅度     = lerp(0.42, 0.12, p) ×条高
-/// 进度为零时不出粒子，但在轨道上呈现可辨识的空槽形态（内凹描边 + 微呼吸
-/// 的斑马纹理），一眼可辨「这是进度条」，不会被误读为灰色分隔线。
+/// 返工缘由（真机反馈）：旧版「粒子光线」在低进度时粒子最多/抖动最大
+/// （反向挂钩 14 颗、1.2s 一轮），小白点高频闪烁 = 刺眼；空槽的斑马纹
+/// 又被读成「一串灰色椭圆颗粒」，不像一条空进度条。
 ///
-/// 实现注记：单个 AnimationController 驱动全部动画，CustomPainter 每帧重绘
-/// （粒子仅 4~14 颗 + 斑马线相位，无 saveLayer/shader 编译，开销可控）。
+/// 参考实现：GitHub hnvn/flutter_shimmer（BSD-3，1.9k★）——用「一条宽软边
+/// 渐变带整体平移」代替离散粒子/闪烁：色标固定、移动边缘柔和，移动边缘对
+/// 动效感知的增益远高于同亮度的静态柔光，且没有颗粒感。本组件沿用该手法
+/// （单 Controller + 平移 shader 的 CustomPainter，不新增依赖），但把周期
+/// 放到 shimmer 默认 1.5s 的 2~3 倍，符合本页克制动效口径。
+///
+/// 动效参数（数值锚点，真机复查可微调）：
+///   填充扫光周期 = lerp(3000, 4600, easeOut(p)) ms —— 保留「低进度略急切」
+///                  的旧语义，但整体已比旧版慢 2.5 倍以上；
+///   扫光带宽     = max(填充宽 × 0.55, 14) px，峰值白 0.28（低透明度）；
+///   雾面周期     = 20s（极缓慢），两条雾带相位错开 0.5、宽度 1.3× / 0.85×、
+///                  峰值白 0.12 / 0.08 —— 整体仍是灰面，只有极缓的明暗流动。
+///
+/// 实现注记：两个 AnimationController（雾带 20s / 扫光 3.0~4.6s）经
+/// Listenable.merge 合成一路驱动，CustomPainter 每帧重绘（空态 2 个 shader、
+/// 填充态 2 个 shader + 1 次 clip；无 saveLayer、无 MaskFilter 模糊，开销可控）。
 class _RainbowProgressBar extends StatefulWidget {
   const _RainbowProgressBar({required this.value, required this.trackColor});
+
+  /// 空态雾带一轮周期：20s（极缓慢；动效数值锚点，真机复查可微调）。
+  static const Duration fogPeriod = Duration(seconds: 20);
 
   /// 进度 0..1；null 或超界一律按 0 处理（与原 LinearProgressIndicator 语义对齐）。
   final double value;
@@ -588,14 +602,27 @@ class _RainbowProgressBar extends StatefulWidget {
 }
 
 class _RainbowProgressBarState extends State<_RainbowProgressBar>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
+    with TickerProviderStateMixin {
+  /// 空态雾带控制器：固定 20s 一轮，与进度无关（纯氛围，极缓慢）。
+  late final AnimationController _fog;
+
+  /// 填充扫光控制器：周期随进度 3.0s~4.6s（见 _cycleFor）。
+  late final AnimationController _sweep;
+
+  /// 两个控制器合并为单一 Listenable（late 惰性求值 → 只建一次，
+  /// 不逐帧新建 merge 对象）。
+  late final Listenable _ticks = Listenable.merge([_fog, _sweep]);
+
   double? _lastP;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
+    _fog = AnimationController(
+      vsync: this,
+      duration: _RainbowProgressBar.fogPeriod,
+    )..repeat();
+    _sweep = AnimationController(
       vsync: this,
       duration: _cycleFor(widget.value.clamp(0.0, 1.0)),
     )..repeat();
@@ -603,25 +630,29 @@ class _RainbowProgressBarState extends State<_RainbowProgressBar>
 
   @override
   void dispose() {
-    _controller.dispose();
+    _fog.dispose();
+    _sweep.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     // 无障碍/测试静帧（MediaQuery.disableAnimations，如 course_flow_ui_test
-    // 的 stillFrame 包装）：粒子光线静止在初始相位，不出动态。
+    // 的 stillFrame 包装）：动画钉在初始相位——空态是静态灰面（雾带一在
+    // 条外、雾带二居中成柔光），填充态是静态彩虹渐变，均不出动态。
     final still = MediaQuery.disableAnimationsOf(context);
-    if (still && _controller.isAnimating) _controller.stop();
-    if (!still && !_controller.isAnimating) _controller.repeat();
+    for (final c in [_fog, _sweep]) {
+      if (still && c.isAnimating) c.stop();
+      if (!still && !c.isAnimating) c.repeat();
+    }
     return AnimatedBuilder(
-      animation: _controller,
+      animation: _ticks,
       builder: (context, _) {
-        // 进度变化（评分后刷新）时仅调整流速，不重置动画相位。
+        // 进度变化（评分后刷新）时仅调整扫光流速，不重置动画相位。
         final p = widget.value.clamp(0.0, 1.0);
         if (_lastP != p) {
           _lastP = p;
-          _controller.duration = _cycleFor(p);
+          _sweep.duration = _cycleFor(p);
         }
         return ClipRRect(
           borderRadius: BorderRadius.circular(6),
@@ -632,7 +663,8 @@ class _RainbowProgressBarState extends State<_RainbowProgressBar>
               painter: _RainbowProgressPainter(
                 progress: p,
                 trackColor: widget.trackColor,
-                phase: still ? 0.0 : _controller.value,
+                fogPhase: still ? 0.0 : _fog.value,
+                sweepPhase: still ? 0.0 : _sweep.value,
               ),
             ),
           ),
@@ -641,9 +673,11 @@ class _RainbowProgressBarState extends State<_RainbowProgressBar>
     );
   }
 
-  /// 流动周期随进度反向插值：p=0 → 1.2s（急切），p=1 → 4.0s（舒缓）。
+  /// 扫光周期随进度插值：p=0 → 3.0s，p=1 → 4.6s（都远慢于旧版 1.2s 的
+  /// 粒子急流，保留「低进度略急切」的旧语义但不刺眼）。变化时只改
+  /// duration、不重置相位（评分刷新后不闪跳）。
   Duration _cycleFor(double p) => Duration(
-    milliseconds: lerpDouble(1200, 4000, Curves.easeOut.transform(p))!.round(),
+    milliseconds: lerpDouble(3000, 4600, Curves.easeOut.transform(p))!.round(),
   );
 }
 
@@ -651,12 +685,18 @@ class _RainbowProgressPainter extends CustomPainter {
   _RainbowProgressPainter({
     required this.progress,
     required this.trackColor,
-    required this.phase,
+    required this.fogPhase,
+    required this.sweepPhase,
   });
 
   final double progress;
   final Color trackColor;
-  final double phase;
+
+  /// 空态雾带相位（0..1，20s 一轮，与进度无关）。
+  final double fogPhase;
+
+  /// 填充段扫光相位（0..1，3.0~4.6s 一轮，随进度微调）。
+  final double sweepPhase;
 
   // 类彩虹色谱：沿条长循环取色，红→橙→黄→绿→蓝→紫（HSL 色相环）。
   static Color _rainbow(double t) {
@@ -667,21 +707,26 @@ class _RainbowProgressPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     const barRadius = Radius.circular(6);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(Offset.zero & size, barRadius),
-      Paint()..color = trackColor,
-    );
+    final trackRRect = RRect.fromRectAndRadius(Offset.zero & size, barRadius);
+    // 空态底：不用 trackColor（浅色主题里偏白，会被读成「透明/缺口」），
+    // 统一压成去饱和的中性灰面——对应「整体呈灰色」。
+    final trackPaint = Paint()
+      ..color = progress <= 0
+          ? Color.alphaBlend(Colors.black.withValues(alpha: 0.10), trackColor)
+          : trackColor;
+    canvas.drawRRect(trackRRect, trackPaint);
 
     final w = size.width;
     final h = size.height;
     final filledW = w * progress;
 
     if (progress <= 0) {
-      _paintEmptySlot(canvas, size);
+      _paintFog(canvas, size);
       return;
     }
 
-    // 已填充段：彩虹渐变底 + 沿途流动的粒子光线。
+    // 已填充段：彩虹渐变底 + 一条软边高光带缓慢扫过（shimmer 手法）。
+    canvas.save();
     canvas.clipRRect(
       RRect.fromRectAndRadius(Offset.zero & Size(filledW, h), barRadius),
     );
@@ -699,63 +744,77 @@ class _RainbowProgressPainter extends CustomPainter {
         ],
       ).createShader(fillRect);
     canvas.drawRect(fillRect, gradient);
-
-    // 粒子光线：数量/大小/速度/抖动随进度反向挂钩（低进度急切剧烈）。
-    final count = lerpDouble(14, 4, progress)!.round();
-    final radiusBase = lerpDouble(3.5, 1.5, progress)! * h / 2;
-    final jitter = lerpDouble(0.42, 0.12, progress)! * h;
-    for (var i = 0; i < count; i++) {
-      final seed = i / count;
-      final t = (phase + seed) % 1;
-      final x = t * (w + radiusBase * 4) - radiusBase * 2;
-      // 纵向正弦抖动：低进度高频大幅（急切），接近终点趋于平缓。
-      final sway =
-          math.sin((t * math.pi * 2 + seed * math.pi)) * jitter *
-          ((i.isOdd) ? -1 : 1);
-      final y = h / 2 + sway;
-      final color = _rainbow(t * 2 + seed);
-      final glow = Paint()
-        ..color = color.withValues(alpha: 0.35)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
-      canvas.drawCircle(Offset(x, y), radiusBase * 1.8, glow);
-      canvas.drawCircle(
-        Offset(x, y),
-        radiusBase,
-        Paint()..color = Colors.white.withValues(alpha: 0.9),
-      );
-    }
+    _paintSweep(canvas, filledW, h);
+    canvas.restore();
   }
 
-  /// 零进度空槽：轨道上叠加微呼吸明暗斑马纹 + 内描边，可辨「进度条空态」。
-  void _paintEmptySlot(Canvas canvas, Size size) {
-    final breathe = 0.5 + 0.5 * (0.5 + 0.5 * math.sin(phase * 2 * math.pi));
-    final stripe = Paint()..color = Colors.black.withValues(alpha: 0.10 + 0.08 * breathe);
-    const stripeW = 6.0;
-    for (double x = -stripeW; x < size.width + stripeW; x += stripeW * 2) {
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(x, 1.5, stripeW, size.height - 3),
-          const Radius.circular(3),
-        ),
-        stripe,
-      );
-    }
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(0.75, 0.75, size.width - 1.5, size.height - 1.5),
-        const Radius.circular(5),
-      ),
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.5
-        ..color = Colors.black.withValues(alpha: 0.18),
+  /// 填充段扫光（参考 hnvn/flutter_shimmer：平移一条软边渐变带，不用粒子）：
+  /// 带宽 = max(填充宽 × 0.55, 14)，透明 → 峰值白 0.28 → 透明；
+  /// 从条左外平移到条右外（行程 = 填充宽 + 2×带宽，两端带体完全在段外，
+  /// 循环回卷无跳变）。带宽足够大 → 段上任何时刻都有柔和的明暗层次，
+  /// 移动边缘柔和，低进度时也不再是「一堆闪烁小白点」。
+  void _paintSweep(Canvas canvas, double filledW, double h) {
+    final band = math.max(filledW * 0.55, 14.0);
+    final cx = -band + sweepPhase * (filledW + band * 2);
+    final rect = Rect.fromLTWH(cx - band / 2, 0, band, h);
+    final paint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          Colors.white.withValues(alpha: 0.0),
+          Colors.white.withValues(alpha: 0.16),
+          Colors.white.withValues(alpha: 0.28),
+          Colors.white.withValues(alpha: 0.16),
+          Colors.white.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.3, 0.5, 0.7, 1.0],
+      ).createShader(rect);
+    canvas.drawRect(rect, paint);
+  }
+
+  /// 零进度雾面：整体灰底之上叠两条极宽的灰白雾带，极缓慢横移
+  /// （20s 一轮；两条相位错开 0.5、宽度 1.3× / 0.85×，形成纵深层次）。
+  /// 峰值白仅 0.12 / 0.08 —— 观感仍是「整体灰」，只有极缓的明暗流动；
+  /// 相位取模实现无缝循环（phase=0 时两条带体均在条外，静帧零残留）。
+  void _paintFog(Canvas canvas, Size size) {
+    _fogBand(canvas, size, phase: fogPhase, scale: 1.3, alpha: 0.12);
+    _fogBand(
+      canvas,
+      size,
+      phase: (fogPhase + 0.5) % 1.0,
+      scale: 0.85,
+      alpha: 0.08,
     );
+  }
+
+  /// 单条雾带：带宽 = 条宽 × scale（>1 保证条上始终有带体覆盖），
+  /// 两端透明、中央峰值 alpha，从条左外平移到条右外。
+  void _fogBand(
+    Canvas canvas,
+    Size size, {
+    required double phase,
+    required double scale,
+    required double alpha,
+  }) {
+    final band = size.width * scale;
+    final cx = -band + (phase % 1.0) * (size.width + band * 2);
+    final rect = Rect.fromLTWH(cx - band / 2, 0, band, size.height);
+    final paint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          Colors.white.withValues(alpha: 0.0),
+          Colors.white.withValues(alpha: alpha),
+          Colors.white.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.5, 1.0],
+      ).createShader(rect);
+    canvas.drawRect(rect, paint);
   }
 
   @override
   bool shouldRepaint(_RainbowProgressPainter oldDelegate) =>
       oldDelegate.progress != progress ||
-      oldDelegate.phase != phase ||
+      oldDelegate.fogPhase != fogPhase ||
+      oldDelegate.sweepPhase != sweepPhase ||
       oldDelegate.trackColor != trackColor;
 }
 

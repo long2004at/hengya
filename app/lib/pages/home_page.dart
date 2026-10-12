@@ -26,10 +26,14 @@
 // 合计 ≤ 0.15 + RepaintBoundary 隔离重绘 + disableAnimations → 静止一帧。
 // #14（P3，2026-09-07 真机反馈「蓝屏观感仍近静态」）：在海浪①之上叠加
 // 「shimmer 扫光」②（HeroShimmer，widgets/hero_shimmer.dart）——低透明度
-// 白色高光带 6s 一轮沿对角缓慢扫过 Hero（峰值 alpha 0.08，移动边缘对动效
+// 白色高光带 6s 一轮缓慢扫过 Hero（峰值 alpha 0.08，移动边缘对动效
 // 感知的增益远高于静态柔光）；仍守「装饰层垫底 + IgnorePointer +
 // RepaintBoundary + disableAnimations 光带出屏零残留」口径。动效参数待
 // 真机复查微调。
+// 2026-10-12 返工（真机反馈「每次都沿同一方向直直扫过、单调」）：扫光②
+// 由固定对角直线改为**柔和波浪光带**，每轮方向偏转/反向与峰度/波长/相位
+// 在受控区间内重新摇定（见 ShimmerSweepPainter 的 maxAngleJitter /
+// ampScaleRange / wavelengthScaleRange）；海浪①未动。
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -366,8 +370,9 @@ class _HeroHeaderState extends State<_HeroHeader> {
               child: AuroraAmbient(key: ValueKey('home-aurora-ambient')),
             ),
             // #14 扫光层（②）：叠于海浪①之上、信息层之下（同垫底口径）——
-            // 低透明度白色高光带缓慢扫过蓝屏（单带 6s 一轮，参数与「动效
-            // 参数待真机复查微调」注释详见 widgets/hero_shimmer.dart）
+            // 低透明度白色**波浪**高光带缓慢扫过蓝屏（单带 6s 一轮，每轮
+            // 方向/波形在受控区间内重摇；参数与「动效参数待真机复查微调」
+            // 注释详见 widgets/hero_shimmer.dart）
             const Positioned.fill(
               child: HeroShimmer(key: ValueKey('home-hero-shimmer')),
             ),
