@@ -35,15 +35,18 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart' show md5;
 import 'package:shared/hengya_shared.dart';
 import 'package:sqlite3/sqlite3.dart' show OpenMode, sqlite3;
 
 import '../api/api_client.dart';
 import 'ai_key_vault.dart';
 import 'card_dedup.dart' show dupThresholdOf, kDupThresholdSettingKey;
+import 'chat/chat_transport.dart' show kChatUa;
 import 'corpus/extract_all.dart' show CorpusEmbedMode, loadManifest;
 import 'corpus/exam_topics.dart';
 import 'corpus/outline_docx.dart' show kMedSubjectCode, kOutlineUploadCode;
+import 'corpus/py_compat.dart' show md5File;
 import 'corpus/progress_db.dart'
     show
         initFromTocSidecar,
@@ -443,6 +446,17 @@ class LocalBackend {
       for (final svc in kAiKeyServices) {
         _aiKeys[svc] = await AiKeyVault.instance.read(svc);
       }
+      // P3.2 预设档案 key 预热：vault svc 动态为 `preset.<id>`（不在
+      // kAiKeyServices 常量表），按 settings 表现有档案逐一读入缓存——
+      // 运行期经 aiKeyOf('preset.<id>') 同步取用（聊天编排/拆卡组装）。
+      final ids = <String>{};
+      for (final k in db.settingKeysWithPrefix('preset.')) {
+        final m = RegExp(r'^preset\.([A-Za-z0-9]+)\.').firstMatch(k);
+        if (m != null) ids.add(m.group(1)!);
+      }
+      for (final id in ids) {
+        _aiKeys['preset.$id'] = await AiKeyVault.instance.read('preset.$id');
+      }
     } catch (_) {
       _aiKeysInit = null; // 失败不缓存失败态：下次调用重试
       rethrow;
@@ -556,14 +570,25 @@ class LocalBackend {
       };
     }
 
-    // /settings/ai（掩码态；四套：llm / llm_backup / embedding / reranker）
+    // /settings/ai（掩码态；五套：llm / llm_backup / embedding / reranker /
+    // chat——chat 即 DeepSeek 双通道聊天的反代通道，P2.4）
     if (path == '/settings/ai') {
       return {
         'llm': _serviceView(db, 'llm'),
         'llm_backup': _serviceView(db, 'llm_backup'),
         'embedding': _serviceView(db, 'embedding'),
         'reranker': _serviceView(db, 'reranker'),
+        'chat': _serviceView(db, 'chat'),
       };
+    }
+
+    // /settings/presets（P3.2 LLM 预设档案列表，聊天与拆卡共用档案池）：
+    // 每套档案 = settings 表一组 `preset.<id>.{name,baseUrl,model,temperature}`
+    // 键；key 不在 settings——引用 vault svc `preset.<id>`，此处只回掩码态。
+    // 另附当前生效选择 chat.presetId / llm.presetId（空 = 未选档案，走传统
+    // chat.* / llm.* 直读）。
+    if (path == '/settings/presets') {
+      return _presetsView(db);
     }
 
     // /corpus/status（对照 routes/corpus.dart _status：corpus.db 只读 + 优雅降级；
@@ -1186,9 +1211,10 @@ class LocalBackend {
     }
 
     // /settings/ai/<svc>/test（真外呼：llm GET /models；embedding POST
-    // /embeddings；reranker POST <完整端点>，外呼可注入 mock）
+    // /embeddings；reranker POST <完整端点>；chat POST /chat/completions
+    // 非流式最小对话。外呼可注入 mock）
     final aiTest = RegExp(
-      r'^/settings/ai/(llm_backup|llm|embedding|reranker)/test$',
+      r'^/settings/ai/(llm_backup|llm|embedding|reranker|chat)/test$',
     ).firstMatch(path);
     if (aiTest != null) {
       return _testAiService(aiTest.group(1)!, m);
@@ -1197,6 +1223,26 @@ class LocalBackend {
     // /pipeline/trigger（标志 + pipelineKick 后台消费；契约见 _triggerPipeline）
     if (path == '/pipeline/trigger') {
       return _triggerPipeline();
+    }
+
+    // /settings/presets/<id>/use?scope=chat|llm（P3.2 一键切换：写
+    // chat.presetId / llm.presetId；空引用仍走传统直读，档案须存在。
+    // path 可能带 query（scope=…），正则对 Uri.path 匹配）
+    final useUri = Uri.parse(path);
+    final presetUse = RegExp(
+      r'^/settings/presets/([A-Za-z0-9]+)/use$',
+    ).firstMatch(useUri.path);
+    if (presetUse != null) {
+      final id = presetUse.group(1)!;
+      final scope = useUri.queryParameters['scope'] ?? '';
+      if (scope != 'chat' && scope != 'llm') {
+        throw ApiException(400, 'scope 须为 chat 或 llm');
+      }
+      if (db.settingGet('preset.$id.name') == null) {
+        throw ApiException(404, '预设档案 $id 不存在');
+      }
+      db.settingSet('$scope.presetId', id);
+      return {'ok': true, 'scope': scope, 'presetId': id};
     }
 
     // /pipeline/weekly（手动真题周扫 kickoff；weekly-only 单轮后台执行）
@@ -1219,6 +1265,43 @@ class LocalBackend {
     }
     if (path == '/corpus/build') {
       return _triggerCorpusBuild(db, m);
+    }
+
+    throw ApiException(404, '本地模式不支持: $path');
+  }
+
+  // ---------------- DELETE ----------------
+
+  /// `DELETE /settings/presets/<id>`（P3.2 删预设档案）：连带清 vault key 与
+  /// 内存缓存；若被 chat.presetId / llm.presetId 引用，先清引用（引用方回落
+  /// 传统直读）。
+  Future<Map<String, dynamic>> delete(String path) async {
+    final db = await _routeDb;
+    _ensureDataAvailable();
+    path = _normalize(path);
+
+    final presetDelete = RegExp(r'^/settings/presets/([A-Za-z0-9]+)$')
+        .firstMatch(Uri.parse(path).path);
+    if (presetDelete != null) {
+      final id = presetDelete.group(1)!;
+      if (db.settingGet('preset.$id.name') == null) {
+        throw ApiException(404, '预设档案 $id 不存在');
+      }
+      for (final k in db.settingKeysWithPrefix('preset.$id.')) {
+        db.settingDelete(k);
+      }
+      _aiKeys.remove('preset.$id');
+      unawaited(
+        AiKeyVault.instance.delete('preset.$id').catchError((Object _) {}),
+      );
+      var clearedRefs = <String>[];
+      for (final scope in const ['chat', 'llm']) {
+        if (db.settingGet('$scope.presetId') == id) {
+          db.settingDelete('$scope.presetId');
+          clearedRefs.add(scope);
+        }
+      }
+      return {'ok': true, 'id': id, if (clearedRefs.isNotEmpty) 'clearedRefs': clearedRefs};
     }
 
     throw ApiException(404, '本地模式不支持: $path');
@@ -1264,9 +1347,10 @@ class LocalBackend {
 
     // /settings/ai/<svc>（baseUrl 必须 https://、model 非空；apiKey 空=保持；
     // 键名 <svc>.baseUrl / <svc>.model（settings 表），<svc>.apiKey 只留空
-    // 键位——key 本体存系统安全存储 AiKeyVault，svc ∈ llm|embedding|reranker）
+    // 键位——key 本体存系统安全存储 AiKeyVault，svc ∈ llm|embedding|reranker|
+    // chat（chat 即 DeepSeek 双通道聊天反代通道，P2.4））
     final aiPut = RegExp(
-      r'^/settings/ai/(llm_backup|llm|embedding|reranker)$',
+      r'^/settings/ai/(llm_backup|llm|embedding|reranker|chat)$',
     ).firstMatch(path);
     if (aiPut != null) {
       final svc = aiPut.group(1)!;
@@ -1296,6 +1380,59 @@ class LocalBackend {
       }
       return {
         'ok': true,
+        'keySet': effectiveKey.isNotEmpty,
+        'keyMasked': effectiveKey.isEmpty ? '' : maskApiKey(effectiveKey),
+      };
+    }
+
+    // /settings/presets/<id>（P3.2 建/改 LLM 预设档案）：name/baseUrl/model
+    // 必填、baseUrl https://、温度可选 0-2；apiKey 空 = 保持原值，非空 =
+    // 写 vault svc `preset.<id>`（与 settings/ai PUT 同契约）。键位：
+    // preset.<id>.{name,baseUrl,model,temperature}。
+    final presetPut = RegExp(r'^/settings/presets/([A-Za-z0-9]+)$')
+        .firstMatch(Uri.parse(path).path);
+    if (presetPut != null) {
+      final id = presetPut.group(1)!;
+      final name = _str(m['name']).trim();
+      final baseUrl = _str(m['baseUrl']).trim();
+      final model = _str(m['model']).trim();
+      final apiKey = _str(m['apiKey']); // 空/缺省 = 保持原 key
+      final temperature = m['temperature'];
+      if (name.isEmpty) throw ApiException(400, 'name 不能为空');
+      if (!baseUrl.startsWith('https://')) {
+        throw ApiException(400, 'baseUrl 必须以 https:// 开头');
+      }
+      if (model.isEmpty) throw ApiException(400, 'model 不能为空');
+      double? temp;
+      if (temperature != null) {
+        temp = temperature is num
+            ? temperature.toDouble()
+            : double.tryParse(_str(temperature));
+        if (temp == null || temp < 0 || temp > 2) {
+          throw ApiException(400, 'temperature 须在 0 ~ 2 之间');
+        }
+      }
+      await initAiKeys();
+      _ensureDataAvailable();
+      final oldKey = aiKeyOf('preset.$id');
+      final effectiveKey = apiKey.isEmpty ? oldKey : apiKey;
+      db.settingSet('preset.$id.name', name);
+      db.settingSet('preset.$id.baseUrl', baseUrl);
+      db.settingSet('preset.$id.model', model);
+      if (temp != null) {
+        db.settingSet('preset.$id.temperature', _trimDouble(temp));
+      }
+      if (apiKey.isNotEmpty) {
+        _aiKeys['preset.$id'] = apiKey; // 同步缓存（掩码/组装立即可见）
+        unawaited(
+          AiKeyVault.instance
+              .save('preset.$id', apiKey)
+              .catchError((Object _) {}),
+        );
+      }
+      return {
+        'ok': true,
+        'id': id,
         'keySet': effectiveKey.isNotEmpty,
         'keyMasked': effectiveKey.isEmpty ? '' : maskApiKey(effectiveKey),
       };
@@ -1456,6 +1593,12 @@ class LocalBackend {
         destDir = '$_corpusDir/incoming/$kOutlineUploadCode-outline';
       } else {
         destDir = '$_corpusDir/incoming/$subject';
+      }
+      // 只比对同一目标树。已建库原件优先使用有效 manifest 哈希，
+      // 未建库或已变化的原件按需分块计算；不扫描其他科目的文件。
+      final duplicate = _findSameContentInTree(Directory(destDir), bytes);
+      if (duplicate != null) {
+        throw ApiException(409, '该文件与语料库已有原件内容完全相同，已跳过：$duplicate');
       }
       final dest = Directory(destDir)..createSync(recursive: true);
       File('${dest.path}/$clean').writeAsBytesSync(bytes, flush: true);
@@ -1839,6 +1982,37 @@ class LocalBackend {
 
   // ---- incoming 待处理清单（manifest 比对） ----
 
+  /// 上传前只检查目标树中的原件；返回相对 incoming 的路径供用户定位。
+  /// 清单条目仅在文件 size/mtime 未变化时可信，覆盖后的旧 md5 不能误判。
+  String? _findSameContentInTree(Directory dir, List<int> bytes) {
+    if (!dir.existsSync()) return null;
+    final root = Directory('$_corpusDir/incoming');
+    final files = (loadManifest('$_corpusDir/extract_manifest.json')['files'] as Map)
+        .cast<String, Object?>();
+    final digest = md5.convert(bytes).toString();
+    for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+      if (entity is! File) continue;
+      try {
+        final size = entity.lengthSync();
+        if (size != bytes.length) continue;
+        final rel = _relPosixOf(entity.path, root.path);
+        final prev = files[rel];
+        final known = prev is Map &&
+                prev['size'] == size &&
+                prev['mtime'] ==
+                    entity.lastModifiedSync().millisecondsSinceEpoch ~/ 1000 &&
+                prev['md5'] is String &&
+                (prev['md5'] as String).isNotEmpty
+            ? prev['md5'] as String
+            : null;
+        if ((known ?? md5File(entity.path)) == digest) return rel;
+      } on FileSystemException {
+        // 文件正在删除或被占用时不拦截上传，让原有落盘逻辑处理 I/O 异常。
+      }
+    }
+    return null;
+  }
+
   /// incoming 待处理文件清单（过滤口径 = 建库树扫描：.pptx/.pdf/.docx，
   /// 第一层子目录 = 科目短码；相对路径 posix 形态与建库 manifest 键一致）。
   /// 待处理 = manifest 未覆盖 或 size/mtime 与 manifest 条目不符（下一轮
@@ -1935,6 +2109,57 @@ class LocalBackend {
     };
   }
 
+  // ---------------- LLM 预设档案（P3.2，聊天与拆卡共用） ----------------
+
+  /// /settings/presets GET 视图：档案池（settings 表 `preset.<id>.*` 键组，
+  /// 排序按名称）+ 当前生效选择 chat.presetId / llm.presetId。key 只回掩码。
+  Map<String, dynamic> _presetsView(Db db) {
+    final ids = <String>{};
+    for (final k in db.settingKeysWithPrefix('preset.')) {
+      final m = RegExp(r'^preset\.([A-Za-z0-9]+)\.').firstMatch(k);
+      if (m != null) ids.add(m.group(1)!);
+    }
+    final presets = [
+      for (final id in ids.toList()..sort((a, b) {
+        final na = db.settingGet('preset.$a.name') ?? '';
+        final nb = db.settingGet('preset.$b.name') ?? '';
+        return na.compareTo(nb);
+      }))
+        {
+          'id': id,
+          'name': db.settingGet('preset.$id.name') ?? '',
+          'baseUrl': db.settingGet('preset.$id.baseUrl') ?? '',
+          'model': db.settingGet('preset.$id.model') ?? '',
+          'temperature': db.settingGet('preset.$id.temperature') ?? '',
+          ..._presetKeyView(id),
+        },
+    ];
+    return {
+      'presets': presets,
+      'chatPresetId': db.settingGet('chat.presetId') ?? '',
+      'llmPresetId': db.settingGet('llm.presetId') ?? '',
+    };
+  }
+
+  /// 单档案 key 掩码态（vault svc `preset.<id>`；encrypted 恒 true）。
+  Map<String, dynamic> _presetKeyView(String id) {
+    final key = aiKeyOf('preset.$id');
+    return {
+      'keySet': key.isNotEmpty,
+      'keyMasked': key.isEmpty ? '' : maskApiKey(key),
+      'encrypted': true,
+    };
+  }
+
+  /// double → 无尾零字符串（'0.3' / '1.5' / '2'），存 settings 表文本键。
+  static String _trimDouble(double v) {
+    var s = v.toStringAsFixed(4);
+    if (s.contains('.')) {
+      s = s.replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
+    }
+    return s;
+  }
+
   /// 测试连接（对照 routes/settings.dart：llm GET {baseUrl}/models（Bearer），
   /// HTTP 200 即 ok；embedding POST {baseUrl}/embeddings，200 且含向量数组
   /// 才算 ok；reranker POST `<baseUrl>`（完整端点，SiliconFlow /rerank 契约），
@@ -1993,6 +2218,54 @@ class LocalBackend {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 10);
       try {
+        if (svc == 'chat') {
+          // chat（P2.4）：POST {baseUrl}/chat/completions 非流式最小对话——
+          // model 任意、messages 一条 ping、stream:false；200 且 choices 非空
+          // 才算真连通（网关 200 空体是故障不是连通）。
+          final rq = await client
+              .postUrl(Uri.parse('$baseUrl/chat/completions'))
+              .timeout(const Duration(seconds: 10));
+          if (apiKey.isNotEmpty) {
+            rq.headers.set('Authorization', 'Bearer $apiKey');
+          }
+          rq.headers.set('User-Agent', kChatUa);
+          rq.headers.contentType = ContentType.json;
+          rq.write(
+            jsonEncode({
+              'model': model.isEmpty ? 'v4.1flash' : model,
+              'messages': [
+                {'role': 'user', 'content': 'ping'},
+              ],
+              'stream': false,
+            }),
+          );
+          final rs = await rq.close().timeout(const Duration(seconds: 10));
+          final text = await rs.transform(utf8.decoder).join();
+          var ok = rs.statusCode == 200;
+          var message = ok ? '连接正常' : '上游返回 ${rs.statusCode}';
+          if (ok) {
+            try {
+              final decoded = jsonDecode(text);
+              final choices = decoded is Map ? decoded['choices'] : null;
+              if (choices is! List || choices.isEmpty) {
+                ok = false;
+                message = '上游响应异常（status ${rs.statusCode}）';
+              }
+            } catch (_) {
+              ok = false;
+              message = '上游响应异常（status ${rs.statusCode}）';
+            }
+          } else {
+            // 失败透传上游裸 message（与 reranker 同契，便于诊断 401/403）
+            message = _upstreamMessage(text) ?? '上游返回 ${rs.statusCode}';
+          }
+          return {
+            'ok': ok,
+            'status': rs.statusCode,
+            'latencyMs': DateTime.now().difference(t0).inMilliseconds,
+            'message': message,
+          };
+        }
         if (svc == 'llm' || svc == 'llm_backup') {
           final rq = await client
               .getUrl(Uri.parse('$baseUrl/models'))

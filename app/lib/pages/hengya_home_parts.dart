@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../services/api/api_client.dart';
 import '../services/local/corpus/run_llm.dart' show llmListModels;
 import '../services/local/local_backend.dart';
+import '../services/local/chat/chat_transport.dart' show kChatDefaultBaseUrl, kChatDefaultModel;
 import '../widgets/top_toast.dart';
 
 /// embedding 卡默认预填（#1/#6②，2026-09-07）：对齐 reranker 卡做法——
@@ -153,6 +154,7 @@ class _AiServiceEditSheetState extends State<AiServiceEditSheet> {
         : switch (widget.service) {
             'reranker' => ApiClient.kRerankerDefaultUrl,
             'embedding' => kEmbeddingDefaultUrl,
+            'chat' => kChatDefaultBaseUrl,
             _ => '',
           },
   );
@@ -162,6 +164,7 @@ class _AiServiceEditSheetState extends State<AiServiceEditSheet> {
         : switch (widget.service) {
             'reranker' => ApiClient.kRerankerDefaultModel,
             'embedding' => kEmbeddingDefaultModel,
+            'chat' => kChatDefaultModel,
             _ => '',
           },
   );
@@ -318,6 +321,7 @@ class _AiServiceEditSheetState extends State<AiServiceEditSheet> {
       'llm' => '编辑生卡 LLM',
       'llm_backup' => '编辑备用生卡 LLM',
       'embedding' => '编辑向量模型',
+      'chat' => '编辑聊天服务',
       _ => '编辑重排序模型',
     };
     return Padding(

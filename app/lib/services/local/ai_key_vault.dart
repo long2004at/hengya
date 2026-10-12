@@ -26,8 +26,15 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'db.dart';
 
-/// 三套 AI 服务名（settings 键前缀 / vault 存储位统一口径）。
-const List<String> kAiKeyServices = ['llm', 'llm_backup', 'embedding', 'reranker'];
+/// AI 服务名（settings 键前缀 / vault 存储位统一口径）。'chat' = DeepSeek
+/// 双通道聊天（P2.4，反代通道 key；P3 双通道后 llm 直连 key 另议）。
+const List<String> kAiKeyServices = [
+  'llm',
+  'llm_backup',
+  'embedding',
+  'reranker',
+  'chat',
+];
 
 /// AI key 安全存储抽象。
 abstract class AiKeyVault {

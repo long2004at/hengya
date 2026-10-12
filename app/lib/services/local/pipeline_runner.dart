@@ -1669,6 +1669,65 @@ void pipelineCatchupWorkerEntry(IsolateWorkerBoot boot) {
   });
 }
 
+/// 主 isolate 读拆卡侧当前选定的档案 id（llm.presetId）：只读打开
+/// hengya.db 查一条 settings（WAL 下与主写连接共存安全）；库缺失/查询失败
+/// → null（走传统 llm.* 直读）。仅用于 _spawnWorker 决定要随请求下发的
+/// preset key，避免每次整池 key 都下发。
+String? _llmPresetIdOf(String dataDir) {
+  final dbFile = File('$dataDir/hengya.db');
+  if (!dbFile.existsSync()) return null;
+  dynamic cdb;
+  try {
+    cdb = sqlite3.open(dbFile.path, mode: OpenMode.readOnly);
+    final rows = cdb.select(
+      "SELECT value FROM settings WHERE key = 'llm.presetId'",
+    );
+    if (rows.isEmpty) return null;
+    final v = rows.first['value'] as String?;
+    return (v == null || v.isEmpty) ? null : v;
+  } catch (_) {
+    return null;
+  } finally {
+    (cdb as dynamic)?.dispose();
+  }
+}
+
+/// 拆卡 LLM 主通道配置解析（P3.2 预设档案接线）：`llm.presetId` 非空且档案
+/// 存在 → 档案 baseUrl/model/温度 + `preset.<id>` key（主 isolate 随请求下
+/// 发）；否则维持 llm.* 直读（默认行为零变化——生卡流水线默认档案不变）。
+///
+/// 公开（非 `_` 前缀）仅为可单测：worker 内消费，主 isolate 不直接调用；
+/// 无副作用（纯读 db + req.aiKeys），测试直接传入临时 Db 与 aiKeys 断言。
+LlmConfig resolveLlmCfg(Db db, PipelineCatchupRequest req) {
+  final presetId = db.settingGet('llm.presetId') ?? '';
+  if (presetId.isNotEmpty &&
+      db.settingGet('preset.$presetId.name') != null &&
+      req.aiKeys['preset.$presetId'] != null) {
+    final baseUrl = db.settingGet('preset.$presetId.baseUrl') ?? '';
+    final model = db.settingGet('preset.$presetId.model') ?? '';
+    final tempRaw = db.settingGet('preset.$presetId.temperature') ?? '';
+    final temperature = double.tryParse(tempRaw);
+    if (temperature != null) {
+      return LlmConfig(
+        baseUrl: baseUrl,
+        apiKey: req.aiKeys['preset.$presetId'] ?? '',
+        model: model,
+        temperature: temperature,
+      );
+    }
+    return LlmConfig(
+      baseUrl: baseUrl,
+      apiKey: req.aiKeys['preset.$presetId'] ?? '',
+      model: model,
+    );
+  }
+  return LlmConfig(
+    baseUrl: db.settingGet('llm.baseUrl') ?? '',
+    apiKey: req.aiKeys['llm'] ?? '',
+    model: db.settingGet('llm.model') ?? '',
+  );
+}
+
 /// worker 侧六步总编排执行（P1-3 迁移自 PipelineRunner._runOnce 主体；
 /// 装配链 assembleEmbedder/assembleRunSearch/llmChatFn 与主 isolate 直跑
 /// 完全同源——baseUrl/model 等非敏感 settings（llm.*/embedding.*）读自
@@ -1699,11 +1758,7 @@ Future<Map<String, Object?>> _runCatchupInWorker(
         embed: embed,
         embedModel: embedModel,
       );
-      final llmCfg = LlmConfig(
-        baseUrl: db.settingGet('llm.baseUrl') ?? '',
-        apiKey: req.aiKeys['llm'] ?? '',
-        model: db.settingGet('llm.model') ?? '',
-      );
+      final llmCfg = resolveLlmCfg(db, req);
       // 备用生卡 LLM（llm_backup.*，可选）：主连续失败 3 次切备用；
       // 备用也连续失败 3 次 → 熔断（本轮跳过、收件箱保留，次日自动再试）。
       final backupCfg = LlmConfig(
@@ -2166,6 +2221,10 @@ class PipelineRunner {
           'embedding': LocalBackend.instance.aiKeyOf('embedding'),
           'llm': LocalBackend.instance.aiKeyOf('llm'),
           'llm_backup': LocalBackend.instance.aiKeyOf('llm_backup'),
+          // P3.2：拆卡选定档案（llm.presetId）时其 vault key 随请求下发；
+          // worker 侧 _resolveLlmCfg 按需取用，未选档案则不读。
+          if (_llmPresetIdOf(dataDir) case final pid?)
+            'preset.$pid': LocalBackend.instance.aiKeyOf('preset.$pid'),
         },
         promptNotes: promptNotes,
         trigger: trigger,
